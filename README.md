@@ -346,9 +346,11 @@ cannot be combined with `--conversation`.
    base64-encodes `{algorithm, challenge, salt, answer, signature, target_path}`
    into the `x-ds-pow-response` header.
 4. `POST /api/v0/chat/completion` with the site headers, streaming the SSE
-   json-patch frames: the snapshot frame (`fragments[].type == "response"`)
-   plus append frames on `response/fragments/-1/content`; only response
-   fragment text is emitted. `message_id` (from `v.message_id` / `v.message.id`
+   json-patch frames: the snapshot frame (`fragments[].type == "response"`),
+   append/SET/BATCH patches on `response/fragments/-1/content`, and bare
+   pathless `{"v":...}` chunks (which can carry the reply's very first
+   characters) — all reconstructed in arrival order without trimming, so no
+   leading text is lost. `message_id` (from `v.message_id` / `v.message.id`
    or a patch path) becomes the next turn's `parent_message_id`.
 
 Credentials are sent as `authorization: Bearer <token>` plus the `ds_session_id`

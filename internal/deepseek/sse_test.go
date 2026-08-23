@@ -167,3 +167,80 @@ func TestSSECapturesSearchSources(t *testing.T) {
 		t.Errorf("sources after patch = %v", p.sources)
 	}
 }
+
+// TestSSEFirstChunkBeforeAnyPath: the reply's first characters arrive as
+// pathless {"v":...} chunks before any "p" frame or snapshot text; they must
+// not be dropped (this was the missing-initial-characters bug).
+func TestSSEFirstChunkBeforeAnyPath(t *testing.T) {
+	p := &patchParser{}
+	var all []string
+	for _, payload := range []string{
+		`{"v":"D"}`,
+		`{"v":"ựa"}`,
+		`{"p":"response/fragments/-1/content","o":"APPEND","v":" trên"}`,
+	} {
+		all = append(all, feed(t, p, payload)...)
+	}
+	want := []string{"D", "ựa", " trên"}
+	if !reflect.DeepEqual(all, want) {
+		t.Errorf("deltas = %q, want %q", all, want)
+	}
+}
+
+// TestSSEEmptySnapshotThenPathless: the snapshot's response fragment has no
+// pre-generated text; the first real chunk still arrives pathless and must
+// be kept.
+func TestSSEEmptySnapshotThenPathless(t *testing.T) {
+	p := &patchParser{}
+	all := feed(t, p, `{"v":{"response":{"fragments":[{"type":"response","content":""}],"message_id":1},"message_id":1}}`)
+	all = append(all, feed(t, p, `{"v":"Hi"}`)...)
+	if !reflect.DeepEqual(all, []string{"Hi"}) {
+		t.Errorf("deltas = %q, want [Hi]", all)
+	}
+}
+
+// TestSSESetAsInitial: a SET (not APPEND) can carry the initial text when
+// nothing was emitted yet.
+func TestSSESetAsInitial(t *testing.T) {
+	p := &patchParser{}
+	all := feed(t, p, `{"p":"response/fragments/-1/content","o":"SET","v":"Hi"}`)
+	all = append(all, feed(t, p, `{"p":"response/fragments/-1/content","o":"APPEND","v":"!"}`)...)
+	want := []string{"Hi", "!"}
+	if !reflect.DeepEqual(all, want) {
+		t.Errorf("deltas = %q, want %q", all, want)
+	}
+}
+
+// TestSSESetAfterEmitSkipped: a later SET replaces the whole content slot
+// and must not duplicate text already streamed.
+func TestSSESetAfterEmitSkipped(t *testing.T) {
+	p := &patchParser{}
+	all := feed(t, p, `{"v":{"response":{"fragments":[{"type":"response","content":"Hi"}],"message_id":1},"message_id":1}}`)
+	all = append(all, feed(t, p, `{"p":"response/fragments/-1/content","o":"SET","v":"Hi there"}`)...)
+	all = append(all, feed(t, p, `{"p":"response/fragments/-1/content","o":"APPEND","v":"!"}`)...)
+	want := []string{"Hi", "!"}
+	if !reflect.DeepEqual(all, want) {
+		t.Errorf("deltas = %q, want %q", all, want)
+	}
+}
+
+// TestSSEObjectFormV: pathless chunks may carry {"text":...}/{"content":...}.
+func TestSSEObjectFormV(t *testing.T) {
+	p := &patchParser{}
+	var all []string
+	all = append(all, feed(t, p, `{"v":{"text":"A"}}`)...)
+	all = append(all, feed(t, p, `{"v":{"content":"B"}}`)...)
+	if !reflect.DeepEqual(all, []string{"A", "B"}) {
+		t.Errorf("deltas = %q", all)
+	}
+}
+
+// TestSSEBatchContentPatch: BATCH frames nest {p, o, v} patches that can
+// carry content appends.
+func TestSSEBatchContentPatch(t *testing.T) {
+	p := &patchParser{}
+	all := feed(t, p, `{"p":"response","o":"BATCH","v":[{"p":"fragments/-1/content","o":"APPEND","v":"x"}]}`)
+	if !reflect.DeepEqual(all, []string{"x"}) {
+		t.Errorf("deltas = %q", all)
+	}
+}

@@ -26,6 +26,7 @@ type patchParser struct {
 	activePath  string
 	messageID   *int64
 	sawSnapshot bool
+	emittedAny  bool // any reply text emitted so far (gates SET-as-initial)
 	sources     []Source
 }
 
@@ -56,11 +57,14 @@ func (p *patchParser) Feed(payload []byte, emit func(string) error) error {
 						t, _ := fm["type"].(string)
 						switch {
 						case strings.EqualFold(t, "response"):
+							// The content path is live even when the snapshot
+							// text is empty: the first real chunk may arrive
+							// as a pathless {"v":...} before any "p" frame.
+							p.activePath = "response/fragments/-1/content"
 							content, _ := fm["content"].(string)
 							if content == "" {
 								continue
 							}
-							p.activePath = "response/fragments/-1/content"
 							// Only the first response fragment's content is
 							// pre-generated; later text arrives as appends.
 							if !p.sawSnapshot {
@@ -68,6 +72,7 @@ func (p *patchParser) Feed(payload []byte, emit func(string) error) error {
 								if err := emit(content); err != nil {
 									return err
 								}
+								p.emittedAny = true
 							}
 						case strings.EqualFold(t, "tool_search"):
 							p.collectSources(fm)
@@ -79,7 +84,7 @@ func (p *patchParser) Feed(payload []byte, emit func(string) error) error {
 		}
 	}
 
-	// Path-setting append frame.
+	// Path-setting frame (single patch, or BATCH of nested patches).
 	if path, ok := obj["p"].(string); ok {
 		p.activePath = path
 		if strings.HasSuffix(path, "message_id") {
@@ -87,24 +92,85 @@ func (p *patchParser) Feed(payload []byte, emit func(string) error) error {
 				p.messageID = id
 			}
 		}
-		// Search result lists can arrive as updates to .../results or
-		// .../references paths.
-		if strings.HasSuffix(path, "/results") || strings.HasSuffix(path, "/references") {
-			p.collectSources(v)
-		}
-		if o, _ := obj["o"].(string); o == "APPEND" {
-			if txt, ok := v.(string); ok && strings.HasSuffix(path, "content") {
-				return emit(txt)
+		op, _ := obj["o"].(string)
+		if op == "BATCH" {
+			if items, ok := v.([]any); ok {
+				for _, it := range items {
+					if m, ok := it.(map[string]any); ok {
+						pp, _ := m["p"].(string)
+						oo, _ := m["o"].(string)
+						if err := p.applyPatch(pp, m["v"], oo, emit); err != nil {
+							return err
+						}
+					}
+				}
 			}
+			return nil
 		}
-		return nil
+		return p.applyPatch(path, v, op, emit)
 	}
 
-	// Bare append to the current path.
-	if txt, ok := v.(string); ok && p.activePath != "" && strings.HasSuffix(p.activePath, "content") {
-		return emit(txt)
+	// Bare (pathless) chunk: per upstream behaviour these are visible-text
+	// candidates, and they may arrive before any path is active (this is
+	// what used to eat the reply's first characters).
+	return p.applyPathless(v, emit)
+}
+
+// applyPatch handles one content/results patch operation.
+func (p *patchParser) applyPatch(path string, v any, op string, emit func(string) error) error {
+	if strings.HasSuffix(path, "/results") || strings.HasSuffix(path, "/references") {
+		p.collectSources(v)
+	}
+	if !strings.HasSuffix(path, "content") {
+		return nil
+	}
+	switch op {
+	case "APPEND":
+		if txt, ok := textOf(v); ok {
+			return emit(txt)
+		}
+	case "SET":
+		// SET replaces the whole content slot; only treat it as the initial
+		// text, before anything has been emitted, to avoid duplicates.
+		if !p.emittedAny {
+			if txt, ok := textOf(v); ok {
+				if err := emit(txt); err != nil {
+					return err
+				}
+				p.emittedAny = true
+			}
+		}
 	}
 	return nil
+}
+
+// applyPathless emits a pathless chunk when the active path is empty or a
+// content path (status-path values are control signals, not text).
+func (p *patchParser) applyPathless(v any, emit func(string) error) error {
+	if p.activePath != "" && !strings.HasSuffix(p.activePath, "content") {
+		return nil
+	}
+	txt, ok := textOf(v)
+	if !ok {
+		return nil
+	}
+	return emit(txt)
+}
+
+// textOf extracts visible text from a chunk value: a plain string, or an
+// object carrying a "text"/"content" string field.
+func textOf(v any) (string, bool) {
+	switch t := v.(type) {
+	case string:
+		return t, true
+	case map[string]any:
+		for _, k := range []string{"text", "content"} {
+			if s, ok := t[k].(string); ok {
+				return s, true
+			}
+		}
+	}
+	return "", false
 }
 
 // collectSources appends citation sources found in a TOOL_SEARCH fragment or
