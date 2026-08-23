@@ -203,7 +203,9 @@ func TestSSEEmptySnapshotThenPathless(t *testing.T) {
 // nothing was emitted yet.
 func TestSSESetAsInitial(t *testing.T) {
 	p := &patchParser{}
-	all := feed(t, p, `{"p":"response/fragments/-1/content","o":"SET","v":"Hi"}`)
+	// A content SET always targets an existing (registered) fragment.
+	all := feed(t, p, `{"v":{"response":{"fragments":[{"type":"response","content":""}],"message_id":1},"message_id":1}}`)
+	all = append(all, feed(t, p, `{"p":"response/fragments/-1/content","o":"SET","v":"Hi"}`)...)
 	all = append(all, feed(t, p, `{"p":"response/fragments/-1/content","o":"APPEND","v":"!"}`)...)
 	want := []string{"Hi", "!"}
 	if !reflect.DeepEqual(all, want) {
@@ -267,7 +269,8 @@ func TestSSEMultipleFramesPerEvent(t *testing.T) {
 // field at all; it must still be treated as the initial text.
 func TestSSEOpLessFirstContentFrame(t *testing.T) {
 	p := &patchParser{}
-	all := feed(t, p, `{"p":"response/fragments/-1/content","v":"As "}`)
+	all := feed(t, p, `{"v":{"response":{"fragments":[{"type":"response","content":""}],"message_id":1},"message_id":1}}`)
+	all = append(all, feed(t, p, `{"p":"response/fragments/-1/content","v":"As "}`)...)
 	all = append(all, feed(t, p, `{"p":"response/fragments/-1/content","o":"APPEND","v":"of"}`)...)
 	if !reflect.DeepEqual(all, []string{"As ", "of"}) {
 		t.Errorf("deltas = %q", all)
@@ -295,5 +298,65 @@ func TestSSEContainerAppendResponseFragment(t *testing.T) {
 	feed(t, p2, `{"p":"response/fragments","o":"APPEND","v":[{"id":4,"type":"tool_search","references":[{"url":"https://ex.com/g","title":"G"}]}]}`)
 	if len(p2.sources) != 1 || p2.sources[0].URL != "https://ex.com/g" {
 		t.Errorf("container-appended tool_search sources = %v", p2.sources)
+	}
+}
+
+// TestSSEThinkingNeverLeaks: with thinking enabled, content belonging to
+// THINK fragments (snapshot content, -1/content appends, pathless chunks)
+// must never render as answer text; only the RESPONSE fragment content does.
+// This mirrors the --think mode: thinking text was previously shown as the
+// reply ("..., the user has asked me...").
+func TestSSEThinkingNeverLeaks(t *testing.T) {
+	p := &patchParser{}
+	var all []string
+	// Snapshot: THINK fragment with pre-generated thinking.
+	all = append(all, feed(t, p, `{"v":{"response":{"fragments":[{"type":"THINK","content":"OK"}]}}}`)...)
+	// Thinking continues via appends and pathless chunks (target -1 = THINK).
+	all = append(all, feed(t, p, `{"p":"response/fragments/-1/content","o":"APPEND","v":", the user"}`)...)
+	all = append(all, feed(t, p, `{"v":" asks"}`)...)
+	// The answer: RESPONSE fragment appended with its first token.
+	all = append(all, feed(t, p, `{"p":"response/fragments","o":"APPEND","v":[{"type":"RESPONSE","content":"**Yes"}]}`)...)
+	all = append(all, feed(t, p, `{"p":"response/fragments/-1/content","o":"APPEND","v":", I can"}`)...)
+	all = append(all, feed(t, p, `{"v":" read!"}`)...)
+	want := []string{"**Yes", ", I can", " read!"}
+	if !reflect.DeepEqual(all, want) {
+		t.Errorf("deltas = %q, want %q", all, want)
+	}
+}
+
+// TestSSEPerFragmentSetAfterThinking: the answer's first token can arrive as
+// a SET on the RESPONSE fragment's content path AFTER thinking already
+// emitted — the per-fragment guard must still accept it (the old global
+// emittedAny flag dropped "**Yes" here).
+func TestSSEPerFragmentSetAfterThinking(t *testing.T) {
+	p := &patchParser{}
+	var all []string
+	all = append(all, feed(t, p, `{"v":{"response":{"fragments":[{"type":"THINK","content":"thinking..."}]}}}`)...)
+	all = append(all, feed(t, p, `{"p":"response/fragments/-1/content","o":"SET","v":"more thinking"}`)...) // THINK: skipped
+	all = append(all, feed(t, p, `{"p":"response/fragments","o":"APPEND","v":[{"type":"RESPONSE","content":""}]}`)...)
+	all = append(all, feed(t, p, `{"p":"response/fragments/-1/content","o":"SET","v":"**Yes"}`)...)              // RESPONSE initial: kept
+	all = append(all, feed(t, p, `{"p":"response/fragments/-1/content","o":"SET","v":"**Yes, I can read!"}`)...) // full replace: skipped
+	all = append(all, feed(t, p, `{"p":"response/fragments/-1/content","o":"APPEND","v":"!"}`)...)
+	want := []string{"**Yes", "!"}
+	if !reflect.DeepEqual(all, want) {
+		t.Errorf("deltas = %q, want %q", all, want)
+	}
+}
+
+// TestSSEIndexedContentRespectsFragmentType: content appends targeting an
+// explicit index follow that fragment's type (index 0 = THINK is skipped,
+// index 1 = RESPONSE is emitted).
+func TestSSEIndexedContentRespectsFragmentType(t *testing.T) {
+	p := &patchParser{}
+	var all []string
+	all = append(all, feed(t, p, `{"v":{"response":{"fragments":[
+		{"type":"THINK","content":"t"},
+		{"type":"RESPONSE","content":"A"}
+	]}}}`)...)
+	all = append(all, feed(t, p, `{"p":"response/fragments/0/content","o":"APPEND","v":"hink"}`)...)  // THINK: skipped
+	all = append(all, feed(t, p, `{"p":"response/fragments/1/content","o":"APPEND","v":"nswer"}`)...) // RESPONSE: emitted
+	want := []string{"A", "nswer"}
+	if !reflect.DeepEqual(all, want) {
+		t.Errorf("deltas = %q, want %q", all, want)
 	}
 }

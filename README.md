@@ -350,7 +350,10 @@ cannot be combined with `--conversation`.
    append/SET/BATCH patches on `response/fragments/-1/content`, and bare
    pathless `{"v":...}` chunks (which can carry the reply's very first
    characters) — all reconstructed in arrival order without trimming, so no
-   leading text is lost. `message_id` (from `v.message_id` / `v.message.id`
+   leading text is lost. Fragments are tracked by type: content belonging to
+   THINK/SEARCH fragments is never rendered as answer text, so `--thinking`
+   mode cannot leak reasoning into the reply (or drop the answer's opening
+   token after it). `message_id` (from `v.message_id` / `v.message.id`
    or a patch path) becomes the next turn's `parent_message_id`.
 
 Credentials are sent as `authorization: Bearer <token>` plus the `ds_session_id`

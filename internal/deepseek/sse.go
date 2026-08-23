@@ -23,11 +23,16 @@ import (
 // Sources so the CLI can print the citations the model references inline as
 // [citation:N].
 type patchParser struct {
-	activePath  string
-	messageID   *int64
+	activePath string
+	messageID  *int64
+	sources    []Source
+	// Fragments are tracked in container order so content updates can be
+	// attributed to their owning fragment: THINK/SEARCH/TIP fragments must
+	// never render as answer text, and SET (full-slot replace) only applies
+	// as initial text for a fragment whose content we have not yet emitted.
+	fragKinds   []string
+	fragEmitted []bool
 	sawSnapshot bool
-	emittedAny  bool // any reply text emitted so far (gates SET-as-initial)
-	sources     []Source
 }
 
 // Feed processes one SSE data payload (a single JSON patch operation) and
@@ -65,6 +70,7 @@ func (p *patchParser) feedOne(obj map[string]any, emit func(string) error) error
 						if !ok {
 							continue
 						}
+						p.registerFragment(fm)
 						t, _ := fm["type"].(string)
 						switch {
 						case strings.EqualFold(t, "response"):
@@ -83,7 +89,7 @@ func (p *patchParser) feedOne(obj map[string]any, emit func(string) error) error
 								if err := emit(content); err != nil {
 									return err
 								}
-								p.emittedAny = true
+								p.markEmitted(len(p.fragKinds) - 1)
 							}
 						case strings.EqualFold(t, "tool_search"):
 							p.collectSources(fm)
@@ -144,26 +150,80 @@ func (p *patchParser) applyPatch(path string, v any, op string, emit func(string
 	if !strings.HasSuffix(path, "content") {
 		return nil
 	}
+	idx := p.fragIndexAt(path)
+	// Content belonging to a non-answer fragment (thinking, search, tips)
+	// is never rendered.
+	if idx >= 0 && !strings.EqualFold(p.fragType(idx), "response") {
+		return nil
+	}
 	switch op {
 	case "APPEND":
 		if txt, ok := textOf(v); ok {
-			p.emittedAny = true
+			p.markEmitted(idx)
 			return emit(txt)
 		}
 	case "", "SET":
-		// SET (or an op-less frame) replaces the whole content slot; only
-		// treat it as the initial text, before anything has been emitted, to
-		// avoid duplicates.
-		if !p.emittedAny {
+		// SET (or an op-less frame) replaces the whole content slot of a
+		// fragment; it is the initial text when we have not emitted that
+		// fragment's content yet, and a no-op afterwards (no duplicates).
+		if !p.fragWasEmitted(idx) {
 			if txt, ok := textOf(v); ok {
 				if err := emit(txt); err != nil {
 					return err
 				}
-				p.emittedAny = true
+				p.markEmitted(idx)
 			}
 		}
 	}
 	return nil
+}
+
+// registerFragment records a fragment's type (container order) and emits
+// nothing.
+func (p *patchParser) registerFragment(fm map[string]any) {
+	t, _ := fm["type"].(string)
+	p.fragKinds = append(p.fragKinds, t)
+	p.fragEmitted = append(p.fragEmitted, false)
+}
+
+// fragIndexAt resolves the container index a content path targets
+// ("response/fragments/-1/content" -> last); -1 when unresolvable.
+func (p *patchParser) fragIndexAt(path string) int {
+	i := strings.Index(path, "fragments/")
+	if i < 0 {
+		return -1
+	}
+	rest := path[i+len("fragments/"):]
+	idxStr, _, _ := strings.Cut(rest, "/")
+	if idxStr == "-1" {
+		return len(p.fragKinds) - 1
+	}
+	n, err := strconv.Atoi(idxStr)
+	if err != nil || n < 0 || n >= len(p.fragKinds) {
+		return -1
+	}
+	return n
+}
+
+func (p *patchParser) fragType(i int) string {
+	if i < 0 || i >= len(p.fragKinds) {
+		return ""
+	}
+	return p.fragKinds[i]
+}
+
+func (p *patchParser) fragWasEmitted(i int) bool {
+	if i < 0 || i >= len(p.fragEmitted) {
+		return true // unknown slot: assume emitted to avoid duplicates
+	}
+	return p.fragEmitted[i]
+}
+
+func (p *patchParser) markEmitted(i int) {
+	if i < 0 || i >= len(p.fragEmitted) {
+		return
+	}
+	p.fragEmitted[i] = true
 }
 
 // applyFragments handles a container-appended array of fragment objects:
@@ -180,6 +240,7 @@ func (p *patchParser) applyFragments(v any, emit func(string) error) error {
 			continue
 		}
 		t, _ := fm["type"].(string)
+		p.registerFragment(fm)
 		switch {
 		case strings.EqualFold(t, "response"):
 			p.activePath = "response/fragments/-1/content"
@@ -190,7 +251,7 @@ func (p *patchParser) applyFragments(v any, emit func(string) error) error {
 			if err := emit(content); err != nil {
 				return err
 			}
-			p.emittedAny = true
+			p.markEmitted(len(p.fragKinds) - 1)
 		case strings.EqualFold(t, "tool_search"):
 			p.collectSources(fm)
 		}
@@ -198,17 +259,23 @@ func (p *patchParser) applyFragments(v any, emit func(string) error) error {
 	return nil
 }
 
-// applyPathless emits a pathless chunk when the active path is empty or a
-// content path (status-path values are control signals, not text).
+// applyPathless emits a pathless chunk. Pathless chunks continue the most
+// recent fragment's content, so they are answer text only when the last
+// fragment is a RESPONSE fragment (or none is known yet); thinking/search
+// content arriving pathless is skipped.
 func (p *patchParser) applyPathless(v any, emit func(string) error) error {
 	if p.activePath != "" && !strings.HasSuffix(p.activePath, "content") {
+		return nil
+	}
+	last := len(p.fragKinds) - 1
+	if last >= 0 && !strings.EqualFold(p.fragKinds[last], "response") {
 		return nil
 	}
 	txt, ok := textOf(v)
 	if !ok {
 		return nil
 	}
-	p.emittedAny = true
+	p.markEmitted(last)
 	return emit(txt)
 }
 
