@@ -32,15 +32,30 @@ func TestChunkText(t *testing.T) {
 }
 
 func TestDefaultOutput(t *testing.T) {
-	for in, want := range map[string]string{
-		"a.md":         "a.translated.md",
-		"dir/song.lrc": "dir/song.translated.lrc",
-		"book.epub":    "book.translated.txt",
-		"movie.vtt":    "movie.translated.vtt",
-		"noext":        "noext.translated",
+	for _, tc := range []struct{ in, to, want string }{
+		{"a.md", "English", "a.translated.en.md"},
+		{"a.md", "en", "a.translated.en.md"},
+		{"dir/song.lrc", "Chinese", "dir/song.translated.zh.lrc"},
+		{"book.epub", "English", "book.translated.en.txt"},
+		{"movie.vtt", "Japanese", "movie.translated.ja.vtt"},
+		{"noext", "English", "noext.translated.en"},
+		{"x.translated.en.md", "Chinese", "x.translated.zh.md"}, // never stacks suffixes
+		{"x.translated.md", "Chinese", "x.translated.zh.md"},
+		{"song.lrc", "Klingon", "song.translated.klingon.lrc"}, // unknown label → normalized token
 	} {
-		if got := translate.DefaultOutput(in); got != want {
-			t.Errorf("defaultOutput(%s) = %s, want %s", in, got, want)
+		if got := translate.DefaultOutput(tc.in, tc.to); got != tc.want {
+			t.Errorf("DefaultOutput(%s, %s) = %s, want %s", tc.in, tc.to, got, tc.want)
+		}
+	}
+}
+
+func TestLangCode(t *testing.T) {
+	for label, want := range map[string]string{
+		"English": "en", "english": "en", "Japanese": "ja", "简体中文": "",
+		"Portuguese": "pt", "Klingon": "klingon",
+	} {
+		if got := translate.LangCode(label); got != want {
+			t.Errorf("LangCode(%q) = %q, want %q", label, got, want)
 		}
 	}
 }
@@ -79,7 +94,7 @@ func TestTranslatePlainMD(t *testing.T) {
 		t.Fatalf("translate: %v", err)
 	}
 
-	out := filepath.Join(dir, "notes.translated.md")
+	out := filepath.Join(dir, "notes.translated.fr.md")
 	got, err := os.ReadFile(out)
 	if err != nil || string(got) != "Bonjour le monde\n" {
 		t.Errorf("output = %q err=%v", got, err)
@@ -146,7 +161,7 @@ func TestTranslateLRCVerificationRetry(t *testing.T) {
 	if err := cmd.Run(nil, context.Background()); err != nil {
 		t.Fatalf("translate: %v", err)
 	}
-	got, _ := os.ReadFile(filepath.Join(dir, "song.translated.lrc"))
+	got, _ := os.ReadFile(filepath.Join(dir, "song.translated.fr.lrc"))
 	if string(got) != good {
 		t.Errorf("output = %q, want %q", got, good)
 	}
@@ -179,7 +194,7 @@ func TestTranslateLRCVerificationGivesUp(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "protected line") {
 		t.Errorf("persistent corruption must fail loudly, got %v", err)
 	}
-	if _, statErr := os.Stat(filepath.Join(dir, "song.translated.lrc")); !os.IsNotExist(statErr) {
+	if _, statErr := os.Stat(filepath.Join(dir, "song.translated.fr.lrc")); !os.IsNotExist(statErr) {
 		t.Error("no output must be written on failure")
 	}
 }
@@ -204,7 +219,7 @@ func TestTranslateASSVerificationRetry(t *testing.T) {
 	if err := cmd.Run(nil, context.Background()); err != nil {
 		t.Fatalf("translate: %v", err)
 	}
-	got, _ := os.ReadFile(filepath.Join(dir, "sub.translated.ass"))
+	got, _ := os.ReadFile(filepath.Join(dir, "sub.translated.fr.ass"))
 	if string(got) != good {
 		t.Errorf("output = %q, want %q", got, good)
 	}

@@ -756,12 +756,12 @@ func TestFileToolsTranslateLoop(t *testing.T) {
 	if stdout != "Translated.\n" {
 		t.Errorf("stdout = %q", stdout)
 	}
-	for _, want := range []string{"song.lrc → song.translated.lrc", "(lrc, 1 chunks, to French)", "chunk 1/1 ok"} {
+	for _, want := range []string{"song.lrc → song.translated.fr.lrc", "(lrc, 1 chunks, to French)", "chunk 1/1 ok"} {
 		if !strings.Contains(stderr, want) {
 			t.Errorf("stderr missing %q:\n%s", want, stderr)
 		}
 	}
-	got, err := os.ReadFile(filepath.Join(dir, "song.translated.lrc"))
+	got, err := os.ReadFile(filepath.Join(dir, "song.translated.fr.lrc"))
 	if err != nil || string(got) != "[00:01.00]bonjour\n" {
 		t.Errorf("translated file = %q err=%v", got, err)
 	}
@@ -810,7 +810,7 @@ func TestFileToolsTranslateDenied(t *testing.T) {
 	if err != nil {
 		t.Fatalf("turn: %v", err)
 	}
-	if _, statErr := os.Stat(filepath.Join(dir, "a.translated.md")); !os.IsNotExist(statErr) {
+	if _, statErr := os.Stat(filepath.Join(dir, "a.translated.es.md")); !os.IsNotExist(statErr) {
 		t.Error("denied translate must not write output")
 	}
 	prompt1, _ := completionBody(t, rec, 1)

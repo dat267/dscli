@@ -560,7 +560,7 @@ func (c *ChatCmd) applyTranslateFile(ctx context.Context, client *deepseek.Clien
 	}
 	out := call.Output
 	if out == "" {
-		out = translate.DefaultOutput(call.Path)
+		out = translate.DefaultOutput(call.Path, call.To)
 	}
 	outPath, err := filetools.ResolvePath(workdir, out)
 	if err != nil {

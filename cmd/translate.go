@@ -54,7 +54,7 @@ func (c *TranslateCmd) Run(app *App, ctx context.Context) error {
 	}
 	out := c.Output
 	if out == "" {
-		out = translate.DefaultOutput(c.File)
+		out = translate.DefaultOutput(c.File, c.To)
 	}
 
 	client := deepseek.NewClient(deepseek.Session{

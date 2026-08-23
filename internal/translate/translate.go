@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -64,15 +65,51 @@ func Load(path string, maxBytes int64) ([]byte, string, error) {
 	return data, format, nil
 }
 
-// DefaultOutput derives the output path: <input>.translated.<ext>, or
-// <input>.translated.txt for EPUB books.
-func DefaultOutput(input string) string {
+// DefaultOutput derives the output path using the i18n name-coding
+// convention: <base>.translated.<lang>.<ext>, e.g.
+// chapter-012.translated.en.md — original and translation share the base
+// name, so any tool can group the pair and multiple target languages can
+// coexist in one directory. An existing ".translated[.<lang>]" suffix in the
+// input is stripped first, so re-translating a translation never stacks
+// suffixes (a.translated.en.md → a.translated.zh.md). EPUB books default to
+// a .txt output.
+func DefaultOutput(input, toLabel string) string {
 	ext := filepath.Ext(input)
 	base := strings.TrimSuffix(input, ext)
+	base = translatedSuffixRE.ReplaceAllString(base, "")
 	if strings.EqualFold(ext, ".epub") {
-		return base + ".translated.txt"
+		ext = ".txt"
 	}
-	return base + ".translated" + ext
+	code := LangCode(toLabel)
+	if code == "" {
+		return base + ".translated" + ext
+	}
+	return base + ".translated." + code + ext
+}
+
+// translatedSuffixRE matches an existing ".translated" or
+// ".translated.<lang>" suffix for stripping before re-naming.
+var translatedSuffixRE = regexp.MustCompile(`\.translated(\.[a-z0-9]{1,8})?$`)
+
+// langCodes maps common target-language labels to ISO 639-1 codes used in
+// output file names.
+var langCodes = map[string]string{
+	"english": "en", "japanese": "ja", "chinese": "zh", "korean": "ko",
+	"spanish": "es", "french": "fr", "german": "de", "italian": "it",
+	"portuguese": "pt", "russian": "ru", "arabic": "ar", "hindi": "hi",
+	"thai": "th", "vietnamese": "vi", "indonesian": "id", "dutch": "nl",
+	"polish": "pl", "turkish": "tr", "ukrainian": "uk", "romanian": "ro",
+}
+
+// LangCode returns the code for a target-language label: ISO 639-1 when
+// known, else the lowercased alphanumeric label ("English" → "en",
+// "日本語" → "").
+func LangCode(label string) string {
+	key := pairKey(label)
+	if c, ok := langCodes[key]; ok {
+		return c
+	}
+	return key
 }
 
 // ChunkText splits text into chunks of roughly approxBytes, keeping lines
