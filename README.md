@@ -112,9 +112,9 @@ you leave. One line per question; multi-line input is not supported.
 Translations use the i18n name-coding convention — **`<base>.translated.<lang>.<ext>`**:
 
 ```
-chapter-012.md               ← original
-chapter-012.translated.en.md ← translation
-chapter-012.translated.zh.md ← a second target, same dir
+chapter-012.md                  ← original
+chapter-012.translated.en.md    ← translation
+chapter-012.translated.zh.md    ← a second target, same dir
 ```
 
 - The language code comes from the target label (ISO 639-1 for common
@@ -126,18 +126,17 @@ chapter-012.translated.zh.md ← a second target, same dir
   → base + optional language. The `pairs` command emits exactly that as TSV:
 
   ```bash
-  dscli pairs 'my-library/chapters'
-  # base      lang  path
-  # chapter-012  -    chapter-012.md
-  # chapter-012  en   chapter-012.translated.en.md
+  dscli pairs my-library/chapters
+  # base           lang  path
+  # chapter-012    -     chapter-012.md
+  # chapter-012    en    chapter-012.translated.en.md
   ```
 
   Feed it to your serve tool (`dscli pairs | while IFS=$'\t' read base lang path; do …`) or just grep it.
 
-> Tip: paths containing spaces must be quoted in the shell:
-> `dscli translate 'my-library/02_…/chapter-012.md'`. Running from
-> inside the novel directory, `dscli translate '02_…/012….md'` also works —
-> the output path mirrors the input's (relative or absolute) form.
+> Tip: paths containing spaces must be quoted in the shell, e.g.
+> `dscli translate "my documents/notes.md"`. The output path mirrors the
+> input's (relative or absolute) form.
 
 ## Custom translation styles
 
