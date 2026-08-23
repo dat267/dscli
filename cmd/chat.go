@@ -15,6 +15,7 @@ import (
 
 	"github.com/dat267/dscli/internal/deepseek"
 	"github.com/dat267/dscli/internal/filetools"
+	"github.com/dat267/dscli/internal/translate"
 )
 
 // ChatCmd implements `dscli chat`: a one-shot question, or an interactive
@@ -202,7 +203,7 @@ func (c *ChatCmd) turn(ctx context.Context, client *deepseek.Client, conversatio
 		display := filetools.Display(workdir, call.Path)
 		note(fmt.Sprintf("%s %s", call.Tool, display))
 		switch call.Tool {
-		case "read_file", "list_directory":
+		case "read_file", "list_directory", "file_meta":
 			curPrompt = call.Run(workdir)
 			continue
 		case "edit_file":
@@ -272,6 +273,9 @@ func (c *ChatCmd) turn(ctx context.Context, client *deepseek.Client, conversatio
 				continue
 			}
 			curPrompt = filetools.FormatResult(call.Tool, call.Path, fmt.Sprintf("deleted %s (%d bytes)", display, plan.Bytes))
+			continue
+		case "translate_file":
+			curPrompt = c.applyTranslateFile(ctx, client, workdir, call, model, display)
 			continue
 		}
 		curPrompt = filetools.FormatResult(call.Tool, call.Path, "ERROR: unknown tool")
@@ -544,6 +548,77 @@ func onoff(v bool) string {
 	return "off"
 }
 
+// applyTranslateFile runs the translate_file tool: preview + confirm, then a
+// chunked translation in a dedicated ephemeral session (never the chat
+// thread, so the conversation context stays clean). Returns the <tool_result>
+// body for the model.
+func (c *ChatCmd) applyTranslateFile(ctx context.Context, client *deepseek.Client, workdir string, call filetools.Call, model, display string) string {
+	inPath, err := filetools.ResolvePath(workdir, call.Path)
+	if err != nil {
+		return filetools.FormatResult(call.Tool, call.Path, "ERROR: "+err.Error())
+	}
+	out := call.Output
+	if out == "" {
+		out = translate.DefaultOutput(call.Path)
+	}
+	outPath, err := filetools.ResolvePath(workdir, out)
+	if err != nil {
+		return filetools.FormatResult(call.Tool, call.Path, "ERROR: "+err.Error())
+	}
+	if outPath == inPath {
+		return filetools.FormatResult(call.Tool, call.Path, "ERROR: input and output are the same path")
+	}
+	if _, err := os.Stat(outPath); err == nil {
+		return filetools.FormatResult(call.Tool, call.Path, "ERROR: output already exists; choose another file or delete it first")
+	}
+	content, format, err := translate.Load(inPath, translate.MaxChatInputBytes)
+	if err != nil {
+		return filetools.FormatResult(call.Tool, call.Path, "ERROR: "+err.Error())
+	}
+	chunks := translate.ChunkText(string(content), 0)
+	outDisplay := filetools.Display(workdir, out)
+	preview := fmt.Sprintf("%s → %s\n(%s, %d chunks, to %s)", display, outDisplay, format, len(chunks), call.To)
+	fmt.Fprintln(os.Stderr, preview)
+	if !confirmWrite(fmt.Sprintf("translate %s → %s to %s?", display, outDisplay, call.To)) {
+		return filetools.FormatResult(call.Tool, call.Path, "ERROR: translate rejected by user; do not retry it")
+	}
+
+	sessionID, err := client.CreateChatSession(ctx)
+	if err != nil {
+		return filetools.FormatResult(call.Tool, call.Path, "ERROR: create session: "+err.Error())
+	}
+	cleanup := func() {
+		if err := client.DeleteSessions(context.Background(), []string{sessionID}); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to delete session: %v\n", err)
+		}
+	}
+	var failed string
+	defer func() {
+		if failed != "" {
+			_ = os.Remove(outPath) // never leave a partial output behind
+		}
+		cleanup()
+	}()
+
+	result, err := translate.Translate(ctx, client, sessionID, content, format, translate.Options{
+		To:    call.To,
+		Model: model,
+		OnChunk: func(chunk, total int) {
+			fmt.Fprintf(os.Stderr, "  chunk %d/%d ok\n", chunk, total)
+		},
+	})
+	if err != nil {
+		failed = err.Error()
+		return filetools.FormatResult(call.Tool, call.Path, "ERROR: "+err.Error())
+	}
+	if err := os.WriteFile(outPath, []byte(result), 0644); err != nil {
+		failed = err.Error()
+		return filetools.FormatResult(call.Tool, call.Path, "ERROR: "+err.Error())
+	}
+	return filetools.FormatResult(call.Tool, call.Path,
+		fmt.Sprintf("translated %s → %s (%s, %d chunks, %d bytes)", display, outDisplay, format, len(chunks), len(result)))
+}
+
 func printReplHelp(u ui) {
 	fmt.Fprintln(os.Stderr, u.dim(`commands:
   /exit, /quit                leave the session
@@ -551,7 +626,7 @@ func printReplHelp(u ui) {
   /model <default|expert>     switch model (starts a fresh conversation)
   /thinking [on|off]          toggle DeepThink reasoning
   /search [on|off]            toggle web search
-  /files [on|off]             toggle file tools (list/read/meta/create/edit/rename/delete in the CWD; writes ask first)
+  /files [on|off]             toggle file tools (list/read/meta/create/edit/rename/delete/translate in the CWD; writes ask first)
   /help                       this help`))
 }
 

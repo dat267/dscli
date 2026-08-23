@@ -105,6 +105,21 @@ those are cleaned up on close too. So the conversation id shown is the live
 thread's id — useful while the session lasts, but the session is gone once
 you leave. One line per question; multi-line input is not supported.
 
+## Batch translation in chat
+
+With `/files` on you can drive translation as part of an organising session —
+translate several files, then rename/move the outputs:
+
+```
+you> translate all .lrc files in Music/ into Chinese
+translate_file Music/one.lrc
+Music/one.lrc → Music/one.translated.lrc (lrc, 1 chunks, to Chinese)
+translate Music/one.lrc → Music/one.translated.lrc to Chinese? [y/N] y
+  chunk 1/1 ok
+…
+you> /help
+```
+
 ## Models, DeepThink & web search
 
 Model, DeepThink (thinking) and web search are per-thread or per-request
@@ -150,6 +165,7 @@ It calls a tool by replying with *only* a JSON object:
 {"tool":"list_directory","path":".","recursive":true}
 {"tool":"file_meta","path":"song.lrc"}
 {"tool":"read_file","path":"book.epub"}
+{"tool":"translate_file","path":"song.lrc","to":"Chinese"}
 {"tool":"create_file","path":"notes.txt","content":"hello"}
 {"tool":"edit_file","path":"src/cli.go","old":"func Foo(","new":"func Bar("}
 {"tool":"delete_file","path":"old.txt"}
@@ -177,6 +193,14 @@ It calls a tool by replying with *only* a JSON object:
   `list_directory` lists ONE directory, non-recursive, directories marked
   with a trailing `/`. The model is instructed to start with
   `{"tool":"list_directory","path":"."}` to discover files.
+- **`translate_file`** bundles the whole translate pipeline into one tool
+  call (handy for bulk translating a library in chat mode): `path`, `to`
+  (target language), optional `output`. It previews (`song.lrc →
+  song.translated.lrc`, format + chunk count), asks, then translates in a
+  dedicated ephemeral session using the exact same engine as `dscli
+  translate` — timestamps/XML/markup preserved and verified — writing the
+  result and telling the model it succeeded. Input is capped at 1 MiB per
+  call (use `dscli translate` for bigger files).
 - **`create_file`, `edit_file` and `delete_file` always ask first — after
   showing a deterministic preview.** `create_file` makes a *new* file (it
   errors if the path already exists, and creates parent directories within

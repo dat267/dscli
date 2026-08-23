@@ -8,12 +8,13 @@ import (
 	"testing"
 
 	"github.com/dat267/dscli/internal/deepseek"
+	"github.com/dat267/dscli/internal/translate"
 )
 
 func TestChunkText(t *testing.T) {
 	// Line boundaries preserved even when a single line exceeds the budget.
 	text := "aaaaa\n" + strings.Repeat("b", 100) + "\nccccc\n" + strings.Repeat("d", 100)
-	chunks := chunkText(text, 20)
+	chunks := translate.ChunkText(text, 20)
 	if len(chunks) != 4 { // each oversized line becomes its own chunk
 		t.Fatalf("chunks = %d, want 4", len(chunks))
 	}
@@ -24,7 +25,7 @@ func TestChunkText(t *testing.T) {
 		t.Errorf("round trip lost data")
 	}
 
-	empty := chunkText("", 10)
+	empty := translate.ChunkText("", 10)
 	if len(empty) != 1 || empty[0] != "" {
 		t.Errorf("empty text must yield one empty chunk: %v", empty)
 	}
@@ -38,7 +39,7 @@ func TestDefaultOutput(t *testing.T) {
 		"movie.vtt":    "movie.translated.vtt",
 		"noext":        "noext.translated",
 	} {
-		if got := defaultOutput(in); got != want {
+		if got := translate.DefaultOutput(in); got != want {
 			t.Errorf("defaultOutput(%s) = %s, want %s", in, got, want)
 		}
 	}
@@ -46,14 +47,14 @@ func TestDefaultOutput(t *testing.T) {
 
 func TestTranslatePromptFormats(t *testing.T) {
 	for _, format := range []string{"text", "lrc", "srt", "vtt", "ass", "ttml", "markdown"} {
-		p := translatePrompt(format, "auto", "Chinese", false)
+		p := translate.Prompt(format, "auto", "Chinese", false)
 		for _, want := range []string{"Chinese", "Reply with ONLY the translated content"} {
 			if !strings.Contains(p, want) {
 				t.Errorf("%s prompt missing %q", format, want)
 			}
 		}
 	}
-	p := translatePrompt("lrc", "auto", "Chinese", true)
+	p := translate.Prompt("lrc", "auto", "Chinese", true)
 	if !strings.Contains(p, "VERIFICATION FAILED") {
 		t.Errorf("reminder prompt missing the verification warning")
 	}

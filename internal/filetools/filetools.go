@@ -79,6 +79,8 @@ type Call struct {
 	New       string `json:"new"`       // edit_file: replacement text; rename_file: destination name/path
 	Content   string `json:"content"`   // create_file: full content of the new file
 	Recursive bool   `json:"recursive"` // list_directory: list the whole subtree at once
+	To        string `json:"to"`        // translate_file: target language
+	Output    string `json:"output"`    // translate_file: output path (default <input>.translated.<ext>)
 }
 
 // Instructions returns the prompt fragment that defines the tools for the
@@ -92,12 +94,14 @@ You can inspect and change files inside %s. To use a tool, reply with ONLY a JSO
   {"tool":"edit_file","path":"<file>","old":"<exact existing text>","new":"<replacement text>"}
   {"tool":"rename_file","path":"<source>","new":"<new name or path>"}
   {"tool":"delete_file","path":"<file>"}
+  {"tool":"translate_file","path":"<file>","to":"<language>","output":"<optional output path>"}
 Rules:
 - ACT, don't announce. When the user asks you to inspect or change files, perform the tool calls yourself in the same reply series; never reply with prose about what you are about to do ("let me...", "I'll...", "first I need to...").
 - Budget: at most %d tool calls per user message; spend them on what matters, then give your final answer in prose.
 - Every turn is exactly ONE of two things: a single tool-call JSON object, or — only when your task is fully complete — your final answer in plain text.
 - To explore: start with {"tool":"list_directory","path":"."}, which lists ONE directory, non-recursive, directories marked with a trailing /, files with sizes. Add "recursive":true to get the whole subtree in one bounded call ({\"tool\":\"list_directory\",\"path\":\".\",\"recursive\":true}) instead of listing directory by directory — prefer it for exploring a tree.
 - read_file only reads TEXT files up to %d bytes: larger or binary files are rejected — do not retry them, tell the user instead.
+- translate_file translates a subtitle/lyric/document file (txt/md/lrc/srt/vtt/ass/ttml/epub) into another language in ONE call — timestamps, XML structure and markup are preserved and verified automatically; the user confirms first. Use it instead of read+create translation.
 - To change: create_file makes a NEW file (it errors if the file already exists — then use edit_file or delete_file first); edit_file replaces the first exact occurrence of "old" (whitespace, quotes and indentation count — read the file first and copy from it); rename_file renames or moves a file/directory (the destination must not exist); delete_file removes a file permanently. Creating, renaming or deleting files asks the user for confirmation; if the user rejects, do not retry.
 - After every tool call you receive a <tool_result> block. React to it with the next tool call, or your final answer. If an edit reports the pattern was not found, re-read the file and retry with the correct "old" text.
 - Paths may be relative to %s or absolute inside it.
@@ -147,6 +151,8 @@ func valid(c Call) bool {
 		return c.Path != "" && c.Old != ""
 	case "rename_file":
 		return c.Path != "" && c.New != ""
+	case "translate_file":
+		return c.Path != "" && c.To != ""
 	}
 	return false
 }
@@ -295,6 +301,13 @@ func workdirPath(workdir, p string) (string, error) {
 		return "", fmt.Errorf("path %q escapes the working directory (symlink)", p)
 	}
 	return filepath.Join(rootEval, rel2), nil
+}
+
+// ResolvePath resolves p inside workdir with full (symlink-aware)
+// containment, for callers outside the package (e.g. the translate_file
+// tool, whose execution lives in the cmd layer).
+func ResolvePath(workdir, p string) (string, error) {
+	return workdirPath(workdir, p)
 }
 
 // Run executes the call inside workdir and returns the <tool_result> text to

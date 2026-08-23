@@ -14,6 +14,7 @@ import (
 
 	"github.com/dat267/dscli/internal/deepseek"
 	"github.com/dat267/dscli/internal/filetools"
+	"github.com/dat267/dscli/internal/translate"
 )
 
 // golden challenge: the wasm solver inverts it to nonce 999, so the fake
@@ -717,5 +718,124 @@ func TestFileToolsRecursiveListLoop(t *testing.T) {
 		if !strings.Contains(prompt2, want) {
 			t.Errorf("tree not fed back (missing %q):\n%s", want, prompt2)
 		}
+	}
+}
+
+// TestFileToolsTranslateLoop: the model calls translate_file in chat mode;
+// the CLI previews, confirms, translates in a dedicated session, writes the
+// output, and the model continues in prose.
+func TestFileToolsTranslateLoop(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "song.lrc"), []byte("[00:01.00]hello\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	translateCall := `{"tool":"translate_file","path":"song.lrc","to":"French"}`
+	// Completions: 0 = the tool call; 1 = the engine's chunk translation;
+	// 2 = the model's final prose answer.
+	srv, rec := fakeDeepSeekServerWith(t, []string{
+		completionSSE(t, 2, translateCall),
+		completionSSE(t, 3, "[00:01.00]bonjour\n"),
+		completionSSE(t, 4, "Translated."),
+	})
+	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
+	cmd := &ChatCmd{Workdir: dir}
+
+	orig := confirmWrite
+	t.Cleanup(func() { confirmWrite = orig })
+	confirmWrite = func(string) bool { return true }
+
+	var note strings.Builder
+	convID, stdout, stderr, err := turnWith(t, cmd, client, "translate song.lrc to French", &note)
+	if err != nil {
+		t.Fatalf("turn: %v", err)
+	}
+	if stdout != "Translated.\n" {
+		t.Errorf("stdout = %q", stdout)
+	}
+	for _, want := range []string{"song.lrc → song.translated.lrc", "(lrc, 1 chunks, to French)", "chunk 1/1 ok"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr missing %q:\n%s", want, stderr)
+		}
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "song.translated.lrc"))
+	if err != nil || string(got) != "[00:01.00]bonjour\n" {
+		t.Errorf("translated file = %q err=%v", got, err)
+	}
+	if convID != "sess-1:4" {
+		t.Errorf("convID = %q", convID)
+	}
+	// The dedicated translate session is cleaned up (the chat owner session
+	// is the repl's job and is covered by the stateless e2e).
+	rec.mu.Lock()
+	deleted := append([]string(nil), rec.deleted...)
+	rec.mu.Unlock()
+	if len(deleted) != 1 || deleted[0] != "sess-1" {
+		t.Errorf("translate session not cleaned up: %v", deleted)
+	}
+	// The engine's chunk prompt carried the language and LRC rules.
+	prompt1, _ := completionBody(t, rec, 1)
+	if !strings.Contains(prompt1, "LRC lyrics") || !strings.Contains(prompt1, "French") {
+		t.Errorf("chunk prompt wrong:\n%s", prompt1)
+	}
+}
+
+// TestFileToolsTranslateDenied: a rejected translation writes nothing and the
+// model is told not to retry.
+func TestFileToolsTranslateDenied(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.md"), []byte("Hello\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	translateCall := `{"tool":"translate_file","path":"a.md","to":"Spanish"}`
+	srv, rec := fakeDeepSeekServerWith(t, []string{
+		completionSSE(t, 2, translateCall),
+		completionSSE(t, 3, "OK."),
+	})
+	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
+	cmd := &ChatCmd{Workdir: dir}
+
+	orig := confirmWrite
+	t.Cleanup(func() { confirmWrite = orig })
+	confirmWrite = func(string) bool { return false }
+
+	_, _, _, err := turnWith(t, cmd, client, "translate a.md", &strings.Builder{})
+	if err != nil {
+		t.Fatalf("turn: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "a.translated.md")); !os.IsNotExist(statErr) {
+		t.Error("denied translate must not write output")
+	}
+	prompt1, _ := completionBody(t, rec, 1)
+	if !strings.Contains(prompt1, "translate rejected by user") {
+		t.Errorf("rejection not fed back:\n%s", prompt1)
+	}
+}
+
+// TestFileToolsTranslateTooLarge: oversized input refuses at plan time.
+func TestFileToolsTranslateTooLarge(t *testing.T) {
+	dir := t.TempDir()
+	big := strings.Repeat("x", translate.MaxChatInputBytes+100)
+	if err := os.WriteFile(filepath.Join(dir, "big.txt"), []byte(big), 0644); err != nil {
+		t.Fatal(err)
+	}
+	translateCall := `{"tool":"translate_file","path":"big.txt","to":"French"}`
+	srv, rec := fakeDeepSeekServerWith(t, []string{
+		completionSSE(t, 2, translateCall),
+		completionSSE(t, 3, "Too big."),
+	})
+	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
+	cmd := &ChatCmd{Workdir: dir}
+
+	orig := confirmWrite
+	t.Cleanup(func() { confirmWrite = orig })
+	confirmWrite = func(string) bool { return true }
+
+	_, _, _, err := turnWith(t, cmd, client, "translate big.txt", &strings.Builder{})
+	if err != nil {
+		t.Fatalf("turn: %v", err)
+	}
+	prompt1, _ := completionBody(t, rec, 1)
+	if !strings.Contains(prompt1, "translate limit") {
+		t.Errorf("size limit not fed back:\n%s", prompt1)
 	}
 }
