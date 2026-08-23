@@ -273,3 +273,27 @@ func TestSSEOpLessFirstContentFrame(t *testing.T) {
 		t.Errorf("deltas = %q", all)
 	}
 }
+
+// TestSSEContainerAppendResponseFragment reproduces the real stream shape:
+// the snapshot holds only THINK/TOOL_SEARCH fragments, and the answer's FIRST
+// token arrives as a RESPONSE fragment appended to the response/fragments
+// container — it must be emitted, then -1/content appends continue it.
+func TestSSEContainerAppendResponseFragment(t *testing.T) {
+	p := &patchParser{}
+	var all []string
+	all = append(all, feed(t, p, `{"v":{"response":{"fragments":[{"id":2,"type":"THINK","content":"thinking..."}]}}}`)...)
+	all = append(all, feed(t, p, `{"p":"response/fragments","o":"APPEND","v":[{"id":3,"type":"RESPONSE","content":"Based"}]}`)...)
+	all = append(all, feed(t, p, `{"p":"response/fragments/-1/content","o":"APPEND","v":" on the"}`)...)
+	all = append(all, feed(t, p, `{"v":" search"}`)...)
+	all = append(all, feed(t, p, `{"v":" results"}`)...)
+	want := []string{"Based", " on the", " search", " results"}
+	if !reflect.DeepEqual(all, want) {
+		t.Errorf("deltas = %q, want %q", all, want)
+	}
+	// A TOOL_SEARCH fragment appended the same way also yields sources.
+	p2 := &patchParser{}
+	feed(t, p2, `{"p":"response/fragments","o":"APPEND","v":[{"id":4,"type":"tool_search","references":[{"url":"https://ex.com/g","title":"G"}]}]}`)
+	if len(p2.sources) != 1 || p2.sources[0].URL != "https://ex.com/g" {
+		t.Errorf("container-appended tool_search sources = %v", p2.sources)
+	}
+}

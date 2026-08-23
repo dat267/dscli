@@ -132,6 +132,15 @@ func (p *patchParser) applyPatch(path string, v any, op string, emit func(string
 	if strings.HasSuffix(path, "/results") || strings.HasSuffix(path, "/references") {
 		p.collectSources(v)
 	}
+	// Container append: new fragments arrive as
+	// {"p":"response/fragments","o":"APPEND","v":[{fragment},...]}. The
+	// answer's FIRST token often lives in a RESPONSE fragment appended this
+	// way (the snapshot only carries THINK/TOOL_SEARCH fragments), so this
+	// frame must not be skipped just because the path does not end in
+	// "content".
+	if (path == "response/fragments" || path == "fragments") && op == "APPEND" {
+		return p.applyFragments(v, emit)
+	}
 	if !strings.HasSuffix(path, "content") {
 		return nil
 	}
@@ -152,6 +161,38 @@ func (p *patchParser) applyPatch(path string, v any, op string, emit func(string
 				}
 				p.emittedAny = true
 			}
+		}
+	}
+	return nil
+}
+
+// applyFragments handles a container-appended array of fragment objects:
+// RESPONSE fragments start (or continue) the answer text, TOOL_SEARCH
+// fragments carry citation sources.
+func (p *patchParser) applyFragments(v any, emit func(string) error) error {
+	frags, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	for _, f := range frags {
+		fm, ok := f.(map[string]any)
+		if !ok {
+			continue
+		}
+		t, _ := fm["type"].(string)
+		switch {
+		case strings.EqualFold(t, "response"):
+			p.activePath = "response/fragments/-1/content"
+			content, _ := fm["content"].(string)
+			if content == "" {
+				continue
+			}
+			if err := emit(content); err != nil {
+				return err
+			}
+			p.emittedAny = true
+		case strings.EqualFold(t, "tool_search"):
+			p.collectSources(fm)
 		}
 	}
 	return nil
