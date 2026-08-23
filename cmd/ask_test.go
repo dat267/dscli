@@ -85,3 +85,81 @@ func TestAskRequiresInput(t *testing.T) {
 }
 
 var _ = deepseek.Session{} // keep import if assertions change
+
+// searchSSE builds a snapshot carrying a response fragment plus a
+// TOOL_SEARCH fragment with citations, so [citation:N] has sources.
+func searchSSE(t *testing.T, seq int, content string, refs []map[string]string) string {
+	t.Helper()
+	var refsAny []any
+	for _, r := range refs {
+		m := map[string]any{}
+		for k, v := range r {
+			m[k] = v
+		}
+		refsAny = append(refsAny, m)
+	}
+	frags := []any{
+		map[string]any{"type": "response", "content": content},
+		map[string]any{"type": "tool_search", "references": refsAny},
+	}
+	line, err := json.Marshal(map[string]any{
+		"v": map[string]any{
+			"response":   map[string]any{"fragments": frags, "message_id": seq},
+			"message_id": seq,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return "data: " + string(line) + "\n\n"
+}
+
+func TestAskSearchSources(t *testing.T) {
+	srv, _ := fakeDeepSeekServerWith(t, []string{
+		searchSSE(t, 2, "Gold is high [citation:1]", []map[string]string{
+			{"url": "https://ex.com/gold", "title": "Gold Prices"},
+		}),
+	})
+	defer srv.Close()
+	cmd := &AskCmd{Prompt: []string{"gold price"}, Search: true, Token: "tok", clientBase: srv.URL}
+
+	var stdout, stderr string
+	stdout = captureStdout(t, func() {
+		stderr = captureStderr(t, func() {
+			if err := cmd.Run(nil, context.Background()); err != nil {
+				t.Fatalf("ask: %v", err)
+			}
+		})
+	})
+	if !strings.Contains(stdout, "Gold is high [citation:1]") {
+		t.Errorf("stdout = %q", stdout)
+	}
+	for _, want := range []string{"Sources:", "[1] Gold Prices — https://ex.com/gold"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr missing %q:\n%s", want, stderr)
+		}
+	}
+}
+
+func TestAskSearchSourcesJSON(t *testing.T) {
+	srv, _ := fakeDeepSeekServerWith(t, []string{
+		searchSSE(t, 2, "hi [citation:1]", []map[string]string{{"url": "https://ex.com/a", "title": "A"}}),
+	})
+	defer srv.Close()
+	cmd := &AskCmd{Prompt: []string{"x"}, Search: true, JSONOut: true, Token: "tok", clientBase: srv.URL}
+
+	stdout := captureStdout(t, func() {
+		if err := cmd.Run(nil, context.Background()); err != nil {
+			t.Fatalf("ask: %v", err)
+		}
+	})
+	lines := strings.Split(strings.TrimSpace(stdout), "\n")
+	var final map[string]any
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &final); err != nil {
+		t.Fatalf("final line not JSON: %q: %v", lines[len(lines)-1], err)
+	}
+	srcs, ok := final["sources"].([]any)
+	if !ok || len(srcs) != 1 {
+		t.Errorf("sources line = %v", final)
+	}
+}

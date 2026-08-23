@@ -286,6 +286,15 @@ func (r CompletionRequest) body() map[string]any {
 // the conversation with ParentMessageID on the next turn.
 type Reply struct {
 	MessageID int64
+	// Sources are the search citations the reply's inline [citation:N]
+	// markers refer to, in order (empty when search was off or no sources).
+	Sources []Source
+}
+
+// Source is one search citation.
+type Source struct {
+	URL   string `json:"url"`
+	Title string `json:"title"`
 }
 
 // StreamCompletion runs the full completion flow — fetch+solve a fresh PoW
@@ -335,7 +344,6 @@ func (c *Client) streamOnce(ctx context.Context, req CompletionRequest, pow stri
 
 	parser := &patchParser{}
 	var messageID int64
-	found := false
 	if err := readSSE(resp.Body, func(payload []byte) error {
 		return parser.Feed(payload, emit)
 	}); err != nil {
@@ -343,13 +351,8 @@ func (c *Client) streamOnce(ctx context.Context, req CompletionRequest, pow stri
 	}
 	if parser.messageID != nil {
 		messageID = *parser.messageID
-		found = true
 	}
-	reply := Reply{}
-	if found {
-		reply.MessageID = messageID
-	}
-	return reply, nil
+	return Reply{MessageID: messageID, Sources: parser.sources}, nil
 }
 
 // readSSE reads an SSE stream, joining each event's "data:" lines and calling

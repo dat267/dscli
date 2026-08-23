@@ -137,3 +137,33 @@ func TestReadSSEJoinsDataLines(t *testing.T) {
 		t.Errorf("payloads = %q, want %q", payloads, want)
 	}
 }
+
+func TestSSECapturesSearchSources(t *testing.T) {
+	p := &patchParser{}
+	snapshot := `{"v":{"response":{"fragments":[
+		{"type":"response","content":"Gold is high [citation:1][citation:2]"},
+		{"type":"tool_search","references":[
+			{"url":"https://ex.com/gold","title":"Gold Prices"},
+			{"url":"https://ex.com/spot"}
+		]}
+	],"message_id":1},"message_id":1}}`
+	var out []string
+	if err := p.Feed([]byte(snapshot), func(s string) error { out = append(out, s); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 || !strings.Contains(out[0], "[citation:1]") {
+		t.Errorf("reply text = %v", out)
+	}
+	want := []Source{{URL: "https://ex.com/gold", Title: "Gold Prices"}, {URL: "https://ex.com/spot"}}
+	if !reflect.DeepEqual(p.sources, want) {
+		t.Errorf("sources = %v, want %v", p.sources, want)
+	}
+
+	// A .../results patch appends more, deduplicated by URL.
+	if err := p.Feed([]byte(`{"p":"response/fragments/0/results","o":"SET","v":[{"url":"https://ex.com/gold"},{"url":"https://new.com"}]}`), func(string) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.sources) != 3 || p.sources[2].URL != "https://new.com" {
+		t.Errorf("sources after patch = %v", p.sources)
+	}
+}

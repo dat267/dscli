@@ -109,7 +109,7 @@ func (c *ChatCmd) newClient() *deepseek.Client {
 // oneTurn asks one question in the given conversation, feeding every reply
 // delta to write, and returns the conversation id to use on the NEXT turn
 // ("<session_id>:<message_id>").
-func (c *ChatCmd) oneTurn(ctx context.Context, client *deepseek.Client, conversation, prompt, model string, write func(string) error) (string, error) {
+func (c *ChatCmd) oneTurn(ctx context.Context, client *deepseek.Client, conversation, prompt, model string, write func(string) error, sources *[]deepseek.Source) (string, error) {
 	sessionID, parentID := splitConversation(conversation)
 	if sessionID == "" {
 		var err error
@@ -136,6 +136,9 @@ func (c *ChatCmd) oneTurn(ctx context.Context, client *deepseek.Client, conversa
 	if err != nil {
 		return "", err
 	}
+	if sources != nil {
+		*sources = reply.Sources
+	}
 	return conversationID(sessionID, parentID, reply.MessageID), nil
 }
 
@@ -157,9 +160,9 @@ func (c *ChatCmd) deltaWriter() func(string) error {
 // the <tool_result> fed back as the next turn, until the model answers in
 // prose. Tool turns print a dim note instead of the raw JSON; the final prose
 // is rendered when it arrives.
-func (c *ChatCmd) turn(ctx context.Context, client *deepseek.Client, conversation, prompt, model string, fileTools bool, note func(string)) (string, error) {
+func (c *ChatCmd) turn(ctx context.Context, client *deepseek.Client, conversation, prompt, model string, fileTools bool, note func(string), sources *[]deepseek.Source) (string, error) {
 	if !fileTools {
-		return c.oneTurn(ctx, client, conversation, prompt, model, c.deltaWriter())
+		return c.oneTurn(ctx, client, conversation, prompt, model, c.deltaWriter(), sources)
 	}
 
 	workdir, err := filepath.Abs(c.Workdir)
@@ -178,7 +181,7 @@ func (c *ChatCmd) turn(ctx context.Context, client *deepseek.Client, conversatio
 		convID, err := c.oneTurn(ctx, client, cur, curPrompt, model, func(d string) error {
 			buf.WriteString(d)
 			return nil
-		})
+		}, sources)
 		if err != nil {
 			return "", err
 		}
@@ -288,7 +291,7 @@ func (c *ChatCmd) turn(ctx context.Context, client *deepseek.Client, conversatio
 	convID, err := c.oneTurn(ctx, client, cur, filetools.CapPrompt, model, func(d string) error {
 		buf.WriteString(d)
 		return nil
-	})
+	}, sources)
 	if err != nil {
 		return "", err
 	}
@@ -305,16 +308,22 @@ func (c *ChatCmd) turn(ctx context.Context, client *deepseek.Client, conversatio
 // ask answers a single question and exits.
 func (c *ChatCmd) ask(ctx context.Context, prompt string) error {
 	client := c.newClient()
+	var sources []deepseek.Source
 	convID, err := c.turn(ctx, client, c.Conversation, prompt, effectiveModel(c.Model), c.FileTools, func(s string) {
 		fmt.Fprintln(os.Stderr, s)
-	})
+	}, &sources)
 	if err != nil {
 		return err
 	}
 	if c.JSONOut {
-		return json.NewEncoder(os.Stdout).Encode(map[string]any{"done": true, "conversation_id": convID})
+		out := map[string]any{"done": true, "conversation_id": convID}
+		if len(sources) > 0 {
+			out["sources"] = sources
+		}
+		return json.NewEncoder(os.Stdout).Encode(out)
 	}
 	fmt.Fprintf(os.Stderr, "\nconversation: %s\n", convID)
+	renderSources(os.Stderr, sources)
 	return nil
 }
 
@@ -492,21 +501,24 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 		// tracked so the next prompt starts on a fresh line. With file tools on
 		// turn() buffers and sieves tool calls, so last-char tracking is moot.
 		if fileTools {
+			var sources []deepseek.Source
 			convID, err := c.turn(ctx, client, conversation, line, model, true, func(s string) {
 				fmt.Fprintln(os.Stderr, u.dim(s))
-			})
+			}, &sources)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, u.red("error: "+err.Error()))
 				fmt.Fprintln(os.Stdout)
 				continue
 			}
 			conversation = convID
+			renderSources(os.Stderr, sources)
 			fmt.Fprintln(os.Stdout) // blank line before the next prompt
 			turns++
 			continue
 		}
 
 		var last byte
+		var sources []deepseek.Source
 		write := func(delta string) error {
 			if len(delta) > 0 {
 				last = delta[len(delta)-1]
@@ -514,7 +526,7 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 			_, err := os.Stdout.WriteString(delta)
 			return err
 		}
-		convID, err := c.oneTurn(ctx, client, conversation, line, model, write)
+		convID, err := c.oneTurn(ctx, client, conversation, line, model, write, &sources)
 		if err != nil {
 			if last != '\n' && last != 0 {
 				fmt.Fprintln(os.Stdout)
@@ -529,6 +541,7 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 			fmt.Fprintln(os.Stdout)
 		}
 		fmt.Fprintln(os.Stdout) // blank line before the next prompt
+		renderSources(os.Stderr, sources)
 		conversation = convID
 		turns++
 	}

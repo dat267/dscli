@@ -308,7 +308,17 @@ It calls a tool by replying with *only* a JSON object:
 `ask` is the minimal one-shot: positional args or piped stdin, the answer
 streams to stdout (or NDJSON with `--json-out`), and the session is created
 per call and deleted afterwards — nothing persists, no conversation id is
-printed.
+printed. Two shell gotchas:
+
+- **A prompt starting with `-`** is parsed as a flag; terminate flags with
+  `--`: `dscli ask -- "what is --help about?"`.
+- **`?` and `*` are shell globs** (zsh: `no matches found`); quote the prompt:
+  `dscli ask "What is the current gold price?"`.
+
+**Search citations:** with `-s` the reply carries `[citation:N]` markers; the
+CLI extracts the search sources from the stream (TOOL_SEARCH fragments /
+`.../results` patches) and prints them as footnotes on stderr — or, with
+`--json-out`, as a final `{"sources":[...]}` line.
 
 ## Scripting
 

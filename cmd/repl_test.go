@@ -241,9 +241,10 @@ func turnWith(t *testing.T, cmd *ChatCmd, client *deepseek.Client, prompt string
 	t.Helper()
 	stdout = captureStdout(t, func() {
 		stderr = captureStderr(t, func() {
+			var sources []deepseek.Source
 			convID, err = cmd.turn(context.Background(), client, "", prompt, "default", true, func(s string) {
 				note.WriteString(s + "\n")
-			})
+			}, &sources)
 		})
 	})
 	return convID, stdout, stderr, err

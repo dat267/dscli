@@ -18,11 +18,11 @@ import (
 // afterwards, so nothing persists and no conversation-id noise is printed.
 // The input may be positional args or piped stdin.
 type AskCmd struct {
-	Prompt   []string      `arg:"" optional:"" help:"Input to send (omit to read from stdin)"`
+	Prompt   []string      `arg:"" optional:"" help:"Input to send (omit to read from stdin; use -- before a prompt that starts with -)"`
 	Model    string        `short:"m" help:"Model: default (Instant) or expert" default:""`
 	Thinking bool          `short:"t" help:"Enable DeepThink reasoning"`
 	Search   bool          `short:"s" help:"Enable web search"`
-	JSONOut  bool          `help:"Emit NDJSON: one {\"delta\":...} line per chunk"`
+	JSONOut  bool          `help:"Emit NDJSON: one {\"delta\":...} line per chunk, then a {\"sources\":[...]} line when search returned citations"`
 	Timeout  time.Duration `help:"Overall budget (0 = no limit)" default:"15m"`
 
 	Token     string `env:"DS_TOKEN" help:"DeepSeek user token (localStorage.userToken). Alternatively: config set token"`
@@ -31,6 +31,23 @@ type AskCmd struct {
 
 	// clientBase overrides the API base URL for tests.
 	clientBase string
+}
+
+// renderSources prints citation footnotes (matching the inline [citation:N]
+// markers) to w, numbered 1..N in order. A no-op when there are none.
+func renderSources(w io.Writer, sources []deepseek.Source) {
+	if len(sources) == 0 {
+		return
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Sources:")
+	for i, s := range sources {
+		if s.Title != "" {
+			fmt.Fprintf(w, "  [%d] %s — %s\n", i+1, s.Title, s.URL)
+		} else {
+			fmt.Fprintf(w, "  [%d] %s\n", i+1, s.URL)
+		}
+	}
 }
 
 func (c *AskCmd) Run(app *App, ctx context.Context) error {
@@ -81,17 +98,25 @@ func (c *AskCmd) Run(app *App, ctx context.Context) error {
 		_, err := os.Stdout.WriteString(delta)
 		return err
 	}
-	if _, err := client.StreamCompletion(ctx, deepseek.CompletionRequest{
+	reply, err := client.StreamCompletion(ctx, deepseek.CompletionRequest{
 		ChatSessionID:   sessionID,
 		Prompt:          prompt,
 		ModelType:       effectiveModel(c.Model),
 		ThinkingEnabled: c.Thinking,
 		SearchEnabled:   c.Search,
-	}, write); err != nil {
+	}, write)
+	if err != nil {
 		return err
 	}
-	if !c.JSONOut && last != '\n' && last != 0 {
+	if c.JSONOut {
+		if len(reply.Sources) > 0 {
+			return json.NewEncoder(os.Stdout).Encode(map[string]any{"sources": reply.Sources})
+		}
+		return nil
+	}
+	if last != '\n' && last != 0 {
 		fmt.Fprintln(os.Stdout)
 	}
+	renderSources(os.Stderr, reply.Sources)
 	return nil
 }

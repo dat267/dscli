@@ -18,10 +18,15 @@ import (
 //	{"v":"llo"}
 //
 // Only text appended to a path ending in "/content" is treated as reply text.
+// Search-enabled replies may also carry TOOL_SEARCH fragments (with
+// references/results) or .../results patch paths; those are captured into
+// Sources so the CLI can print the citations the model references inline as
+// [citation:N].
 type patchParser struct {
 	activePath  string
 	messageID   *int64
 	sawSnapshot bool
+	sources     []Source
 }
 
 // Feed processes one SSE data payload (a single JSON patch operation) and
@@ -49,21 +54,23 @@ func (p *patchParser) Feed(payload []byte, emit func(string) error) error {
 							continue
 						}
 						t, _ := fm["type"].(string)
-						if !strings.EqualFold(t, "response") {
-							continue
-						}
-						content, _ := fm["content"].(string)
-						if content == "" {
-							continue
-						}
-						p.activePath = "response/fragments/-1/content"
-						// Only the first response fragment's content is
-						// pre-generated; later text arrives as appends.
-						if !p.sawSnapshot {
-							p.sawSnapshot = true
-							if err := emit(content); err != nil {
-								return err
+						switch {
+						case strings.EqualFold(t, "response"):
+							content, _ := fm["content"].(string)
+							if content == "" {
+								continue
 							}
+							p.activePath = "response/fragments/-1/content"
+							// Only the first response fragment's content is
+							// pre-generated; later text arrives as appends.
+							if !p.sawSnapshot {
+								p.sawSnapshot = true
+								if err := emit(content); err != nil {
+									return err
+								}
+							}
+						case strings.EqualFold(t, "tool_search"):
+							p.collectSources(fm)
 						}
 					}
 				}
@@ -80,6 +87,11 @@ func (p *patchParser) Feed(payload []byte, emit func(string) error) error {
 				p.messageID = id
 			}
 		}
+		// Search result lists can arrive as updates to .../results or
+		// .../references paths.
+		if strings.HasSuffix(path, "/results") || strings.HasSuffix(path, "/references") {
+			p.collectSources(v)
+		}
 		if o, _ := obj["o"].(string); o == "APPEND" {
 			if txt, ok := v.(string); ok && strings.HasSuffix(path, "content") {
 				return emit(txt)
@@ -93,6 +105,66 @@ func (p *patchParser) Feed(payload []byte, emit func(string) error) error {
 		return emit(txt)
 	}
 	return nil
+}
+
+// collectSources appends citation sources found in a TOOL_SEARCH fragment or
+// a .../results patch value, deduplicated by URL.
+func (p *patchParser) collectSources(v any) {
+	if m, ok := v.(map[string]any); ok {
+		for _, key := range []string{"references", "results", "result"} {
+			if items, ok := m[key].([]any); ok {
+				p.addSourceItems(items)
+			}
+		}
+		return
+	}
+	if items, ok := v.([]any); ok {
+		p.addSourceItems(items)
+	}
+}
+
+func (p *patchParser) addSourceItems(items []any) {
+	for _, it := range items {
+		s := sourceFromItem(it)
+		if s.URL == "" {
+			continue
+		}
+		dup := false
+		for _, have := range p.sources {
+			if have.URL == s.URL {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			p.sources = append(p.sources, s)
+		}
+	}
+}
+
+// sourceFromItem extracts {url, title} from a search-result item, accepting
+// the common key spellings; a bare URL string also counts.
+func sourceFromItem(it any) Source {
+	switch item := it.(type) {
+	case string:
+		if strings.HasPrefix(item, "http://") || strings.HasPrefix(item, "https://") {
+			return Source{URL: item}
+		}
+	case map[string]any:
+		url := firstString(item, "url", "link", "href", "source")
+		title := firstString(item, "title", "name", "label")
+		return Source{URL: url, Title: title}
+	}
+	return Source{}
+}
+
+func firstString(m map[string]any, keys ...string) string {
+	for _, k := range keys {
+		if s, ok := m[k].(string); ok {
+			return s
+		}
+	}
+	return ""
 }
 
 // captureMessageID best-effort: pull the assistant message_id out of a
