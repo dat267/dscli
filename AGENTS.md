@@ -2,10 +2,11 @@
 
 ## Release workflow
 
-This project is installable via `go install github.com/dat267/dscli@latest`. Go's
-module proxy permanently freezes the source of every published tag, and the
-module cache caches that source forever. A broken or incomplete tag cannot be
-silently fixed — it requires a new version.
+This project installs straight from git — clone + `go build` — so it does not
+depend on published tags or the Go module proxy. Tags are optional: if you do
+publish them, remember the module proxy permanently freezes the source of
+every published tag, and the module cache caches that source forever. A broken
+or incomplete tag cannot be silently fixed — it requires a new version.
 
 Therefore, before tagging a commit and pushing that tag, you MUST verify:
 

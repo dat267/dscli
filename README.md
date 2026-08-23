@@ -41,8 +41,12 @@ Run "dscli <command> --help" for more information on a command.
 ## Quick start
 
 ```bash
-# Install
-go install github.com/dat267/dscli@latest
+# Install — straight from git, no tags, no Go module proxy
+git clone https://github.com/dat267/dscli
+cd dscli
+go build -ldflags="-X main.version=$(git describe --tags --always)" -o dscli .
+# optionally put it on your PATH:
+#   install -m 0755 dscli ~/.local/bin/
 
 # Capture your session (one-time)
 dscli login
