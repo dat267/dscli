@@ -551,7 +551,7 @@ func printReplHelp(u ui) {
   /model <default|expert>     switch model (starts a fresh conversation)
   /thinking [on|off]          toggle DeepThink reasoning
   /search [on|off]            toggle web search
-  /files [on|off]             toggle file tools (list/read/create/edit/rename/delete in the CWD; writes ask first)
+  /files [on|off]             toggle file tools (list/read/meta/create/edit/rename/delete in the CWD; writes ask first)
   /help                       this help`))
 }
 

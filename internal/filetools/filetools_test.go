@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -882,5 +883,95 @@ func TestRunListRecursiveSymlinkNotDescended(t *testing.T) {
 	}
 	if strings.Contains(res, "secret.txt") {
 		t.Errorf("recursive listing escaped through a symlink:\n%s", res)
+	}
+}
+
+func TestRunMetaFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "song.lrc"), []byte("[00:01.00]hello\n[00:05.50]world\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	res := (Call{Tool: "file_meta", Path: "song.lrc"}).Run(dir)
+	for _, want := range []string{"kind: file", "size: 32 B (32 bytes)", "modified: 20", "mode: 0600", "duration: 00:05.50"} {
+		if !strings.Contains(res, want) {
+			t.Errorf("file meta missing %q:\n%s", want, res)
+		}
+	}
+}
+
+func TestRunMetaDirectory(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("12345"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sub", "b.bin"), []byte("123"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	res := (Call{Tool: "file_meta", Path: "."}).Run(dir)
+	if !strings.Contains(res, "kind: directory") || !strings.Contains(res, "entries: 3") {
+		t.Errorf("dir meta wrong:\n%s", res)
+	}
+	if !strings.Contains(res, "total size: 8 B") {
+		t.Errorf("total size wrong:\n%s", res)
+	}
+	// Path escape still applies.
+	if r := (Call{Tool: "file_meta", Path: "../x"}).Run(dir); !strings.Contains(r, "ERROR") {
+		t.Errorf("escape must be rejected: %q", r)
+	}
+}
+
+func TestRunMetaEPUB(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "book.epub")
+	if err := writeTestEPUB(f); err != nil {
+		t.Fatal(err)
+	}
+	// The test EPUB has no dc:title; opacity check is just "no error".
+	if res := (Call{Tool: "file_meta", Path: "book.epub"}).Run(dir); strings.Contains(res, "ERROR") {
+		t.Errorf("epub meta errored: %s", res)
+	}
+}
+
+func TestProtectedAndVerify(t *testing.T) {
+	lrc := "[ti:Hello]\n[00:01.00]hello world\n[00:05.50]bye now\n"
+	got := ProtectedLines("lrc", []byte(lrc))
+	want := []string{"[00:01.00]", "[00:05.50]"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("lrc protected = %v, want %v", got, want)
+	}
+	// Identical translation passes.
+	if err := VerifyProtected("lrc", lrc, "[ti:Hola]\n[00:01.00]hola mundo\n[00:05.50]adiós\n"); err != nil {
+		t.Errorf("valid lrc translation rejected: %v", err)
+	}
+	// A changed timestamp fails, even when the lyric text is fine.
+	err := VerifyProtected("lrc", lrc, "[ti:Hello]\n[00:01.00]hola mundo\n[99:99.99]adiós\n")
+	if err == nil || !strings.Contains(err.Error(), "protected line") {
+		t.Errorf("changed timestamp must fail: %v", err)
+	}
+
+	vtt := "WEBVTT\n\n00:00:01.000 --> 00:00:04.000\nHi there\n"
+	vp := ProtectedLines("vtt", []byte(vtt))
+	if len(vp) != 2 || !strings.Contains(vp[0], "WEBVTT") || !strings.Contains(vp[1], "-->") {
+		t.Errorf("vtt protected = %v", vp)
+	}
+	if err := VerifyProtected("vtt", vtt, "WEBVTT\n\n00:00:01.000 --> 00:00:04.000\nHola\n"); err != nil {
+		t.Errorf("valid vtt translation rejected: %v", err)
+	}
+	if err := VerifyProtected("vtt", vtt, "WEBVTT\n\n00:00:09.000 --> 00:00:12.000\nHola\n"); err == nil {
+		t.Error("changed vtt timing must fail")
+	}
+}
+
+func TestDetectFormat(t *testing.T) {
+	for path, want := range map[string]string{
+		"a.txt": "text", "README.md": "markdown", "notes.markdown": "markdown",
+		"song.lrc": "lrc", "movie.vtt": "vtt", "movie.srt": "vtt",
+	} {
+		if got := DetectFormat(path, nil); got != want {
+			t.Errorf("DetectFormat(%s) = %s, want %s", path, got, want)
+		}
 	}
 }

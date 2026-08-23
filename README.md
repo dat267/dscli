@@ -21,6 +21,7 @@ Flags:
 Commands:
   chat            Chat with DeepSeek (omit the prompt for an interactive
                   session)
+  translate       Translate a file (txt, md, lrc, vtt, epub) via the model
   login           Show how to capture your DeepSeek login (token + cookie)
   version         Show version
   config init     Generate a default configuration file
@@ -146,6 +147,7 @@ It calls a tool by replying with *only* a JSON object:
 
 ```json
 {"tool":"list_directory","path":".","recursive":true}
+{"tool":"file_meta","path":"song.lrc"}
 {"tool":"read_file","path":"book.epub"}
 {"tool":"create_file","path":"notes.txt","content":"hello"}
 {"tool":"edit_file","path":"src/cli.go","old":"func Foo(","new":"func Bar("}
@@ -153,7 +155,9 @@ It calls a tool by replying with *only* a JSON object:
 ```
 
 - **`list_directory` and `read_file` run without prompting** — reading and
-  directory listing inside the workdir are always allowed. `list_directory`
+  directory listing inside the workdir are always allowed. `file_meta`
+  reports size, mode, modified time, EPUB title/author, LRC/VTT duration,
+  and directory entry counts/total size without prompting. `list_directory`
   lists ONE directory per call (directories marked with a trailing `/`,
   files with human-readable sizes); add `"recursive": true` to map the whole
   subtree in a single bounded call (≤ 500 entries, ≤ 6 levels deep) instead
@@ -285,3 +289,29 @@ go test ./...
 - Structures follow [github.com/dat267/min](https://github.com/dat267/min)
   (kong CLI, JSON config with nested keys, config-flag merging, version
   injection via ldflags).
+## Translate
+
+`dscli translate` runs a format-aware, chunked translation of a file and
+writes the result:
+
+```bash
+dscli translate notes.md                       # → notes.translated.md
+dscli translate song.lrc --to "Chinese"        # keeps timestamps byte-for-byte
+dscli translate movie.vtt -o zh.vtt            # WebVTT, timing lines preserved
+dscli translate book.epub -o book.txt          # EPUB text extraction → translation
+dscli translate -f lyrics.lrc -o lyrics.lrc    # overwrite the source in place
+```
+
+- Long files are split into ~24 KiB chunks (line boundaries preserved) and
+  translated turn-by-turn in one clean session; each chunk streams through
+  the same PoW/SSE pipeline.
+- **LRC/VTT structural awareness:** the CLI verifies after every chunk that
+  timestamps (`[mm:ss.xx]`, `hh:mm:ss.mmm --> hh:mm:ss.mmm`), the `WEBVTT`
+  header and NOTE blocks survived byte-for-byte; a broken chunk is retried
+  once with a strict reminder, then fails loudly instead of producing a
+  corrupt file.
+- Markdown keeps code blocks/URLs/list markers; `.epub` is extracted to text
+  first and defaults to a `.translated.txt` output.
+- The output path defaults to `<input>.translated.<ext>` and is never
+  overwritten without `-f`. The session is ephemeral, like chat (created per
+  run, deleted when the run ends).

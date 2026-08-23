@@ -15,7 +15,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -59,9 +61,9 @@ const MaxIterations = 12
 // MaxIterations tool calls without giving a prose answer.
 const CapPrompt = "You have used all your file tool calls for this request. Do not call any more tools. Give your final answer now, based only on what you have already learned."
 
-// isText reports whether data looks like a text file: no NUL byte in the
+// IsText reports whether data looks like a text file: no NUL byte in the
 // leading probe window.
-func isText(data []byte) bool {
+func IsText(data []byte) bool {
 	probe := data
 	if len(probe) > binaryProbeSize {
 		probe = probe[:binaryProbeSize]
@@ -139,7 +141,7 @@ func Extract(text string) (Call, bool) {
 
 func valid(c Call) bool {
 	switch c.Tool {
-	case "read_file", "list_directory", "create_file", "delete_file":
+	case "read_file", "list_directory", "file_meta", "create_file", "delete_file":
 		return c.Path != ""
 	case "edit_file":
 		return c.Path != "" && c.Old != ""
@@ -304,6 +306,8 @@ func (c Call) Run(workdir string) string {
 	switch c.Tool {
 	case "list_directory":
 		return c.runList(workdir)
+	case "file_meta":
+		return c.runMeta(workdir)
 	case "read_file":
 		return c.runRead(workdir)
 	case "edit_file":
@@ -486,38 +490,50 @@ func (c Call) runRead(workdir string) string {
 		return FormatResult(c.Tool, c.Path, "ERROR: "+err.Error())
 	}
 	// Text-only guard: binary content would pollute the model context.
-	if !isText(data) {
+	if !IsText(data) {
 		return FormatResult(c.Tool, c.Path, "ERROR: not a text file (binary content); read_file only reads text")
 	}
 	return FormatResult(c.Tool, c.Path, string(data))
 }
 
 // readEPUB extracts the chapter text of an EPUB (ZIP of XHTML) in spine
-// order, stripped of markup, capped at MaxReadBytes of extracted text.
+// order, stripped of markup, capped at MaxReadBytes of extracted text, and
+// wraps it as a tool result.
 func (c Call) readEPUB(path string) string {
-	f, err := os.Open(path)
+	text, err := ReadEpub(path)
 	if err != nil {
 		return FormatResult(c.Tool, c.Path, "ERROR: "+err.Error())
+	}
+	return FormatResult(c.Tool, c.Path, text)
+}
+
+// ReadEpub extracts the chapter text of an EPUB (ZIP of XHTML) in spine
+// order, stripped of markup, capped at MaxReadBytes of extracted text. The
+// result carries a header noting it is extracted text.
+func ReadEpub(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
 	}
 	defer func() { _ = f.Close() }()
 	info, err := f.Stat()
 	if err != nil {
-		return FormatResult(c.Tool, c.Path, "ERROR: "+err.Error())
+		return "", err
 	}
 	zr, err := zip.NewReader(f, info.Size())
 	if err != nil {
-		return FormatResult(c.Tool, c.Path, "ERROR: not a readable EPUB: "+err.Error())
+		return "", fmt.Errorf("not a readable EPUB: %w", err)
 	}
 	chapters, err := epubChapters(zr)
 	if err != nil {
-		return FormatResult(c.Tool, c.Path, "ERROR: EPUB parse failed: "+err.Error())
+		return "", fmt.Errorf("EPUB parse failed: %w", err)
 	}
 	var out strings.Builder
-	fmt.Fprintf(&out, "EPUB text extracted from %s (%d sections)\n\n", c.Path, len(chapters))
+	fmt.Fprintf(&out, "EPUB text extracted from %s (%d sections)\n\n", path, len(chapters))
 	for _, ch := range chapters {
 		text, err := stripHTML(ch)
 		if err != nil {
-			return FormatResult(c.Tool, c.Path, "ERROR: EPUB chapter parse failed: "+err.Error())
+			return "", fmt.Errorf("EPUB chapter parse failed: %w", err)
 		}
 		if text == "" {
 			continue
@@ -529,28 +545,31 @@ func (c Call) readEPUB(path string) string {
 		out.WriteString(text)
 		out.WriteString("\n\n")
 	}
-	return FormatResult(c.Tool, c.Path, out.String())
+	return out.String(), nil
 }
 
-// epubChapters returns the XHTML files of an EPUB in spine order, reading
-// META-INF/container.xml → OPF → manifest/spine.
-func epubChapters(zr *zip.Reader) ([]string, error) {
-	find := func(name string) (*zip.File, bool) {
-		for _, f := range zr.File {
-			if strings.EqualFold(f.Name, name) {
-				return f, true
-			}
+// findZip locates a case-insensitively matched file inside an EPUB archive.
+func findZip(zr *zip.Reader, name string) (*zip.File, bool) {
+	for _, f := range zr.File {
+		if strings.EqualFold(f.Name, name) {
+			return f, true
 		}
-		return nil, false
 	}
-	container, ok := find("META-INF/container.xml")
+	return nil, false
+}
+
+// epubOPFPath reads META-INF/container.xml and returns the OPF path
+// (relative to the archive root) that describes the book.
+func epubOPFPath(zr *zip.Reader) (string, error) {
+	container, ok := findZip(zr, "META-INF/container.xml")
 	if !ok {
-		return nil, fmt.Errorf("missing META-INF/container.xml")
+		return "", fmt.Errorf("missing META-INF/container.xml")
 	}
 	rc, err := container.Open()
 	if err != nil {
-		return nil, err
+		return "", err
 	}
+	defer rc.Close()
 	var ctr struct {
 		Rootfiles struct {
 			Rootfile []struct {
@@ -559,18 +578,26 @@ func epubChapters(zr *zip.Reader) ([]string, error) {
 		} `xml:"rootfiles"`
 	}
 	if err := xml.NewDecoder(rc).Decode(&ctr); err != nil {
-		rc.Close()
-		return nil, fmt.Errorf("container.xml: %w", err)
+		return "", fmt.Errorf("container.xml: %w", err)
 	}
-	rc.Close()
 	if len(ctr.Rootfiles.Rootfile) == 0 {
-		return nil, fmt.Errorf("container.xml has no rootfile")
+		return "", fmt.Errorf("container.xml has no rootfile")
 	}
-	opfFile, ok := find(ctr.Rootfiles.Rootfile[0].FullPath)
+	return ctr.Rootfiles.Rootfile[0].FullPath, nil
+}
+
+// epubChapters returns the XHTML files of an EPUB in spine order, reading
+// META-INF/container.xml → OPF → manifest/spine.
+func epubChapters(zr *zip.Reader) ([]string, error) {
+	opfPath, err := epubOPFPath(zr)
+	if err != nil {
+		return nil, err
+	}
+	opfFile, ok := findZip(zr, opfPath)
 	if !ok {
-		return nil, fmt.Errorf("OPF %q not found", ctr.Rootfiles.Rootfile[0].FullPath)
+		return nil, fmt.Errorf("OPF %q not found", opfPath)
 	}
-	rc, err = opfFile.Open()
+	rc, err := opfFile.Open()
 	if err != nil {
 		return nil, err
 	}
@@ -603,7 +630,7 @@ func epubChapters(zr *zip.Reader) ([]string, error) {
 			continue
 		}
 		name := filepath.ToSlash(filepath.Join(base, href))
-		f, ok := find(name)
+		f, ok := findZip(zr, name)
 		if !ok {
 			continue
 		}
@@ -996,7 +1023,7 @@ func PlanDelete(workdir string, c Call) DeletePlan {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s — deleting (%d bytes)\n", Display(workdir, c.Path), info.Size())
-	if isText(data) {
+	if IsText(data) {
 		lines := strings.Split(string(data), "\n")
 		fmt.Fprintf(&b, "%d line(s)\n", len(lines))
 		show := min(len(lines), 12)
@@ -1039,4 +1066,230 @@ func (c Call) runDelete(workdir string) string {
 		return FormatResult(c.Tool, c.Path, "ERROR: "+err.Error())
 	}
 	return FormatResult(c.Tool, c.Path, fmt.Sprintf("deleted %s (%d bytes)", c.Path, plan.Bytes))
+}
+
+// maxDirStatEntries caps how many entries a directory file_meta counts.
+const maxDirStatEntries = 5000
+
+// maxDirStatDepth caps how deep a directory file_meta walks.
+const maxDirStatDepth = 8
+
+// runMeta reports file/directory metadata without prompting.
+func (c Call) runMeta(workdir string) string {
+	path, err := workdirPath(workdir, c.Path)
+	if err != nil {
+		return FormatResult(c.Tool, c.Path, "ERROR: "+err.Error())
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return FormatResult(c.Tool, c.Path, "ERROR: "+err.Error())
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "path: %s\n", c.Path)
+	if info.IsDir() {
+		fmt.Fprintln(&b, "kind: directory")
+		count, total, truncated := dirStats(path, 0)
+		fmt.Fprintf(&b, "entries: %d\n", count)
+		fmt.Fprintf(&b, "total size: %s (%d bytes)\n", humanSize(total), total)
+		if truncated {
+			fmt.Fprintf(&b, "note: entry walk capped at %d\n", maxDirStatEntries)
+		}
+	} else {
+		fmt.Fprintln(&b, "kind: file")
+		fmt.Fprintf(&b, "size: %s (%d bytes)\n", humanSize(info.Size()), info.Size())
+		fmt.Fprintf(&b, "modified: %s\n", info.ModTime().Format("2006-01-02 15:04:05"))
+		fmt.Fprintf(&b, "mode: %04o\n", info.Mode().Perm())
+		switch strings.ToLower(filepath.Ext(path)) {
+		case ".epub":
+			if meta := epubMeta(path); meta != "" {
+				fmt.Fprintf(&b, "epub: %s\n", meta)
+			}
+		case ".lrc":
+			if d, ok := lrcDuration(path); ok {
+				fmt.Fprintf(&b, "duration: %s\n", d)
+			}
+		case ".vtt":
+			if d, ok := vttDuration(path); ok {
+				fmt.Fprintf(&b, "duration: %s\n", d)
+			}
+		}
+	}
+	return FormatResult(c.Tool, c.Path, strings.TrimSuffix(b.String(), "\n"))
+}
+
+// dirStats counts entries and sums file sizes under root, with bounded batched
+// reads, a depth cap, and an entry cap. Symlinked directories are not followed.
+func dirStats(root string, depth int) (count int, total int64, truncated bool) {
+	if depth > maxDirStatDepth || count > maxDirStatEntries {
+		return count, total, count > maxDirStatEntries
+	}
+	f, err := os.Open(root)
+	if err != nil {
+		return count, total, truncated
+	}
+	defer func() { _ = f.Close() }()
+	for {
+		entries, err := f.ReadDir(256)
+		for _, e := range entries {
+			if count >= maxDirStatEntries {
+				return count, total, true
+			}
+			count++
+			info, err := e.Info()
+			if err == nil && !info.IsDir() {
+				total += info.Size()
+			}
+			if e.IsDir() {
+				var t bool
+				count2, size, trunc := dirStats(filepath.Join(root, e.Name()), depth+1)
+				count, total, t = count+count2, total+size, truncated || trunc
+				_ = t
+			}
+		}
+		if err == io.EOF {
+			return count, total, truncated
+		}
+		if err != nil {
+			return count, total, truncated
+		}
+	}
+}
+
+// epubMeta returns "title — author(s)" from an EPUB's OPF metadata, if present.
+func epubMeta(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil {
+		return ""
+	}
+	zr, err := zip.NewReader(f, info.Size())
+	if err != nil {
+		return ""
+	}
+	opfPath, err := epubOPFPath(zr)
+	if err != nil {
+		return ""
+	}
+	opf, ok := findZip(zr, opfPath)
+	if !ok {
+		return ""
+	}
+	rc, err := opf.Open()
+	if err != nil {
+		return ""
+	}
+	defer rc.Close()
+	var meta struct {
+		Metadata struct {
+			Title    string   `xml:"title"`
+			Creators []string `xml:"creator"`
+		} `xml:"metadata"`
+	}
+	if err := xml.NewDecoder(rc).Decode(&meta); err != nil || meta.Metadata.Title == "" {
+		return ""
+	}
+	if len(meta.Metadata.Creators) > 0 && meta.Metadata.Creators[0] != "" {
+		return meta.Metadata.Title + " — " + meta.Metadata.Creators[0]
+	}
+	return meta.Metadata.Title
+}
+
+// lrcDuration returns the last [mm:ss.xx] timestamp of an LRC as mm:ss.
+func lrcDuration(path string) (string, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	re := regexp.MustCompile(`\[(\d+):(\d+(?:\.\d+)?)\]`)
+	max := 0.0
+	for _, m := range re.FindAllStringSubmatch(string(data), -1) {
+		mm, _ := strconv.ParseFloat(m[1], 64)
+		ss, _ := strconv.ParseFloat(m[2], 64)
+		if d := mm*60 + ss; d > max {
+			max = d
+		}
+	}
+	if max <= 0 {
+		return "", false
+	}
+	return fmt.Sprintf("%02d:%05.2f", int(max)/60, max-float64(int(max)/60)*60), true
+}
+
+// vttDuration returns the latest cue end time of a WebVTT file as hh:mm:ss.
+func vttDuration(path string) (string, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	re := regexp.MustCompile(`(\d{1,2}):(\d{2}):(\d{2})(?:\.\d+)?\s*-->`)
+	max := 0.0
+	for _, m := range re.FindAllStringSubmatch(string(data), -1) {
+		h, _ := strconv.ParseFloat(m[1], 64)
+		mm, _ := strconv.ParseFloat(m[2], 64)
+		ss, _ := strconv.ParseFloat(m[3], 64)
+		if d := h*3600 + mm*60 + ss; d > max {
+			max = d
+		}
+	}
+	if max <= 0 {
+		return "", false
+	}
+	return fmt.Sprintf("%02d:%02d:%02d", int(max)/3600, int(max)/60%60, int(max)%60), true
+}
+
+// DetectFormat classifies a transcript-style file for translation.
+func DetectFormat(path string, content []byte) string {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".lrc":
+		return "lrc"
+	case ".vtt", ".srt":
+		return "vtt"
+	case ".md", ".markdown":
+		return "markdown"
+	}
+	return "text"
+}
+
+// ProtectedLines returns the structural tokens of a format that MUST survive
+// a translation byte-for-byte: for LRC every [mm:ss(.xx)] timestamp in order
+// (including on lyric lines); for VTT the timing lines and the WEBVTT header.
+// Empty for plain text.
+func ProtectedLines(format string, content []byte) []string {
+	switch format {
+	case "lrc":
+		return lrcTimecodeRE.FindAllString(string(content), -1)
+	case "vtt":
+		var out []string
+		for _, line := range strings.Split(string(content), "\n") {
+			trim := strings.TrimSpace(line)
+			if strings.Contains(trim, "-->") || trim == "WEBVTT" {
+				out = append(out, trim)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+// lrcTimecodeRE matches an LRC timestamp tag like [01:23.45] or [1:02].
+var lrcTimecodeRE = regexp.MustCompile(`\[\d{1,2}:\d{2}(?:\.\d+)?\]`)
+
+// VerifyProtected checks that the protected lines of a translation are
+// exactly the protected lines of the original.
+func VerifyProtected(format string, original, translated string) error {
+	orig := ProtectedLines(format, []byte(original))
+	trans := ProtectedLines(format, []byte(translated))
+	if len(orig) != len(trans) {
+		return fmt.Errorf("protected line count changed (%d → %d); timestamps/headers must stay identical", len(orig), len(trans))
+	}
+	for i := range orig {
+		if orig[i] != trans[i] {
+			return fmt.Errorf("protected line %d changed:\n  original: %q\n  translated: %q", i+1, orig[i], trans[i])
+		}
+	}
+	return nil
 }
