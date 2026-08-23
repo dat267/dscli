@@ -156,12 +156,12 @@ chat tool resolves the same way, so CLI and chat mode stay consistent.
    false friends, connectors, structure preservation) — applies to all pairs
    with no custom file.
 
-drop your own
-`translate/zh-en.md` (or point `--instructions` at any file) and it applies
-to that pair everywhere:
+Drop your own `translate/<from>-<to>.md` (e.g. `translate/ja-en.md`, or
+`translate/zh-en.md`) into `./translate/` (or point `--instructions` at any
+file) and it applies to that pair everywhere:
 
 ```bash
-dscli translate book.lrc --from Japanese --to English   # picks up translate/ja-en.md
+dscli translate book.lrc --from Japanese --to English   # picks up translate/ja-en.md if present
 dscli translate --instructions my-style.md chapter.md  # explicit file for any pair
 ```
 
