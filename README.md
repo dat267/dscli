@@ -38,8 +38,7 @@ Run "dscli <command> --help" for more information on a command.
 # Install
 go install github.com/dat267/dscli@latest
 
-# Capture your session (one-time): token from localStorage.userToken,
-# ds_session_id from the cookies
+# Capture your session (one-time)
 dscli login
 
 # Save it (the values live only in your config file, created with 0600 perms)
@@ -54,8 +53,18 @@ dscli chat -c '<conversation id>' "And what about Rice's theorem?"
 ```
 
 `token` and `cookie` can also come from `DS_TOKEN`/`DS_COOKIE` env vars or the
-`--token`/`--cookie` flags. The cookie field stores the bare `ds_session_id`
-value; a full `k=v; k2=v2` cookie string is passed through untouched.
+`--token`/`--cookie` flags. The cookie field stores either the bare
+`ds_session_id` value or a full `k=v; k2=v2` cookie header, which is passed
+through untouched.
+
+> **Why the console snippet only returns the token:** the web app keeps the
+> bearer token in `localStorage.userToken` (readable from JavaScript), but
+> `ds_session_id` is an **HttpOnly** cookie, so `document.cookie` cannot see
+> it. Path of least resistance: DevTools → Network → click any
+> `chat.deepseek.com` request → Headers → copy the whole `cookie:` line
+> (or just the `ds_session_id=...` value) into `config set cookie`. Pasting
+> the full cookie line also forwards the AWS WAF token, which the site
+> sometimes wants alongside the session cookie.
 
 ## Interactive session
 
