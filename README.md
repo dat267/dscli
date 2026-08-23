@@ -153,11 +153,19 @@ It calls a tool by replying with *only* a JSON object:
 ```
 
 - **`list_directory` and `read_file` run without prompting** — reading and
-  directory listing inside the workdir are always allowed (`list_directory`
-  lists ONE directory, non-recursive, directories marked with a trailing `/`;
-  reads are capped at 48 KB and the text is fed back to the model). The model
-  is instructed to start with `{"tool":"list_directory","path":"."}` to
-  discover files.
+  directory listing inside the workdir are always allowed, **but `read_file`
+  only reads text files**: binary content (NUL-byte detection over the leading
+  8 KB) and files larger than the size ceiling are rejected outright — never
+  truncated — and the rejection is fed back to the model, which is told not to
+  retry. The ceiling defaults to 48 KB and is tunable per run:
+
+  ```bash
+  dscli chat --file-tools --file-max-read 100000 "summarize client.go"
+  ```
+
+  `list_directory` lists ONE directory, non-recursive, directories marked
+  with a trailing `/`. The model is instructed to start with
+  `{"tool":"list_directory","path":"."}` to discover files.
 - **`create_file`, `edit_file` and `delete_file` always ask first — after
   showing a deterministic preview.** `create_file` makes a *new* file (it
   errors if the path already exists, and creates parent directories within

@@ -1,6 +1,7 @@
 package filetools
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -81,18 +82,67 @@ func TestRunRead(t *testing.T) {
 	}
 }
 
-func TestRunReadTruncates(t *testing.T) {
+func TestRunReadTooLarge(t *testing.T) {
 	dir := t.TempDir()
 	f := filepath.Join(dir, "big.txt")
 	if err := os.WriteFile(f, []byte(strings.Repeat("x", MaxReadBytes+100)), 0644); err != nil {
 		t.Fatal(err)
 	}
 	res := (Call{Tool: "read_file", Path: "big.txt"}).Run(dir)
-	if !strings.Contains(res, "truncated") {
-		t.Errorf("expected truncation warning: %q", res)
+	if !strings.Contains(res, "exceeding the max read size") {
+		t.Errorf("expected size rejection, got %q", res)
 	}
-	if n := strings.Count(res, "x"); n >= MaxReadBytes+100 {
-		t.Errorf("result too large: %d bytes", n)
+}
+
+func TestRunReadRejectsBinary(t *testing.T) {
+	dir := t.TempDir()
+	cases := []struct {
+		name string
+		data []byte
+	}{
+		{"nul prefix", []byte("\x7fELF\x00\x01")},
+		{"nul inside", append([]byte("head\n"), append([]byte{0}, []byte("tail")...)...)},
+	}
+	for _, tc := range cases {
+		f := filepath.Join(dir, tc.name)
+		if err := os.WriteFile(f, tc.data, 0644); err != nil {
+			t.Fatal(err)
+		}
+		res := (Call{Tool: "read_file", Path: tc.name}).Run(dir)
+		if !strings.Contains(res, "not a text file") {
+			t.Errorf("%s: expected binary rejection, got %q", tc.name, res)
+		}
+	}
+	// A NUL past the probe window still counts as text (documented heuristic).
+	late := bytes.Repeat([]byte{'a'}, binaryProbeSize+10)
+	late[binaryProbeSize+9] = 0
+	f := filepath.Join(dir, "late.txt")
+	if err := os.WriteFile(f, late, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if res := (Call{Tool: "read_file", Path: "late.txt"}).Run(dir); strings.Contains(res, "not a text file") {
+		t.Errorf("NUL beyond probe should not trigger binary rejection: %q", res)
+	}
+}
+
+func TestRunReadSizeCeiling(t *testing.T) {
+	dir := t.TempDir()
+	orig := MaxReadBytes
+	t.Cleanup(func() { MaxReadBytes = orig })
+	MaxReadBytes = 16
+
+	f := filepath.Join(dir, "small.txt")
+	if err := os.WriteFile(f, []byte("0123456789abcdef"), 0644); err != nil { // 16 bytes, allowed
+		t.Fatal(err)
+	}
+	if res := (Call{Tool: "read_file", Path: "small.txt"}).Run(dir); strings.Contains(res, "ERROR") {
+		t.Errorf("16-byte file must read under a 16-byte ceiling: %q", res)
+	}
+	if err := os.WriteFile(f, []byte("0123456789abcdefX"), 0644); err != nil { // 17 bytes
+		t.Fatal(err)
+	}
+	if res := (Call{Tool: "read_file", Path: "small.txt"}).Run(dir); !strings.Contains(res, "exceeding the max read size") {
+		t.Errorf("17-byte file must be rejected under a 16-byte ceiling: %q", res)
 	}
 }
 
@@ -348,7 +398,7 @@ func TestPlanDelete(t *testing.T) {
 	if p1.Result != "" {
 		t.Fatalf("plan failed: %q", p1.Result)
 	}
-	if !strings.Contains(p1.Preview, "gone.txt — deleting (4 lines, 17 bytes)") {
+	if !strings.Contains(p1.Preview, "gone.txt — deleting (17 bytes)\n4 line(s)") {
 		t.Errorf("preview header wrong:\n%s", p1.Preview)
 	}
 	if !strings.Contains(p1.Preview, "-  1 │ alpha") {

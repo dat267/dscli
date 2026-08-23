@@ -532,3 +532,35 @@ func TestFileToolsDeleteLoop(t *testing.T) {
 		t.Errorf("delete result not fed back:\n%s", promptResult)
 	}
 }
+
+// TestFileToolsBinaryReadRejected: reading a binary file errors at the tool
+// level and the rejection is fed back to the model.
+func TestFileToolsBinaryReadRejected(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "blob.bin"), []byte{0x7f, 'E', 'L', 'F', 0x00, 0x01}, 0644); err != nil {
+		t.Fatal(err)
+	}
+	readCall := `{"tool":"read_file","path":"blob.bin"}`
+	srv, rec := fakeDeepSeekServerWith(t, []string{
+		completionSSE(t, 2, readCall),
+		completionSSE(t, 3, "I can't read that file."),
+	})
+	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
+	cmd := &ChatCmd{Workdir: dir}
+
+	var note strings.Builder
+	_, stdout, _, err := turnWith(t, cmd, client, "read blob.bin", &note)
+	if err != nil {
+		t.Fatalf("turn: %v", err)
+	}
+	if stdout != "I can't read that file.\n" {
+		t.Errorf("stdout = %q", stdout)
+	}
+	if !strings.Contains(note.String(), "read_file blob.bin") {
+		t.Errorf("missing read note: %q", note.String())
+	}
+	prompt2, _ := completionBody(t, rec, 1)
+	if !strings.Contains(prompt2, "not a text file") {
+		t.Errorf("binary rejection not fed back:\n%s", prompt2)
+	}
+}

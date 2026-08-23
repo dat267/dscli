@@ -6,6 +6,7 @@
 package filetools
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -13,8 +14,21 @@ import (
 	"strings"
 )
 
-// MaxReadBytes caps how much of a file is fed back to the model per read.
-const MaxReadBytes = 48 * 1024
+// DefaultMaxReadBytes is the read_file size ceiling when --file-max-read is
+// not given. Files larger than the effective ceiling are rejected outright
+// (never truncated), so only bounded text reaches the model context.
+const DefaultMaxReadBytes = 48 * 1024
+
+// MaxReadBytes is the runtime read_file ceiling. It is initialised to
+// DefaultMaxReadBytes and may be tuned (the chat command's --file-max-read
+// flag sets it before any turn runs); concurrent mutable access is not
+// expected.
+var MaxReadBytes = DefaultMaxReadBytes
+
+// binaryProbeSize is how many leading bytes are inspected for NUL bytes to
+// decide whether a file is text. NULs are essentially never present in text
+// encodings read here (UTF-8/ASCII).
+const binaryProbeSize = 8000
 
 // MaxListEntries caps how many directory entries a list_directory result
 // reports in one call.
@@ -22,6 +36,16 @@ const MaxListEntries = 200
 
 // MaxIterations caps a model↔tool resolution loop.
 const MaxIterations = 12
+
+// isText reports whether data looks like a text file: no NUL byte in the
+// leading probe window.
+func isText(data []byte) bool {
+	probe := data
+	if len(probe) > binaryProbeSize {
+		probe = probe[:binaryProbeSize]
+	}
+	return !bytes.Contains(probe, []byte{0})
+}
 
 // Call is the JSON object the model emits to request a file operation.
 type Call struct {
@@ -46,12 +70,13 @@ Rules:
 - ACT, don't announce. When the user asks you to inspect or change files, perform the tool calls yourself in the same reply series; never reply with prose about what you are about to do ("let me...", "I'll...", "first I need to...").
 - Every turn is exactly ONE of two things: a single tool-call JSON object, or — only when your task is fully complete — your final answer in plain text.
 - To explore: start with {"tool":"list_directory","path":"."}, which lists ONE directory, non-recursive, directories marked with a trailing /; drill into subdirectories, then read what you need.
+- read_file only reads TEXT files up to %d bytes: larger or binary files are rejected — do not retry them, tell the user instead.
 - To change: create_file makes a NEW file (it errors if the file already exists — then use edit_file or delete_file first); edit_file replaces the first exact occurrence of "old" (whitespace, quotes and indentation count — read the file first and copy from it); delete_file removes a file permanently. Creating or deleting files asks the user for confirmation; if the user rejects, do not retry.
 - After every tool call you receive a <tool_result> block. React to it with the next tool call, or your final answer. If an edit reports the pattern was not found, re-read the file and retry with the correct "old" text.
 - Paths may be relative to %s or absolute inside it.
 [END FILE TOOLS]
 
-User: `, workdir, workdir)
+User: `, workdir, MaxReadBytes, workdir)
 }
 
 // FormatResult wraps a tool outcome for feeding back to the model.
@@ -255,13 +280,19 @@ func (c Call) runRead(workdir string) string {
 	if info.IsDir() {
 		return FormatResult(c.Tool, c.Path, "ERROR: is a directory; read_file reads a single file")
 	}
+	// Hard size ceiling, checked before reading so large files are never
+	// pulled into memory or context.
+	if info.Size() > int64(MaxReadBytes) {
+		return FormatResult(c.Tool, c.Path,
+			fmt.Sprintf("ERROR: file is %d bytes, exceeding the max read size of %d bytes", info.Size(), MaxReadBytes))
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return FormatResult(c.Tool, c.Path, "ERROR: "+err.Error())
 	}
-	if int64(len(data)) > MaxReadBytes {
-		data = data[:MaxReadBytes]
-		return FormatResult(c.Tool, c.Path, fmt.Sprintf("WARNING: file truncated at %d bytes\n%s", MaxReadBytes, data))
+	// Text-only guard: binary content would pollute the model context.
+	if !isText(data) {
+		return FormatResult(c.Tool, c.Path, "ERROR: not a text file (binary content); read_file only reads text")
 	}
 	return FormatResult(c.Tool, c.Path, string(data))
 }
@@ -455,15 +486,20 @@ func PlanDelete(workdir string, c Call) DeletePlan {
 	if err != nil {
 		return DeletePlan{Result: "ERROR: " + err.Error()}
 	}
-	lines := strings.Split(string(data), "\n")
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s — deleting (%d lines, %d bytes)\n", Display(workdir, c.Path), len(lines), info.Size())
-	show := min(len(lines), 12)
-	for i := 0; i < show; i++ {
-		fmt.Fprintf(&b, "-%3d │ %s\n", i+1, lines[i])
-	}
-	if show < len(lines) {
-		fmt.Fprintf(&b, "  … %d more line(s)\n", len(lines)-show)
+	fmt.Fprintf(&b, "%s — deleting (%d bytes)\n", Display(workdir, c.Path), info.Size())
+	if isText(data) {
+		lines := strings.Split(string(data), "\n")
+		fmt.Fprintf(&b, "%d line(s)\n", len(lines))
+		show := min(len(lines), 12)
+		for i := 0; i < show; i++ {
+			fmt.Fprintf(&b, "-%3d │ %s\n", i+1, lines[i])
+		}
+		if show < len(lines) {
+			fmt.Fprintf(&b, "  … %d more line(s)\n", len(lines)-show)
+		}
+	} else {
+		fmt.Fprintln(&b, "(binary content, not shown)")
 	}
 	return DeletePlan{Preview: b.String(), Bytes: info.Size()}
 }
