@@ -41,14 +41,11 @@ Run "dscli <command> --help" for more information on a command.
 ## Quick start
 
 ```bash
-# Install — straight from git, no tags, no Go module proxy
-git clone https://github.com/dat267/dscli
-cd dscli
-go build -ldflags="-X main.version=$(git describe --tags --always)" -o dscli .
-# optionally put it on your PATH:
-#   install -m 0755 dscli ~/.local/bin/
+# Install — straight from GitHub: no tags, no Go module proxy
+GOPROXY=direct GOSUMDB=off go install github.com/dat267/dscli@main
 
-# Capture your session (one-time)
+# The binary lands in $(go env GOBIN) (~/go/bin by default); make sure that
+# is on your PATH, then:
 dscli login
 
 # Save it (the values live only in your config file, created with 0600 perms)
