@@ -366,3 +366,43 @@ func TestFileToolsEditApplied(t *testing.T) {
 		t.Errorf("edit summary not fed back:\n%s", prompt2)
 	}
 }
+
+// TestFileToolsListLoop: the model lists the workdir, gets the listing fed
+// back, then answers in prose.
+func TestFileToolsListLoop(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hi"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "cmd"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	listCall := `{"tool":"list_directory","path":"."}`
+	srv, rec := fakeDeepSeekServerWith(t, []string{
+		completionSSE(t, 2, listCall),
+		completionSSE(t, 3, "Found a.txt and cmd/."),
+	})
+	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
+	cmd := &ChatCmd{Workdir: dir}
+
+	var note strings.Builder
+	convID, stdout, err := turnWith(t, cmd, client, "what files are here?", &note)
+	if err != nil {
+		t.Fatalf("turn: %v", err)
+	}
+	if stdout != "Found a.txt and cmd/.\n" {
+		t.Errorf("stdout = %q", stdout)
+	}
+	if !strings.Contains(note.String(), "list_directory .") {
+		t.Errorf("missing list note: %q", note.String())
+	}
+	if convID != "sess-1:3" {
+		t.Errorf("convID = %q", convID)
+	}
+	prompt2, _ := completionBody(t, rec, 1)
+	for _, want := range []string{"a.txt", "cmd/" /* dir marker */} {
+		if !strings.Contains(prompt2, want) {
+			t.Errorf("listing not fed back (missing %q):\n%s", want, prompt2)
+		}
+	}
+}

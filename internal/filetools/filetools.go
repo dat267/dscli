@@ -1,8 +1,8 @@
-// Package filetools implements the two file tools the chat model can call:
-// read_file and edit_file. The contract is a single JSON object per turn —
-// see Instructions — so parsing is deterministic and safe: extraction only
-// accepts a well-formed object naming a known tool, and every file access is
-// confined to a working directory.
+// Package filetools implements the file tools the chat model can call:
+// list_directory, read_file and edit_file. The contract is a single JSON
+// object per turn — see Instructions — so parsing is deterministic and safe:
+// extraction only accepts a well-formed object naming a known tool, and every
+// file access is confined to a working directory.
 package filetools
 
 import (
@@ -16,12 +16,16 @@ import (
 // MaxReadBytes caps how much of a file is fed back to the model per read.
 const MaxReadBytes = 48 * 1024
 
+// MaxListEntries caps how many directory entries a list_directory result
+// reports in one call.
+const MaxListEntries = 200
+
 // MaxIterations caps a model↔tool resolution loop.
 const MaxIterations = 12
 
 // Call is the JSON object the model emits to request a file operation.
 type Call struct {
-	Tool string `json:"tool"` // "read_file" | "edit_file"
+	Tool string `json:"tool"` // "list_directory" | "read_file" | "edit_file"
 	Path string `json:"path"`
 	Old  string `json:"old"` // edit_file: exact existing text (first occurrence replaced)
 	New  string `json:"new"` // edit_file: replacement text
@@ -31,16 +35,18 @@ type Call struct {
 // model. It is prepended to the user's prompt.
 func Instructions(workdir string) string {
 	return fmt.Sprintf(`[FILE TOOLS]
-You can read and edit files inside %s by replying with ONLY a JSON object (no other text, no markdown):
-  {"tool":"read_file","path":"<path>"}
-  {"tool":"edit_file","path":"<path>","old":"<exact existing text>","new":"<replacement text>"}
+You can work with files inside %s by replying with ONLY a JSON object (no other text, no markdown):
+  {"tool":"list_directory","path":"<dir>"}
+  {"tool":"read_file","path":"<file>"}
+  {"tool":"edit_file","path":"<file>","old":"<exact existing text>","new":"<replacement text>"}
 Rules:
+- Start with {"tool":"list_directory","path":"."} to see what is in %s. list_directory lists ONE directory non-recursively (directories are marked with a trailing /); drill into subdirectories by listing them, then read the files you need.
 - Paths may be relative to %s or absolute inside it.
 - Before editing, always read the file so "old" matches the current content EXACTLY (whitespace, quotes and indentation count); the first occurrence is replaced.
 - After each tool call you receive a <tool_result> block. Reply with the next tool call, or — when done — with your final answer in plain text.
 [END FILE TOOLS]
 
-User: `, workdir, workdir)
+User: `, workdir, workdir, workdir)
 }
 
 // FormatResult wraps a tool outcome for feeding back to the model.
@@ -78,7 +84,7 @@ func Extract(text string) (Call, bool) {
 
 func valid(c Call) bool {
 	switch c.Tool {
-	case "read_file":
+	case "read_file", "list_directory":
 		return c.Path != ""
 	case "edit_file":
 		return c.Path != "" && c.Old != ""
@@ -169,12 +175,46 @@ func workdirPath(workdir, p string) (string, error) {
 // feed back to the model (never a Go error: the outcome is for the model).
 func (c Call) Run(workdir string) string {
 	switch c.Tool {
+	case "list_directory":
+		return c.runList(workdir)
 	case "read_file":
 		return c.runRead(workdir)
 	case "edit_file":
 		return c.runEdit(workdir)
 	}
 	return FormatResult(c.Tool, c.Path, "ERROR: unknown tool")
+}
+
+func (c Call) runList(workdir string) string {
+	path, err := workdirPath(workdir, c.Path)
+	if err != nil {
+		return FormatResult(c.Tool, c.Path, "ERROR: "+err.Error())
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return FormatResult(c.Tool, c.Path, "ERROR: "+err.Error())
+	}
+	var lines []string
+	truncated := false
+	for i, e := range entries {
+		if i >= MaxListEntries {
+			truncated = true
+			break
+		}
+		name := e.Name()
+		if e.IsDir() {
+			name += "/"
+		}
+		lines = append(lines, name)
+	}
+	body := strings.Join(lines, "\n")
+	if truncated {
+		body += fmt.Sprintf("\nWARNING: directory truncated at %d entries", MaxListEntries)
+	}
+	if body == "" {
+		body = "(empty directory)"
+	}
+	return FormatResult(c.Tool, c.Path, body)
 }
 
 func (c Call) runRead(workdir string) string {

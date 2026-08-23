@@ -1,6 +1,7 @@
 package filetools
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,6 +33,12 @@ func TestExtract(t *testing.T) {
 		c, ok := Extract(`{"tool":"edit_file","path":"a.go","old":"say \"hi\"","new":"say \"bye\""}`)
 		if !ok || c.Old != `say "hi"` {
 			t.Errorf("got %+v old=%q", c, c.Old)
+		}
+	})
+	t.Run("list_directory", func(t *testing.T) {
+		c, ok := Extract(`{"tool":"list_directory","path":"."}`)
+		if !ok || c.Tool != "list_directory" || c.Path != "." {
+			t.Errorf("got %+v ok=%v", c, ok)
 		}
 	})
 	t.Run("prose is not a call", func(t *testing.T) {
@@ -117,17 +124,76 @@ func TestRunEditMissingFile(t *testing.T) {
 	}
 }
 
+func TestRunList(t *testing.T) {
+	dir := t.TempDir()
+	for name := range map[string]struct {
+		isDir bool
+	}{
+		"a.txt":     {},
+		"cmd":       {isDir: true},
+		"README.md": {},
+	} {
+		if name == "cmd" {
+			if err := os.Mkdir(filepath.Join(dir, name), 0755); err != nil {
+				t.Fatal(err)
+			}
+		} else if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	res := (Call{Tool: "list_directory", Path: "."}).Run(dir)
+	for _, want := range []string{"a.txt", "cmd/", "README.md"} {
+		if !strings.Contains(res, want) {
+			t.Errorf("listing missing %q:\n%s", want, res)
+		}
+	}
+	if strings.Contains(res, "ERROR") {
+		t.Errorf("unexpected error: %s", res)
+	}
+
+	// A nested listing works and a missing directory errors.
+	res = (Call{Tool: "list_directory", Path: "cmd"}).Run(dir)
+	if strings.Contains(res, "ERROR") {
+		t.Errorf("nested listing failed: %s", res)
+	}
+	res = (Call{Tool: "list_directory", Path: "nope"}).Run(dir)
+	if !strings.Contains(res, "ERROR") {
+		t.Errorf("missing directory should error: %s", res)
+	}
+}
+
+func TestRunListTruncates(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < MaxListEntries+50; i++ {
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("f%03d.txt", i)), []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res := (Call{Tool: "list_directory", Path: "."}).Run(dir)
+	if !strings.Contains(res, "truncated") {
+		t.Errorf("expected truncation warning: %s", res)
+	}
+	if n := strings.Count(res, ".txt"); n >= MaxListEntries+50 {
+		t.Errorf("listing too large: %d entries", n)
+	}
+}
+
 func TestPathEscapeRejected(t *testing.T) {
 	dir := t.TempDir()
 	for _, p := range []string{
 		"../escape.txt",
+		"../",
 		"a/../../escape.txt",
 		"/etc/passwd", // absolute outside the workdir
+		"/etc",
 		"",
 	} {
-		res := (Call{Tool: "read_file", Path: p}).Run(dir)
-		if !strings.Contains(res, "ERROR") {
-			t.Errorf("path %q must be rejected, got %q", p, res)
+		for _, tool := range []string{"read_file", "list_directory", "edit_file"} {
+			res := (Call{Tool: tool, Path: p, Old: "x", New: "y"}).Run(dir)
+			if !strings.Contains(res, "ERROR") {
+				t.Errorf("path %q with tool %s must be rejected, got %q", p, tool, res)
+			}
 		}
 	}
 	// Absolute path inside the workdir is fine.
@@ -143,7 +209,7 @@ func TestPathEscapeRejected(t *testing.T) {
 
 func TestInstructionsMentionsTools(t *testing.T) {
 	ins := Instructions("/tmp/proj")
-	for _, want := range []string{"read_file", "edit_file", "/tmp/proj", "FILE TOOLS"} {
+	for _, want := range []string{"list_directory", "read_file", "edit_file", "/tmp/proj", "FILE TOOLS"} {
 		if !strings.Contains(ins, want) {
 			t.Errorf("instructions missing %q", want)
 		}

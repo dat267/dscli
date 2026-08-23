@@ -145,13 +145,17 @@ dscli chat --file-tools --workdir /path/to/project "rename the Foo function to B
 It calls a tool by replying with *only* a JSON object:
 
 ```json
+{"tool":"list_directory","path":"."}
 {"tool":"read_file","path":"Makefile"}
 {"tool":"edit_file","path":"src/cli.go","old":"func Foo(","new":"func Bar("}
 ```
 
-- **`read_file` runs without prompting** — reading inside the workdir is
-  always allowed (files are capped at 48 KB and the text is fed back to the
-  model).
+- **`list_directory` and `read_file` run without prompting** — reading and
+  directory listing inside the workdir are always allowed (`list_directory`
+  lists ONE directory, non-recursive, directories marked with a trailing `/`;
+  reads are capped at 48 KB and the text is fed back to the model). The model
+  is instructed to start with `{"tool":"list_directory","path":"."}` to
+  discover files.
 - **`edit_file` always asks first** (`apply edit to ...? [y/N]`). The answer
   is read from the controlling terminal (`/dev/tty`), so it never collides
   with the REPL's input; if no terminal is available the edit is denied and
