@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"time"
@@ -114,14 +115,58 @@ func (c *ChatCmd) ask(ctx context.Context, prompt string) error {
 }
 
 // repl runs an interactive multi-turn session.
+//
+// Stateless by default: with no --conversation it creates a fresh session at
+// launch, keeps every turn in it, and deletes it (plus any sessions spawned
+// by /new or /model) when the session ends — however it ends, including
+// Ctrl-C.
 func (c *ChatCmd) repl(ctx context.Context) error {
 	client := c.newClient()
-	conversation := c.Conversation
+
+	// Track the sessions this launch created so none of them outlive it.
+	var owned []string
+	if c.Conversation == "" {
+		sid, err := client.CreateChatSession(ctx)
+		if err != nil {
+			return fmt.Errorf("create chat session: %w", err)
+		}
+		owned = append(owned, sid)
+		return c.replLoop(ctx, client, sid, owned)
+	}
+	return c.replLoop(ctx, client, c.Conversation, owned)
+}
+
+func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, conversation string, owned []string) error {
 	model := effectiveModel(c.Model)
 	thinking := c.Thinking
 	search := c.Search
 
+	deleteOwned := func() {
+		if len(owned) == 0 {
+			return
+		}
+		if err := client.DeleteSessions(context.Background(), owned); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to delete session(s): %v\n", err)
+		}
+	}
+	// Ctrl-C must clean up too: defers do not run on os.Exit.
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt)
+	go func() {
+		<-sig
+		deleteOwned()
+		os.Exit(130)
+	}()
+	defer func() {
+		signal.Stop(sig)
+		deleteOwned()
+	}()
+
 	fmt.Fprintln(os.Stderr, "Interactive DeepSeek session (one line per question; /help for commands).")
+	if c.Conversation == "" {
+		fmt.Fprintln(os.Stderr, "This session is ephemeral: it is deleted when you leave.")
+	}
+
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	var turns int
@@ -169,6 +214,17 @@ func (c *ChatCmd) repl(ctx context.Context) error {
 			continue
 		}
 
+		// A reset (/new, /model) leaves conversation empty; the next turn
+		// spawns a fresh session that is also deleted at close.
+		if conversation == "" {
+			sid, err := client.CreateChatSession(ctx)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error: create chat session: %v\n", err)
+				continue
+			}
+			conversation = sid
+			owned = append(owned, sid)
+		}
 		convID, err := c.oneTurn(ctx, client, conversation, line, model)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)

@@ -87,7 +87,13 @@ you> /exit
 conversation: 0123456789:42
 ```
 
-One line per question; multi-line input is not supported.
+**No persistence.** Launching `dscli chat` without `-c` creates a *fresh*
+session, keeps every turn in that one session, and deletes it when the REPL
+closes — `/exit`, `/quit`, Ctrl-D, or Ctrl-C (a delete failure only prints a
+warning). `/new` and `/model` spawn additional sessions inside the same run;
+those are cleaned up on close too. So the conversation id shown is the live
+thread's id — useful while the session lasts, but the session is gone once
+you leave. One line per question; multi-line input is not supported.
 
 ## Models, DeepThink & web search
 

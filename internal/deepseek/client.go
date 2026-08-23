@@ -15,10 +15,11 @@ import (
 
 // Endpoints and constants of chat.deepseek.com's internal web API.
 const (
-	BaseURL          = "https://chat.deepseek.com"
-	CompletionPath   = "/api/v0/chat/completion"
-	powChallengePath = "/api/v0/chat/create_pow_challenge"
+	BaseURL           = "https://chat.deepseek.com"
+	CompletionPath    = "/api/v0/chat/completion"
+	powChallengePath  = "/api/v0/chat/create_pow_challenge"
 	sessionCreatePath = "/api/v0/chat_session/create"
+	sessionDeletePath = "/api/v0/chat_session/delete"
 
 	// One-minute ceiling for the small JSON exchanges; the completion stream
 	// is bounded by the caller-supplied context instead.
@@ -43,6 +44,7 @@ type Session struct {
 // Client is a stateful HTTP client for DeepSeek's web API.
 type Client struct {
 	http *http.Client
+	base string // API base URL; overridable for tests
 	sess Session
 	ua   string
 }
@@ -57,6 +59,7 @@ func NewClient(sess Session, timeout time.Duration) *Client {
 	}
 	return &Client{
 		http: &http.Client{Timeout: timeout},
+		base: BaseURL,
 		sess: sess,
 		ua:   ua,
 	}
@@ -127,7 +130,7 @@ func (c *Client) postJSON(ctx context.Context, path string, body any, out *bizEn
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, BaseURL+path, bytes.NewReader(buf))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+path, bytes.NewReader(buf))
 	if err != nil {
 		return err
 	}
@@ -194,6 +197,29 @@ func (c *Client) CreateChatSession(ctx context.Context) (string, error) {
 	return data.Session.ID, nil
 }
 
+// DeleteSessions removes chat sessions server-side. The delete endpoint takes
+// a batch of ids; an empty slice is a no-op. Only the standard envelope code
+// matters in the response (no biz_data is returned).
+func (c *Client) DeleteSessions(ctx context.Context, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, shortTimeout)
+	defer cancel()
+	var env bizEnvelope
+	if err := c.postJSON(ctx, sessionDeletePath, map[string]any{"chat_session_ids": ids}, &env); err != nil {
+		return err
+	}
+	if env.Code != 0 {
+		msg := env.Msg
+		if msg == "" {
+			msg = fmt.Sprintf("code=%d", env.Code)
+		}
+		return fmt.Errorf("deepseek api error: %s", msg)
+	}
+	return nil
+}
+
 // fetchChallenge fetches a PoW challenge for the completion endpoint.
 func (c *Client) fetchChallenge(ctx context.Context) (Challenge, error) {
 	ctx, cancel := context.WithTimeout(ctx, shortTimeout)
@@ -226,17 +252,17 @@ func (c *Client) powHeader(ctx context.Context) (string, error) {
 
 // CompletionRequest is the body of POST /api/v0/chat/completion.
 type CompletionRequest struct {
-	ChatSessionID    string
-	ParentMessageID  *int64 // nil on the first turn (sent as JSON null)
-	Prompt           string
-	ModelType        string // "default"/"expert" on the first turn; "" omits the field when resuming
-	ThinkingEnabled  bool
-	SearchEnabled    bool
+	ChatSessionID   string
+	ParentMessageID *int64 // nil on the first turn (sent as JSON null)
+	Prompt          string
+	ModelType       string // "default"/"expert" on the first turn; "" omits the field when resuming
+	ThinkingEnabled bool
+	SearchEnabled   bool
 }
 
 func (r CompletionRequest) body() map[string]any {
 	b := map[string]any{
-		"chat_session_id":  r.ChatSessionID,
+		"chat_session_id":   r.ChatSessionID,
 		"parent_message_id": r.ParentMessageID,
 		"prompt":            r.Prompt,
 		"ref_file_ids":      []any{},
@@ -286,7 +312,7 @@ func (c *Client) streamOnce(ctx context.Context, req CompletionRequest, pow stri
 	if err != nil {
 		return Reply{}, err
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, BaseURL+CompletionPath, bytes.NewReader(buf))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+CompletionPath, bytes.NewReader(buf))
 	if err != nil {
 		return Reply{}, err
 	}

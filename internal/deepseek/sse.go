@@ -19,8 +19,8 @@ import (
 //
 // Only text appended to a path ending in "/content" is treated as reply text.
 type patchParser struct {
-	activePath string
-	messageID  *int64
+	activePath  string
+	messageID   *int64
 	sawSnapshot bool
 }
 
