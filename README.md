@@ -21,6 +21,8 @@ Flags:
 Commands:
   chat            Chat with DeepSeek (omit the prompt for an interactive
                   session)
+  ask             Ask the model once and print the answer (input from args or
+                  stdin)
   translate       Translate a file (txt, md, lrc, srt, vtt, ass, ttml, epub) via
                   the model
   pairs           List original/translation file pairs in a directory (TSV:
@@ -51,6 +53,11 @@ dscli config set cookie "<cookie>"
 
 # Ask a question (the reply streams like a chat)
 dscli chat "Explain the halting problem in one paragraph"
+
+# Or a pure one-shot: input in, answer out, no conversation bookkeeping
+dscli ask "What is 2+2?"
+echo "summarize this" | dscli ask
+dscli ask --thinking --search "latest Mars rover news"
 
 # Continue that conversation later
 dscli chat -c '<conversation id>' "And what about Rice's theorem?"
@@ -296,6 +303,11 @@ It calls a tool by replying with *only* a JSON object:
   and every apply re-verifies the file still matches the preview (a file
   changed in between — or a create target that appeared — refuses the
   operation instead of clobbering). The session is still deleted on close.
+
+`ask` is the minimal one-shot: positional args or piped stdin, the answer
+streams to stdout (or NDJSON with `--json-out`), and the session is created
+per call and deleted afterwards — nothing persists, no conversation id is
+printed.
 
 ## Scripting
 
