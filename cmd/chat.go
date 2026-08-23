@@ -259,7 +259,25 @@ func (c *ChatCmd) turn(ctx context.Context, client *deepseek.Client, conversatio
 		}
 		curPrompt = filetools.FormatResult(call.Tool, call.Path, "ERROR: unknown tool")
 	}
-	return "", fmt.Errorf("file tool loop exceeded %d turns", filetools.MaxIterations)
+	// The model spent its whole tool budget without reaching prose (e.g. it
+	// kept exploring a very large tree). Force one final answer so the user
+	// always gets a conclusion instead of an abrupt limit error.
+	var buf strings.Builder
+	convID, err := c.oneTurn(ctx, client, cur, filetools.CapPrompt, model, func(d string) error {
+		buf.WriteString(d)
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	text := buf.String()
+	if !strings.HasSuffix(text, "\n") {
+		text += "\n"
+	}
+	if err := write(text); err != nil {
+		return "", err
+	}
+	return convID, nil
 }
 
 // ask answers a single question and exits.

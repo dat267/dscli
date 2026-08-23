@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/dat267/dscli/internal/deepseek"
+	"github.com/dat267/dscli/internal/filetools"
 )
 
 // golden challenge: the wasm solver inverts it to nonce 999, so the fake
@@ -562,5 +563,47 @@ func TestFileToolsBinaryReadRejected(t *testing.T) {
 	prompt2, _ := completionBody(t, rec, 1)
 	if !strings.Contains(prompt2, "not a text file") {
 		t.Errorf("binary rejection not fed back:\n%s", prompt2)
+	}
+}
+
+// TestFileToolsLoopBounded: a model that keeps calling tools (ever-growing
+// exploration) is hard-capped — after the tool budget it is forced to give a
+// final answer, so one user message can never loop indefinitely.
+func TestFileToolsLoopBounded(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hi"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	readCall := `{"tool":"read_file","path":"a.txt"}`
+	completions := make([]string, 0, filetools.MaxIterations+1)
+	for i := 0; i < filetools.MaxIterations; i++ { // the model never answers in prose
+		completions = append(completions, completionSSE(t, 2, readCall))
+	}
+	completions = append(completions, completionSSE(t, 3, "Final answer."))
+
+	srv, rec := fakeDeepSeekServerWith(t, completions)
+	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
+	cmd := &ChatCmd{Workdir: dir}
+
+	var note strings.Builder
+	convID, stdout, _, err := turnWith(t, cmd, client, "explore everything", &note)
+	if err != nil {
+		t.Fatalf("turn: %v", err)
+	}
+	if stdout != "Final answer.\n" {
+		t.Errorf("stdout = %q, want the forced final answer", stdout)
+	}
+	if convID != "sess-1:3" {
+		t.Errorf("convID = %q", convID)
+	}
+	rec.mu.Lock()
+	n := len(rec.completionBodies)
+	rec.mu.Unlock()
+	if want := filetools.MaxIterations + 1; n != want {
+		t.Errorf("completions = %d, want %d (tool budget + forced final)", n, want)
+	}
+	final, _ := completionBody(t, rec, filetools.MaxIterations)
+	if !strings.Contains(final, "final answer") {
+		t.Errorf("forced final prompt wrong: %q", final)
 	}
 }

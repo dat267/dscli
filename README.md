@@ -190,8 +190,11 @@ It calls a tool by replying with *only* a JSON object:
   prompted) and the model is told to re-read the file and copy the exact
   text.
 - Tool calls resolve within the same session (each `read_file`/`edit_file`
-  turn feeds a `<tool_result>` back), capped at 12 iterations, and the final
-  prose answer is what you see. The raw JSON never reaches your screen; a dim
+  turn feeds a `<tool_result>` back), hard-capped at 12 tool calls per
+  user message — after the budget the model is forced to give a final prose
+  answer, so exploring a very large tree can never loop indefinitely. Listings
+  are read in bounded batches, so a directory with hundreds of thousands of
+  entries costs ~200 entries of work, not a full scan. The raw JSON never reaches your screen; a dim
   note shows each call (`read_file Makefile`). All paths are confined to the
   workdir: lexical `..` escapes **and symlink chains leading outside** are
   rejected via canonical resolution, writes preserve the target's file mode,

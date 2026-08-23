@@ -10,8 +10,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -37,8 +39,15 @@ const binaryProbeSize = 8000
 // reports in one call.
 const MaxListEntries = 200
 
-// MaxIterations caps a model↔tool resolution loop.
+// MaxIterations caps how many tool calls the model may make for one user
+// message. The loop is hard-bounded: after the cap the CLI forces a final
+// prose answer, so exploration of even a very large tree cannot run
+// indefinitely.
 const MaxIterations = 12
+
+// CapPrompt is appended as the final turn when the model exhausts
+// MaxIterations tool calls without giving a prose answer.
+const CapPrompt = "You have used all your file tool calls for this request. Do not call any more tools. Give your final answer now, based only on what you have already learned."
 
 // isText reports whether data looks like a text file: no NUL byte in the
 // leading probe window.
@@ -71,6 +80,7 @@ You can inspect and change files inside %s. To use a tool, reply with ONLY a JSO
   {"tool":"delete_file","path":"<file>"}
 Rules:
 - ACT, don't announce. When the user asks you to inspect or change files, perform the tool calls yourself in the same reply series; never reply with prose about what you are about to do ("let me...", "I'll...", "first I need to...").
+- Budget: at most %d tool calls per user message; spend them on what matters, then give your final answer in prose.
 - Every turn is exactly ONE of two things: a single tool-call JSON object, or — only when your task is fully complete — your final answer in plain text.
 - To explore: start with {"tool":"list_directory","path":"."}, which lists ONE directory, non-recursive, directories marked with a trailing /; drill into subdirectories, then read what you need.
 - read_file only reads TEXT files up to %d bytes: larger or binary files are rejected — do not retry them, tell the user instead.
@@ -79,7 +89,7 @@ Rules:
 - Paths may be relative to %s or absolute inside it.
 [END FILE TOOLS]
 
-User: `, workdir, MaxReadBytes, workdir)
+User: `, workdir, MaxIterations, MaxReadBytes, workdir)
 }
 
 // FormatResult wraps a tool outcome for feeding back to the model.
@@ -297,22 +307,40 @@ func (c Call) runList(workdir string) string {
 	if err != nil {
 		return FormatResult(c.Tool, c.Path, "ERROR: "+err.Error())
 	}
-	entries, err := os.ReadDir(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return FormatResult(c.Tool, c.Path, "ERROR: "+err.Error())
 	}
+	defer func() { _ = f.Close() }()
+
+	// Read in bounded batches so a directory with hundreds of thousands of
+	// entries costs at most ~MaxListEntries+1 of work and memory, never a
+	// full scan. One extra entry beyond the cap marks the listing truncated.
 	var lines []string
-	truncated := false
-	for i, e := range entries {
-		if i >= MaxListEntries {
-			truncated = true
+	for {
+		batch, err := f.ReadDir(256)
+		for _, e := range batch {
+			name := e.Name()
+			if e.IsDir() {
+				name += "/"
+			}
+			lines = append(lines, name)
+			if len(lines) > MaxListEntries {
+				break
+			}
+		}
+		if len(lines) > MaxListEntries || err == io.EOF {
 			break
 		}
-		name := e.Name()
-		if e.IsDir() {
-			name += "/"
+		if err != nil {
+			return FormatResult(c.Tool, c.Path, "ERROR: "+err.Error())
 		}
-		lines = append(lines, name)
+	}
+	sort.Strings(lines)
+
+	truncated := len(lines) > MaxListEntries
+	if truncated {
+		lines = lines[:MaxListEntries]
 	}
 	body := strings.Join(lines, "\n")
 	if truncated {
