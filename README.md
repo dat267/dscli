@@ -418,9 +418,11 @@ dscli translate book.epub -o book.txt          # EPUB text extraction → transl
 dscli translate -f lyrics.lrc -o lyrics.lrc    # overwrite the source in place
 ```
 
-- Long files are split into ~24 KiB chunks (line boundaries preserved) and
-  translated turn-by-turn in one clean session; each chunk streams through
-  the same PoW/SSE pipeline.
+- Chunks default to **~half the model's 1M-token context** (~2 MiB of source,
+  the other half reserved for the translation output), so typical files
+  translate in a single turn with the full window of context. Chunks that
+  still overflow are automatically bisected and retried as smaller pieces;
+  `--chunk-bytes N` forces an explicit size.
 - **Structural awareness for every subtitle/lyric format:** after every
   chunk the CLI verifies that the structure survived byte-for-byte — LRC
   `[mm:ss.xx]` timecodes, SRT `HH:MM:SS,mmm --> ...` timing lines, WebVTT

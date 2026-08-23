@@ -21,7 +21,7 @@ type TranslateCmd struct {
 	To           string        `help:"Target language" default:"English"`
 	Output       string        `short:"o" help:"Output path (default: <input>.translated.<ext>, .txt for epub)"`
 	Force        bool          `short:"f" help:"Overwrite the output file if it exists"`
-	ChunkBytes   int           `help:"Approximate chunk size in bytes (line boundaries preserved)" default:"24576"`
+	ChunkBytes   int           `help:"Approximate chunk size in bytes; 0 uses ~half the model's 1M-token context (~2 MiB) and auto-bisects on overflow" default:"0"`
 	Instructions string        `help:"File with custom translation instructions for this run (default: translate/<from>-<to>.md, then a built-in general style)"`
 	Timeout      time.Duration `help:"Overall budget (0 = no limit)" default:"15m"`
 

@@ -22,10 +22,23 @@ const (
 	// MaxChatInputBytes caps what the chat translate_file tool accepts —
 	// one tool call is a deliberately long unit, so keep it sane.
 	MaxChatInputBytes = 1 << 20 // 1 MiB
-	// DefaultChunkBytes is the approximate per-request chunk size: small
-	// enough to stay comfortably inside the model context per turn, large
-	// enough to keep translation context coherent across lines.
-	DefaultChunkBytes = 24 * 1024
+	// MaxContextTokens is the model's maximum context window (1M tokens).
+	// The site's long-text mode slides/truncates older history, so each
+	// chunk can use the full window.
+	MaxContextTokens = 1_000_000
+	// bytesPerToken is conservative: English ≈ 4 chars/token, CJK ≈ 1–1.5
+	// tokens/char at ~3 bytes/char, so 4 bytes/token never underestimates
+	// the token count of typical text.
+	bytesPerToken = 4
+	// DefaultChunkBytes is roughly HALF the context window per turn — the
+	// other half is the translated output (≈1:1) — so a typical file
+	// translates in a single turn. Requests that still overflow are
+	// automatically bisected (see Translate).
+	DefaultChunkBytes = (MaxContextTokens * bytesPerToken) / 2 // ≈ 2 MiB
+	// minChunkBytes floors the bisection fallback.
+	minChunkBytes = 8 * 1024
+	// maxBisectDepth bounds recursive overflow splitting.
+	maxBisectDepth = 4
 )
 
 // Options configures one translation run over an existing session.
@@ -202,11 +215,28 @@ func Translate(ctx context.Context, client *deepseek.Client, sessionID string, c
 
 	conversation := sessionID
 	var translated []string
-	for i, chunk := range chunks {
+	// translateOne sends one chunk, bisecting it when the request overflows
+	// the context (each half retried as its own smaller chunk), so a chunk
+	// that is too large for the model still translates instead of failing.
+	var translateOne func(chunk string, depth int) error
+	translateOne = func(chunk string, depth int) error {
+		if chunk == "" {
+			return nil
+		}
 		prompt := Prompt(format, opts.From, opts.To, false, opts.Style) + chunk
 		text, convID, err := translateChunk(ctx, client, conversation, prompt, model)
+		if err != nil && depth < maxBisectDepth && len(chunk) > minChunkBytes {
+			a, b := splitTextAt(chunk, len(chunk)/2)
+			if err := translateOne(a, depth+1); err != nil {
+				return err
+			}
+			if err := translateOne(b, depth+1); err != nil {
+				return err
+			}
+			return nil
+		}
 		if err != nil {
-			return "", fmt.Errorf("chunk %d/%d: %w", i+1, len(chunks), err)
+			return fmt.Errorf("chunk (%d bytes): %w", len(chunk), err)
 		}
 		conversation = convID
 
@@ -219,20 +249,38 @@ func Translate(ctx context.Context, client *deepseek.Client, sessionID string, c
 				"Keep every line with a timestamp or the WEBVTT/header syntax EXACTLY as in the original. Retry the chunk:\n\n" + chunk
 			text2, convID2, err2 := translateChunk(ctx, client, conversation, strict, model)
 			if err2 != nil {
-				return "", fmt.Errorf("chunk %d/%d: %w", i+1, len(chunks), err2)
+				return fmt.Errorf("chunk (%d bytes): %w", len(chunk), err2)
 			}
 			conversation = convID2
 			if err := filetools.VerifyProtected(format, chunk, text2); err != nil {
-				return "", fmt.Errorf("chunk %d/%d: %w", i+1, len(chunks), err)
+				return fmt.Errorf("chunk (%d bytes): %w", len(chunk), err)
 			}
 			text = text2
 		}
 		translated = append(translated, text)
 		if opts.OnChunk != nil {
-			opts.OnChunk(i+1, len(chunks))
+			opts.OnChunk(len(translated), len(chunks))
+		}
+		return nil
+	}
+	for _, chunk := range chunks {
+		if err := translateOne(chunk, 0); err != nil {
+			return "", err
 		}
 	}
 	return strings.TrimSpace(strings.Join(translated, "\n")) + "\n", nil
+}
+
+// splitTextAt splits s into two pieces around at, preferring a line
+// boundary, so bisected chunks stay line-coherent.
+func splitTextAt(s string, at int) (string, string) {
+	if at <= 0 || at >= len(s) {
+		return s, ""
+	}
+	if i := strings.LastIndexByte(s[:at], '\n'); i >= 0 {
+		at = i + 1
+	}
+	return s[:at], s[at:]
 }
 
 // translateChunk sends one chunk in the session thread and returns the
