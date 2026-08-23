@@ -968,10 +968,83 @@ func TestProtectedAndVerify(t *testing.T) {
 func TestDetectFormat(t *testing.T) {
 	for path, want := range map[string]string{
 		"a.txt": "text", "README.md": "markdown", "notes.markdown": "markdown",
-		"song.lrc": "lrc", "movie.vtt": "vtt", "movie.srt": "vtt",
+		"song.lrc": "lrc", "movie.vtt": "vtt", "movie.srt": "srt",
+		"sub.ass": "ass", "sub.ssa": "ass", "sub.ttml": "ttml",
 	} {
 		if got := DetectFormat(path, nil); got != want {
 			t.Errorf("DetectFormat(%s) = %s, want %s", path, got, want)
 		}
+	}
+}
+
+func TestProtectedLinesAdditionalFormats(t *testing.T) {
+	srt := "1\n00:00:01,000 --> 00:00:04,000\nHello\n\n2\n00:00:05,000 --> 00:00:08,000\nBye\n"
+	p := ProtectedLines("srt", []byte(srt))
+	if len(p) != 2 || p[0] != "00:00:01,000 --> 00:00:04,000" {
+		t.Errorf("srt protected = %v", p)
+	}
+	if err := VerifyProtected("srt", srt, "1\n00:00:01,000 --> 00:00:04,000\nHola\n\n2\n00:00:05,000 --> 00:00:08,000\nAdios\n"); err != nil {
+		t.Errorf("valid srt rejected: %v", err)
+	}
+	if err := VerifyProtected("srt", srt, "1\n00:00:01,500 --> 00:00:04,000\nHola\n"); err == nil {
+		t.Error("changed srt timing must fail")
+	}
+
+	ass := "[Script Info]\nPlayResX: 1920\n\n[V4+ Styles]\nFormat: Name, Fontname\nStyle: Default,Arial\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,,Hello, there\n"
+	p = ProtectedLines("ass", []byte(ass))
+	if len(p) != 8 { // 7 header/style lines + 1 dialogue prefix
+		t.Fatalf("ass protected = %d entries: %v", len(p), p)
+	}
+	pref := p[len(p)-1]
+	if !strings.HasPrefix(pref, "Dialogue: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,,") {
+		t.Errorf("dialogue prefix wrong: %q", pref)
+	}
+	// Valid ass translation: text field translated (commas inside text ok).
+	good := "[Script Info]\nPlayResX: 1920\n\n[V4+ Styles]\nFormat: Name, Fontname\nStyle: Default,Arial\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,,Hola, amigo\n"
+	if err := VerifyProtected("ass", ass, good); err != nil {
+		t.Errorf("valid ass rejected: %v", err)
+	}
+	// A changed start time in a Dialogue prefix fails.
+	bad := "[Script Info]\nPlayResX: 1920\n\n[V4+ Styles]\nFormat: Name, Fontname\nStyle: Default,Arial\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,9:99:01.00,0:00:04.00,Default,,0,0,0,,Hola\n"
+	if err := VerifyProtected("ass", ass, bad); err == nil {
+		t.Error("changed ass timing must fail")
+	}
+	// Dropping the header fails (count mismatch).
+	if err := VerifyProtected("ass", ass, "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,,Hola\n"); err == nil {
+		t.Error("dropped ass header must fail")
+	}
+
+	ttml := `<tt xmlns="http://www.w3.org/ns/ttml"><body><div><p begin="00:00:01.000" end="00:00:04.000">Hello</p></div></body></tt>`
+	p = ProtectedLines("ttml", []byte(ttml))
+	if len(p) != 6 { // tt, body, div, p, /p, /div, /body, /tt = 8 actually
+		t.Logf("ttml protected = %v", p)
+	}
+	if err := VerifyProtected("ttml", ttml, `<tt xmlns="http://www.w3.org/ns/ttml"><body><div><p begin="00:00:01.000" end="00:00:04.000">Hola</p></div></body></tt>`); err != nil {
+		t.Errorf("valid ttml rejected: %v", err)
+	}
+	if err := VerifyProtected("ttml", ttml, `<tt xmlns="http://www.w3.org/ns/ttml"><body><div><p begin="00:00:01.000" end="00:00:05.000">Hola</p></div></body></tt>`); err == nil {
+		t.Error("changed ttml attribute must fail")
+	}
+}
+
+func TestRunMetaAdditionalDurations(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "m.srt"), []byte("1\n00:00:01,000 --> 00:00:03,500\nHi\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if res := (Call{Tool: "file_meta", Path: "m.srt"}).Run(dir); !strings.Contains(res, "duration: 00:00:03") {
+		t.Errorf("srt duration missing: %s", res)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "m.ass"), []byte("[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,0:02:30.00,Default,,0,0,0,,Hi\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if res := (Call{Tool: "file_meta", Path: "m.ass"}).Run(dir); !strings.Contains(res, "duration: 00:02:30") {
+		t.Errorf("ass duration missing: %s", res)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "m.ttml"), []byte(`<tt><p begin="00:00:01.000" end="00:01:00.500">Hi</p></tt>`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if res := (Call{Tool: "file_meta", Path: "m.ttml"}).Run(dir); !strings.Contains(res, "duration: 00:01:00") {
+		t.Errorf("ttml duration missing: %s", res)
 	}
 }

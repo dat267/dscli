@@ -1108,8 +1108,20 @@ func (c Call) runMeta(workdir string) string {
 			if d, ok := lrcDuration(path); ok {
 				fmt.Fprintf(&b, "duration: %s\n", d)
 			}
+		case ".srt":
+			if d, ok := srtDuration(path); ok {
+				fmt.Fprintf(&b, "duration: %s\n", d)
+			}
 		case ".vtt":
 			if d, ok := vttDuration(path); ok {
+				fmt.Fprintf(&b, "duration: %s\n", d)
+			}
+		case ".ass", ".ssa":
+			if d, ok := assDuration(path); ok {
+				fmt.Fprintf(&b, "duration: %s\n", d)
+			}
+		case ".ttml":
+			if d, ok := ttmlDuration(path); ok {
 				fmt.Fprintf(&b, "duration: %s\n", d)
 			}
 		}
@@ -1241,13 +1253,96 @@ func vttDuration(path string) (string, bool) {
 	return fmt.Sprintf("%02d:%02d:%02d", int(max)/3600, int(max)/60%60, int(max)%60), true
 }
 
+// srtDuration returns the latest cue end time of an SRT file as hh:mm:ss.
+func srtDuration(path string) (string, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	re := regexp.MustCompile(`-->\s*(\d{1,2}):(\d{2}):(\d{2}),(\d{3})`)
+	max := 0.0
+	for _, m := range re.FindAllStringSubmatch(string(data), -1) {
+		h, _ := strconv.ParseFloat(m[1], 64)
+		mm, _ := strconv.ParseFloat(m[2], 64)
+		ss, _ := strconv.ParseFloat(m[3], 64)
+		if d := h*3600 + mm*60 + ss; d > max {
+			max = d
+		}
+	}
+	if max <= 0 {
+		return "", false
+	}
+	return formatHHMMSS(max), true
+}
+
+// assDuration returns the latest Dialogue end time of an ASS/SSA file.
+func assDuration(path string) (string, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	re := regexp.MustCompile(`(?mi)^\s*dialogue:\s*[^,]*,[^,]*,\s*(\d+):(\d{2}):(\d{2})\.(\d{2})`)
+	max := 0.0
+	for _, m := range re.FindAllStringSubmatch(string(data), -1) {
+		h, _ := strconv.ParseFloat(m[1], 64)
+		mm, _ := strconv.ParseFloat(m[2], 64)
+		ss, _ := strconv.ParseFloat(m[3], 64)
+		cs, _ := strconv.ParseFloat(m[4], 64)
+		if d := h*3600 + mm*60 + ss + cs/100; d > max {
+			max = d
+		}
+	}
+	if max <= 0 {
+		return "", false
+	}
+	return formatHHMMSS(max), true
+}
+
+// ttmlDuration returns the latest end="..." time of a TTML file.
+func ttmlDuration(path string) (string, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	re := regexp.MustCompile(`\bend="(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?"`)
+	max := 0.0
+	for _, m := range re.FindAllStringSubmatch(string(data), -1) {
+		h, _ := strconv.ParseFloat(m[1], 64)
+		mm, _ := strconv.ParseFloat(m[2], 64)
+		ss, _ := strconv.ParseFloat(m[3], 64)
+		ms := 0.0
+		if len(m) > 4 && m[4] != "" {
+			ms, _ = strconv.ParseFloat(m[4], 64)
+			ms /= 1000
+		}
+		if d := h*3600 + mm*60 + ss + ms; d > max {
+			max = d
+		}
+	}
+	if max <= 0 {
+		return "", false
+	}
+	return formatHHMMSS(max), true
+}
+
+// formatHHMMSS renders a seconds value as hh:mm:ss.
+func formatHHMMSS(sec float64) string {
+	return fmt.Sprintf("%02d:%02d:%02d", int(sec)/3600, int(sec)/60%60, int(sec)%60)
+}
+
 // DetectFormat classifies a transcript-style file for translation.
 func DetectFormat(path string, content []byte) string {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".lrc":
 		return "lrc"
-	case ".vtt", ".srt":
+	case ".srt":
+		return "srt"
+	case ".vtt":
 		return "vtt"
+	case ".ass", ".ssa":
+		return "ass"
+	case ".ttml":
+		return "ttml"
 	case ".md", ".markdown":
 		return "markdown"
 	}
@@ -1262,18 +1357,67 @@ func ProtectedLines(format string, content []byte) []string {
 	switch format {
 	case "lrc":
 		return lrcTimecodeRE.FindAllString(string(content), -1)
-	case "vtt":
+	case "srt":
 		var out []string
 		for _, line := range strings.Split(string(content), "\n") {
-			trim := strings.TrimSpace(line)
-			if strings.Contains(trim, "-->") || trim == "WEBVTT" {
+			if trim := strings.TrimSpace(line); strings.Contains(trim, "-->") {
 				out = append(out, trim)
 			}
 		}
 		return out
+	case "vtt":
+		var out []string
+		for _, line := range strings.Split(string(content), "\n") {
+			trim := strings.TrimSpace(line)
+			if strings.Contains(trim, "-->") || trim == "WEBVTT" || strings.HasPrefix(trim, "NOTE") {
+				out = append(out, trim)
+			}
+		}
+		return out
+	case "ass":
+		var out []string
+		diag := regexp.MustCompile(`(?i)^(?:dialogue|comment):`)
+		for _, line := range strings.Split(string(content), "\n") {
+			trim := strings.TrimSpace(line)
+			if trim == "" {
+				continue
+			}
+			if diag.MatchString(trim) {
+				out = append(out, assDialoguePrefix(trim))
+			} else {
+				// Everything outside Dialogue/Comment lines (script info,
+				// style headers, Format:, Style:) is structure — never
+				// translated, must survive byte-for-byte.
+				out = append(out, trim)
+			}
+		}
+		return out
+	case "ttml":
+		// The ordered sequence of XML tags (with attributes) is the
+		// structure; only text content between tags may change.
+		return xmlTagRE.FindAllString(string(content), -1)
 	}
 	return nil
 }
+
+// assDialoguePrefix returns the Dialogue/Comment line prefix through the 9th
+// comma — Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect —
+// which must stay untouched; only the trailing text field is translated.
+func assDialoguePrefix(line string) string {
+	n := 0
+	for i := 0; i < len(line); i++ {
+		if line[i] == ',' {
+			n++
+			if n == 9 {
+				return line[:i+1]
+			}
+		}
+	}
+	return line
+}
+
+// xmlTagRE matches an XML tag including attributes (used for TTML structure).
+var xmlTagRE = regexp.MustCompile(`</?[a-zA-Z][^>]*>`)
 
 // lrcTimecodeRE matches an LRC timestamp tag like [01:23.45] or [1:02].
 var lrcTimecodeRE = regexp.MustCompile(`\[\d{1,2}:\d{2}(?:\.\d+)?\]`)

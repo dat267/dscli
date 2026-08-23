@@ -45,7 +45,7 @@ func TestDefaultOutput(t *testing.T) {
 }
 
 func TestTranslatePromptFormats(t *testing.T) {
-	for _, format := range []string{"text", "lrc", "vtt", "markdown"} {
+	for _, format := range []string{"text", "lrc", "srt", "vtt", "ass", "ttml", "markdown"} {
 		p := translatePrompt(format, "auto", "Chinese", false)
 		for _, want := range []string{"Chinese", "Reply with ONLY the translated content"} {
 			if !strings.Contains(p, want) {
@@ -177,3 +177,27 @@ func TestTranslateLRCVerificationGivesUp(t *testing.T) {
 }
 
 var _ = deepseek.Session{} // keep import if assertions change
+
+func TestTranslateASSVerificationRetry(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "sub.ass")
+	src := "[Script Info]\nPlayResX: 1920\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,,Hello\n"
+	if err := os.WriteFile(in, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	broken := "[Script Info]\nPlayResX: 1920\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,9:99:01.00,0:00:04.00,Default,,0,0,0,,Hola\n"
+	good := "[Script Info]\nPlayResX: 1920\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,,Bonjour\n"
+	srv, _ := fakeDeepSeekServerWith(t, []string{
+		completionSSE(t, 2, broken),
+		completionSSE(t, 3, good),
+	})
+	defer srv.Close()
+	cmd := &TranslateCmd{File: in, To: "French", Token: "tok", clientBase: srv.URL}
+	if err := cmd.Run(nil, context.Background()); err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	got, _ := os.ReadFile(filepath.Join(dir, "sub.translated.ass"))
+	if string(got) != good {
+		t.Errorf("output = %q, want %q", got, good)
+	}
+}

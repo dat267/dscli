@@ -24,7 +24,7 @@ const defaultChunkBytes = 24 * 1024
 // TranslateCmd implements `dscli translate`: a format-aware, chunked file
 // translation driven by the DeepSeek session.
 type TranslateCmd struct {
-	File       string        `arg:"" help:"File to translate (txt, md, lrc, vtt, epub)"`
+	File       string        `arg:"" help:"File to translate (txt, md, lrc, srt, vtt, ass, ttml, epub)"`
 	From       string        `help:"Source language (defaults to auto-detect)" default:"auto"`
 	To         string        `help:"Target language" default:"English"`
 	Output     string        `short:"o" help:"Output path (default: <input>.translated.<ext>, .txt for epub)"`
@@ -97,21 +97,21 @@ func (c *TranslateCmd) Run(app *App, ctx context.Context) error {
 		}
 		conversation = convID
 
-		// Structural formats must keep their timestamps/headers byte-for-byte.
-		if format == "lrc" || format == "vtt" {
-			if err := filetools.VerifyProtected(format, chunk, text); err != nil {
-				strict := translatePrompt(format, c.From, c.To, true) + "The previous attempt changed a protected (timestamps/header) line.\n" +
-					"Keep every line with a timestamp or the WEBVTT/header syntax EXACTLY as in the original. Retry the chunk:\n\n" + chunk
-				text2, convID2, err2 := c.translateChunk(ctx, client, conversation, strict)
-				if err2 != nil {
-					return fmt.Errorf("chunk %d/%d: %w", i+1, len(chunks), err2)
-				}
-				conversation = convID2
-				if err := filetools.VerifyProtected(format, chunk, text2); err != nil {
-					return fmt.Errorf("chunk %d/%d: %w", i+1, len(chunks), err)
-				}
-				text = text2
+		// Structural formats must keep their timestamps/header markup
+		// byte-for-byte (ProtectedLines is empty for text/markdown, so the
+		// verification passes trivially there).
+		if err := filetools.VerifyProtected(format, chunk, text); err != nil {
+			strict := translatePrompt(format, c.From, c.To, true) + "The previous attempt changed a protected (timestamps/header) line.\n" +
+				"Keep every line with a timestamp or the WEBVTT/header syntax EXACTLY as in the original. Retry the chunk:\n\n" + chunk
+			text2, convID2, err2 := c.translateChunk(ctx, client, conversation, strict)
+			if err2 != nil {
+				return fmt.Errorf("chunk %d/%d: %w", i+1, len(chunks), err2)
 			}
+			conversation = convID2
+			if err := filetools.VerifyProtected(format, chunk, text2); err != nil {
+				return fmt.Errorf("chunk %d/%d: %w", i+1, len(chunks), err)
+			}
+			text = text2
 		}
 		translated = append(translated, text)
 		fmt.Fprintf(os.Stderr, "  chunk %d/%d ok\n", i+1, len(chunks))
@@ -226,8 +226,14 @@ func translatePrompt(format, from, to string, reminder bool) string {
 	switch format {
 	case "lrc":
 		b.WriteString("This is an LRC lyrics file. Translate ONLY the lyric text after the [mm:ss.xx] timestamps; keep every timestamp and the [ti:][ar:][al:] metadata tags EXACTLY as they are (character for character). Never merge, drop or alter timestamp lines.\n")
+	case "srt":
+		b.WriteString("This is an SRT subtitle file. Translate ONLY the cue text lines; keep the cue index numbers and every 'HH:MM:SS,mmm --> HH:MM:SS,mmm' timing line EXACTLY as they are. Never merge, drop or alter timing lines.\n")
 	case "vtt":
 		b.WriteString("This is a WebVTT subtitle file. Translate ONLY the cue text lines; keep the WEBVTT header, NOTE blocks, cue identifiers and every 'hh:mm:ss.mmm --> hh:mm:ss.mmm' timing line EXACTLY as they are. Never merge, drop or alter timing lines.\n")
+	case "ass":
+		b.WriteString("This is an ASS/SSA subtitle file. Translate ONLY the text after the 9th comma (the text field) of each Dialogue:/Comment: line. Keep ALL other lines (Script Info, Style headers, Format:, Style:) and every Dialogue: line's prefix fields (layer, start, end, style, name, margins, effect) EXACTLY as they are — byte for byte, including punctuation. Keep \\N and \\h override tags inside the translated text.\n")
+	case "ttml":
+		b.WriteString("This is a TTML XML subtitle file. Translate ONLY the text content inside the <p> elements. Keep every XML tag and its attributes (begin/end/dur etc.) EXACTLY as they are; never add, remove or reorder elements; the result must remain valid XML.\n")
 	case "markdown":
 		b.WriteString("This is a Markdown file. Translate the prose; keep code blocks, URLs, link/image syntax, heading and list markers intact (translate their visible text where appropriate).\n")
 	default:
@@ -244,8 +250,14 @@ func formatName(format string) string {
 	switch format {
 	case "lrc":
 		return "LRC lyrics"
+	case "srt":
+		return "SRT subtitles"
 	case "vtt":
 		return "WebVTT subtitles"
+	case "ass":
+		return "ASS/SSA subtitles"
+	case "ttml":
+		return "TTML subtitles"
 	case "markdown":
 		return "Markdown document"
 	}

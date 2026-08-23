@@ -21,7 +21,8 @@ Flags:
 Commands:
   chat            Chat with DeepSeek (omit the prompt for an interactive
                   session)
-  translate       Translate a file (txt, md, lrc, vtt, epub) via the model
+  translate       Translate a file (txt, md, lrc, srt, vtt, ass, ttml, epub) via
+                  the model
   login           Show how to capture your DeepSeek login (token + cookie)
   version         Show version
   config init     Generate a default configuration file
@@ -296,8 +297,11 @@ writes the result:
 
 ```bash
 dscli translate notes.md                       # → notes.translated.md
-dscli translate song.lrc --to "Chinese"        # keeps timestamps byte-for-byte
-dscli translate movie.vtt -o zh.vtt            # WebVTT, timing lines preserved
+dscli translate song.lrc --to "Chinese"        # LRC timestamps byte-for-byte
+dscli translate movie.srt -o ja.srt            # SRT timing lines preserved
+dscli translate movie.vtt -o zh.vtt            # WebVTT cues preserved
+dscli translate sub.ass -o it.ass              # ASS dialogue fields preserved
+dscli translate sub.ttml -o de.ttml            # TTML XML structure preserved
 dscli translate book.epub -o book.txt          # EPUB text extraction → translation
 dscli translate -f lyrics.lrc -o lyrics.lrc    # overwrite the source in place
 ```
@@ -305,13 +309,17 @@ dscli translate -f lyrics.lrc -o lyrics.lrc    # overwrite the source in place
 - Long files are split into ~24 KiB chunks (line boundaries preserved) and
   translated turn-by-turn in one clean session; each chunk streams through
   the same PoW/SSE pipeline.
-- **LRC/VTT structural awareness:** the CLI verifies after every chunk that
-  timestamps (`[mm:ss.xx]`, `hh:mm:ss.mmm --> hh:mm:ss.mmm`), the `WEBVTT`
-  header and NOTE blocks survived byte-for-byte; a broken chunk is retried
-  once with a strict reminder, then fails loudly instead of producing a
-  corrupt file.
+- **Structural awareness for every subtitle/lyric format:** after every
+  chunk the CLI verifies that the structure survived byte-for-byte — LRC
+  `[mm:ss.xx]` timecodes, SRT `HH:MM:SS,mmm --> ...` timing lines, WebVTT
+  timing/`WEBVTT`/NOTE lines, ASS/SSA script/style headers plus every
+  `Dialogue:` line's prefix fields (layer, start, end, style, name,
+  margins, effect — only the text field may change), and TTML's complete
+  XML tag/attribute sequence. A broken chunk is retried once with a strict
+  reminder, then fails loudly instead of producing a corrupt file.
 - Markdown keeps code blocks/URLs/list markers; `.epub` is extracted to text
   first and defaults to a `.translated.txt` output.
+- `file_meta` reports duration for lrc/srt/vtt/ass/ssa/ttml files.
 - The output path defaults to `<input>.translated.<ext>` and is never
   overwritten without `-f`. The session is ephemeral, like chat (created per
   run, deleted when the run ends).
