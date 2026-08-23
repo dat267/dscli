@@ -34,7 +34,7 @@ type ChatCmd struct {
 
 	FileTools bool   `help:"Let the model read and edit files in the working directory (writes always ask for confirmation first)"`
 	Workdir   string `help:"Working directory for file tools" default:"."`
-	MaxRead   int    `help:"Max bytes read_file will return; oversized or binary files are rejected (default: 48 KiB)" default:"0"`
+	MaxRead   int    `help:"Max bytes read_file will return; oversized or binary files are rejected (default: 512 KiB)" default:"0"`
 }
 
 // confirmWrite asks the user to approve a file write. It reads from the

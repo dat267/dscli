@@ -15,9 +15,11 @@ import (
 )
 
 // DefaultMaxReadBytes is the read_file size ceiling when --file-max-read is
-// not given. Files larger than the effective ceiling are rejected outright
-// (never truncated), so only bounded text reaches the model context.
-const DefaultMaxReadBytes = 48 * 1024
+// not given: 512 KiB — about a tenth of the model's ~1M-token context at
+// typical code density, and the classic single-file "large file" cutoff.
+// Files larger than the effective ceiling are rejected outright (never
+// truncated), so only bounded text reaches the model context.
+const DefaultMaxReadBytes = 512 * 1024
 
 // MaxReadBytes is the runtime read_file ceiling. It is initialised to
 // DefaultMaxReadBytes and may be tuned (the chat command's --file-max-read

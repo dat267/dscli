@@ -157,7 +157,7 @@ It calls a tool by replying with *only* a JSON object:
   only reads text files**: binary content (NUL-byte detection over the leading
   8 KB) and files larger than the size ceiling are rejected outright — never
   truncated — and the rejection is fed back to the model, which is told not to
-  retry. The ceiling defaults to 48 KB and is tunable per run:
+  retry. The ceiling defaults to 512 KiB and is tunable per run:
 
   ```bash
   dscli chat --file-tools --file-max-read 100000 "summarize client.go"
