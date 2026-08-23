@@ -192,10 +192,24 @@ func (c *ChatCmd) turn(ctx context.Context, client *deepseek.Client, conversatio
 		// Tool turn: never prints the raw JSON. Writes must be confirmed.
 		note(fmt.Sprintf("%s %s", call.Tool, call.Path))
 		if call.Tool == "edit_file" {
+			// Plan first: the preview and the write derive from the same read,
+			// so what the user approves is exactly what lands on disk.
+			plan := filetools.PlanEdit(workdir, call)
+			if plan.Result != "" {
+				curPrompt = filetools.FormatResult(call.Tool, call.Path, plan.Result)
+				continue
+			}
+			fmt.Fprintln(os.Stderr, plan.Preview)
 			if !confirmWrite(fmt.Sprintf("apply edit to %s?", call.Path)) {
 				curPrompt = filetools.FormatResult(call.Tool, call.Path, "ERROR: edit rejected by user; do not retry it")
 				continue
 			}
+			if err := filetools.ApplyEdit(workdir, call, plan.NewContent); err != nil {
+				curPrompt = filetools.FormatResult(call.Tool, call.Path, "ERROR: "+err.Error())
+				continue
+			}
+			curPrompt = filetools.FormatResult(call.Tool, call.Path, filetools.EditSummary(plan.Count, call.Old, call.New))
+			continue
 		}
 		curPrompt = call.Run(workdir)
 	}

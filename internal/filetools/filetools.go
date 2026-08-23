@@ -243,30 +243,102 @@ func (c Call) runRead(workdir string) string {
 }
 
 func (c Call) runEdit(workdir string) string {
+	plan := PlanEdit(workdir, c)
+	if plan.Result != "" {
+		return FormatResult(c.Tool, c.Path, plan.Result)
+	}
+	if err := ApplyEdit(workdir, c, plan.NewContent); err != nil {
+		return FormatResult(c.Tool, c.Path, "ERROR: "+err.Error())
+	}
+	return FormatResult(c.Tool, c.Path, EditSummary(plan.Count, c.Old, c.New))
+}
+
+// EditPlan is the deterministic outcome of planning an edit_file call: the
+// exact content ApplyEdit will write, a line-numbered preview of the change,
+// and — when the edit cannot be applied — the ERROR line to feed the model.
+type EditPlan struct {
+	NewContent string // file content after the first-occurrence replacement
+	Preview    string // user-facing diff preview ("" when Result != "")
+	Count      int    // total occurrences of the pattern in the file
+	Result     string // non-empty means the plan failed; NewContent/Preview
+	// are then empty and Result is a model-facing ERROR line
+}
+
+// PlanEdit resolves and reads the file, verifies the pattern exists, and
+// computes the EXACT new content that ApplyEdit will later write — the
+// preview and the write are derived from the same bytes, so what the user
+// approves is precisely what lands on disk. It performs no write.
+func PlanEdit(workdir string, c Call) EditPlan {
 	path, err := workdirPath(workdir, c.Path)
 	if err != nil {
-		return FormatResult(c.Tool, c.Path, "ERROR: "+err.Error())
+		return EditPlan{Result: "ERROR: " + err.Error()}
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return FormatResult(c.Tool, c.Path, "ERROR: "+err.Error())
+		return EditPlan{Result: "ERROR: " + err.Error()}
 	}
 	content := string(data)
 	count := strings.Count(content, c.Old)
 	if count == 0 {
-		return FormatResult(c.Tool, c.Path, "ERROR: pattern not found in file; re-read the file and copy the exact text")
+		return EditPlan{Result: "ERROR: pattern not found in file; re-read the file and copy the exact text"}
 	}
-	replaced := strings.Replace(content, c.Old, c.New, 1)
-	if err := os.WriteFile(path, []byte(replaced), 0644); err != nil {
-		return FormatResult(c.Tool, c.Path, "ERROR: "+err.Error())
+	return EditPlan{
+		NewContent: strings.Replace(content, c.Old, c.New, 1),
+		Preview:    buildPreview(c.Path, content, c.Old, c.New, count),
+		Count:      count,
 	}
-	oldSnip, newSnip := c.Old, c.New
+}
+
+// ApplyEdit writes the new content produced by PlanEdit. It performs exactly
+// the first-occurrence replacement the preview described.
+func ApplyEdit(workdir string, c Call, newContent string) error {
+	path, err := workdirPath(workdir, c.Path)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(newContent), 0644)
+}
+
+// EditSummary is the compact <tool_result> body fed back to the model after a
+// successful edit.
+func EditSummary(count int, old, new string) string {
+	oldSnip, newSnip := old, new
 	if cut := 120; len(oldSnip) > cut {
 		oldSnip = oldSnip[:cut] + "..."
 	}
 	if cut := 120; len(newSnip) > cut {
 		newSnip = newSnip[:cut] + "..."
 	}
-	summary := fmt.Sprintf("replaced first of %d occurrences\nold: %q\nnew: %q", count, oldSnip, newSnip)
-	return FormatResult(c.Tool, c.Path, summary)
+	return fmt.Sprintf("replaced first of %d occurrences\nold: %q\nnew: %q", count, oldSnip, newSnip)
+}
+
+// buildPreview renders a deterministic, line-numbered view of the first
+// occurrence replacement: two context lines, the removed lines prefixed with
+// '-', and the replacement lines prefixed with '+'. Draws only from the
+// bytes of the actual operation.
+func buildPreview(path, content, old, new string, count int) string {
+	idx := strings.Index(content, old)
+	if idx < 0 {
+		return ""
+	}
+	startLine := strings.Count(content[:idx], "\n") + 1
+	oldLines := strings.Count(old, "\n") + 1
+	lines := strings.Split(content, "\n")
+	const ctx = 2
+	from := max(1, startLine-ctx)
+	to := min(len(lines), startLine+oldLines-1+ctx)
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s — replacing first of %d occurrence(s)\n", path, count)
+	for ln := from; ln <= to; ln++ {
+		mark := " "
+		if ln >= startLine && ln < startLine+oldLines {
+			mark = "-"
+		}
+		fmt.Fprintf(&b, "%s%3d │ %s\n", mark, ln, lines[ln-1])
+	}
+	for i, l := range strings.Split(new, "\n") {
+		fmt.Fprintf(&b, "+%3d │ %s\n", startLine+i, l)
+	}
+	return b.String()
 }

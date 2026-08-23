@@ -156,12 +156,27 @@ It calls a tool by replying with *only* a JSON object:
   reads are capped at 48 KB and the text is fed back to the model). The model
   is instructed to start with `{"tool":"list_directory","path":"."}` to
   discover files.
-- **`edit_file` always asks first** (`apply edit to ...? [y/N]`). The answer
-  is read from the controlling terminal (`/dev/tty`), so it never collides
-  with the REPL's input; if no terminal is available the edit is denied and
-  the model is told not to retry. The *first* occurrence of `old` is
-  replaced; if the pattern doesn't match, the model is told to re-read the
-  file and copy the exact text.
+- **`edit_file` always asks first — after showing a deterministic preview.**
+  Before the `apply edit to ...? [y/N]` prompt, dscli plans the change on the
+  actual file bytes (reads the file once, finds the first occurrence) and
+  prints a line-numbered view of exactly what will change — context lines, the
+  removed lines marked `-`, the replacement marked `+` — and the write then
+  applies that same planned content, so what you approve is precisely what
+  lands on disk:
+
+  ```
+  a.txt — replacing first of 1 occurrence(s)
+        1 │ module x
+  -     2 │ go 1.26.5
+  +     2 │ go 1.27.0
+        3 │ require (
+  ```
+
+  The confirmation answer is read from the controlling terminal (`/dev/tty`),
+  so it never collides with the REPL's input; if no terminal is available the
+  edit is denied and the model is told not to retry. If the pattern doesn't
+  match, that surfaces at the preview step (nothing is prompted) and the model
+  is told to re-read the file and copy the exact text.
 - Tool calls resolve within the same session (each `read_file`/`edit_file`
   turn feeds a `<tool_result>` back), capped at 12 iterations, and the final
   prose answer is what you see. The raw JSON never reaches your screen; a dim

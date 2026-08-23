@@ -233,18 +233,18 @@ func completionBody(t *testing.T, rec *fakeRecorder, i int) (prompt string, pare
 	return prompt, env["parent_message_id"]
 }
 
-// turnWith runs one chat turn against the fake server, capturing stdout and
-// the tool notes (stderr).
-func turnWith(t *testing.T, cmd *ChatCmd, client *deepseek.Client, prompt string, note *strings.Builder) (convID, stdout string, err error) {
+// turnWith runs one chat turn against the fake server, capturing stdout,
+// stderr (including the edit preview) and the tool notes.
+func turnWith(t *testing.T, cmd *ChatCmd, client *deepseek.Client, prompt string, note *strings.Builder) (convID, stdout, stderr string, err error) {
 	t.Helper()
 	stdout = captureStdout(t, func() {
-		captureStderr(t, func() {
+		stderr = captureStderr(t, func() {
 			convID, err = cmd.turn(context.Background(), client, "", prompt, "default", true, func(s string) {
 				note.WriteString(s + "\n")
 			})
 		})
 	})
-	return convID, stdout, err
+	return convID, stdout, stderr, err
 }
 
 // TestFileToolsReadLoop: the model asks to read a file, gets its content fed
@@ -263,7 +263,7 @@ func TestFileToolsReadLoop(t *testing.T) {
 	cmd := &ChatCmd{Workdir: dir}
 
 	var note strings.Builder
-	convID, stdout, err := turnWith(t, cmd, client, "read me the file", &note)
+	convID, stdout, _, err := turnWith(t, cmd, client, "read me the file", &note)
 	if err != nil {
 		t.Fatalf("turn: %v", err)
 	}
@@ -310,7 +310,7 @@ func TestFileToolsEditDenied(t *testing.T) {
 	confirmWrite = func(string) bool { return false }
 
 	var note strings.Builder
-	_, stdout, err := turnWith(t, cmd, client, "edit the file", &note)
+	_, stdout, stderr, err := turnWith(t, cmd, client, "edit the file", &note)
 	if err != nil {
 		t.Fatalf("turn: %v", err)
 	}
@@ -320,6 +320,13 @@ func TestFileToolsEditDenied(t *testing.T) {
 	got, _ := os.ReadFile(f)
 	if string(got) != "line1\nline2\n" {
 		t.Errorf("file changed despite denied edit: %q", got)
+	}
+	// The planned change is still previewed before the confirmation, and the
+	// preview is accurate to the operation that was declined.
+	for _, want := range []string{"replacing first of 1 occurrence(s)", "-  2 │ line2", "+  2 │ line2 edited"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr missing preview %q:\n%s", want, stderr)
+		}
 	}
 	if !strings.Contains(note.String(), "edit_file a.txt") {
 		t.Errorf("missing edit note: %q", note.String())
@@ -350,7 +357,7 @@ func TestFileToolsEditApplied(t *testing.T) {
 	t.Cleanup(func() { confirmWrite = orig })
 	confirmWrite = func(string) bool { return true }
 
-	_, stdout, err := turnWith(t, cmd, client, "edit the file", &strings.Builder{})
+	_, stdout, stderr, err := turnWith(t, cmd, client, "edit the file", &strings.Builder{})
 	if err != nil {
 		t.Fatalf("turn: %v", err)
 	}
@@ -360,6 +367,13 @@ func TestFileToolsEditApplied(t *testing.T) {
 	got, _ := os.ReadFile(f)
 	if string(got) != "AXA\nbbb\naaa\n" {
 		t.Errorf("file after confirmed edit = %q", got)
+	}
+	// The preview showed exactly what was applied: first occurrence of "aaa"
+	// on line 1 → "AXA", and 2 total occurrences.
+	for _, want := range []string{"replacing first of 2 occurrence(s)", "-  1 │ aaa", "+  1 │ AXA"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr missing preview %q:\n%s", want, stderr)
+		}
 	}
 	prompt2, _ := completionBody(t, rec, 1)
 	if !strings.Contains(prompt2, "replaced first of 2 occurrences") {
@@ -386,7 +400,7 @@ func TestFileToolsListLoop(t *testing.T) {
 	cmd := &ChatCmd{Workdir: dir}
 
 	var note strings.Builder
-	convID, stdout, err := turnWith(t, cmd, client, "what files are here?", &note)
+	convID, stdout, _, err := turnWith(t, cmd, client, "what files are here?", &note)
 	if err != nil {
 		t.Fatalf("turn: %v", err)
 	}

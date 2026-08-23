@@ -215,3 +215,63 @@ func TestInstructionsMentionsTools(t *testing.T) {
 		}
 	}
 }
+
+func TestPlanEditPreview(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "a.txt")
+	if err := os.WriteFile(f, []byte("module x\n\nrequire y\nmodule x\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	c := Call{Tool: "edit_file", Path: "a.txt", Old: "require y", New: "require z"}
+
+	p1 := PlanEdit(dir, c)
+	if p1.Result != "" || p1.Count != 1 {
+		t.Fatalf("plan: result=%q count=%d", p1.Result, p1.Count)
+	}
+	// Deterministic: planning twice yields the identical content and preview.
+	p2 := PlanEdit(dir, c)
+	if p1.NewContent != p2.NewContent || p1.Preview != p2.Preview {
+		t.Error("PlanEdit is not deterministic across calls")
+	}
+	// The preview mirrors the actual first-occurrence replacement.
+	for _, want := range []string{"replacing first of 1 occurrence(s)", "-  3 │ require y", "+  3 │ require z"} {
+		if !strings.Contains(p1.Preview, want) {
+			t.Errorf("preview missing %q:\n%s", want, p1.Preview)
+		}
+	}
+
+	// Applying the planned content lands exactly the previewed change.
+	if err := ApplyEdit(dir, c, p1.NewContent); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(f)
+	if string(got) != "module x\n\nrequire z\nmodule x\n" {
+		t.Errorf("applied content = %q", got)
+	}
+}
+
+func TestPlanEditMultiLinePreview(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "a.txt")
+	if err := os.WriteFile(f, []byte("one\ntwo\nthree\nfour\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	c := Call{Tool: "edit_file", Path: "a.txt", Old: "two\nthree", New: "2\n3\n4"}
+	p := PlanEdit(dir, c)
+	if p.Result != "" {
+		t.Fatalf("plan failed: %q", p.Result)
+	}
+	if !strings.Contains(p.Preview, "-  2 │ two") || !strings.Contains(p.Preview, "-  3 │ three") {
+		t.Errorf("multi-line old not marked in preview:\n%s", p.Preview)
+	}
+	if !strings.Contains(p.Preview, "+  2 │ 2") || !strings.Contains(p.Preview, "+  3 │ 3") || !strings.Contains(p.Preview, "+  4 │ 4") {
+		t.Errorf("multi-line new not shown in preview:\n%s", p.Preview)
+	}
+	if err := ApplyEdit(dir, c, p.NewContent); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(f)
+	if string(got) != "one\n2\n3\n4\nfour\n" {
+		t.Errorf("applied content = %q", got)
+	}
+}
