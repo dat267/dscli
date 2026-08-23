@@ -79,6 +79,7 @@ type Call struct {
 	New       string `json:"new"`       // edit_file: replacement text; rename_file: destination name/path
 	Content   string `json:"content"`   // create_file: full content of the new file
 	Recursive bool   `json:"recursive"` // list_directory: list the whole subtree at once
+	From      string `json:"from"`      // translate_file: source language (style lookup; optional)
 	To        string `json:"to"`        // translate_file: target language
 	Output    string `json:"output"`    // translate_file: output path (default <input>.translated.<ext>)
 }

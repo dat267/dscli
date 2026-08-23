@@ -33,9 +33,10 @@ type ChatCmd struct {
 	Cookie    string `env:"DS_COOKIE" help:"DeepSeek ds_session_id cookie value. Alternatively: config set cookie"`
 	UserAgent string `env:"DS_USER_AGENT" help:"Browser user-agent; some deployments reject non-browser UAs"`
 
-	FileTools bool   `help:"Let the model read and edit files in the working directory (writes always ask for confirmation first)"`
-	Workdir   string `help:"Working directory for file tools" default:"."`
-	MaxRead   int    `help:"Max bytes read_file will return; oversized or binary files are rejected (default: 512 KiB)" default:"0"`
+	FileTools    bool   `help:"Let the model read and edit files in the working directory (writes always ask for confirmation first)"`
+	Instructions string `help:"Custom translation instructions file for translate_file (default: translate/<from>-<to>.md, then a built-in general style)"`
+	Workdir      string `help:"Working directory for file tools" default:"."`
+	MaxRead      int    `help:"Max bytes read_file will return; oversized or binary files are rejected (default: 512 KiB)" default:"0"`
 }
 
 // confirmWrite asks the user to approve a file write. It reads from the
@@ -575,6 +576,10 @@ func (c *ChatCmd) applyTranslateFile(ctx context.Context, client *deepseek.Clien
 	if err != nil {
 		return filetools.FormatResult(call.Tool, call.Path, "ERROR: "+err.Error())
 	}
+	style, err := translate.ResolveStyle(c.Instructions, call.From, call.To)
+	if err != nil {
+		return filetools.FormatResult(call.Tool, call.Path, "ERROR: "+err.Error())
+	}
 	chunks := translate.ChunkText(string(content), 0)
 	outDisplay := filetools.Display(workdir, out)
 	preview := fmt.Sprintf("%s → %s\n(%s, %d chunks, to %s)", display, outDisplay, format, len(chunks), call.To)
@@ -603,6 +608,7 @@ func (c *ChatCmd) applyTranslateFile(ctx context.Context, client *deepseek.Clien
 	result, err := translate.Translate(ctx, client, sessionID, content, format, translate.Options{
 		To:    call.To,
 		Model: model,
+		Style: style,
 		OnChunk: func(chunk, total int) {
 			fmt.Fprintf(os.Stderr, "  chunk %d/%d ok\n", chunk, total)
 		},

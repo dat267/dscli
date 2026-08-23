@@ -47,14 +47,14 @@ func TestDefaultOutput(t *testing.T) {
 
 func TestTranslatePromptFormats(t *testing.T) {
 	for _, format := range []string{"text", "lrc", "srt", "vtt", "ass", "ttml", "markdown"} {
-		p := translate.Prompt(format, "auto", "Chinese", false)
+		p := translate.Prompt(format, "auto", "Chinese", false, "")
 		for _, want := range []string{"Chinese", "Reply with ONLY the translated content"} {
 			if !strings.Contains(p, want) {
 				t.Errorf("%s prompt missing %q", format, want)
 			}
 		}
 	}
-	p := translate.Prompt("lrc", "auto", "Chinese", true)
+	p := translate.Prompt("lrc", "auto", "Chinese", true, "")
 	if !strings.Contains(p, "VERIFICATION FAILED") {
 		t.Errorf("reminder prompt missing the verification warning")
 	}
@@ -66,11 +66,15 @@ func TestTranslatePlainMD(t *testing.T) {
 	if err := os.WriteFile(in, []byte("Hello world\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	style := filepath.Join(dir, "style.md")
+	if err := os.WriteFile(style, []byte("USE FORMAL REGISTER"), 0644); err != nil {
+		t.Fatal(err)
+	}
 	srv, rec := fakeDeepSeekServerWith(t, []string{
 		completionSSE(t, 2, "Bonjour le monde\n"),
 	})
 	defer srv.Close()
-	cmd := &TranslateCmd{File: in, From: "English", To: "French", Token: "tok", clientBase: srv.URL}
+	cmd := &TranslateCmd{File: in, From: "English", To: "French", Token: "tok", clientBase: srv.URL, Instructions: style}
 	if err := cmd.Run(nil, context.Background()); err != nil {
 		t.Fatalf("translate: %v", err)
 	}
@@ -90,6 +94,9 @@ func TestTranslatePlainMD(t *testing.T) {
 	prompt, _ := completionBody(t, rec, 0)
 	if !strings.Contains(prompt, "Markdown document") || !strings.Contains(prompt, "French") {
 		t.Errorf("first chunk prompt wrong:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "USE FORMAL REGISTER") {
+		t.Errorf("custom instructions missing from chunk prompt:\n%s", prompt)
 	}
 }
 

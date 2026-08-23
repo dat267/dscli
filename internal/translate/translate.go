@@ -33,6 +33,9 @@ type Options struct {
 	To         string // target language label ("" → "English")
 	Model      string // "" → "default"
 	ChunkBytes int    // <= 0 → DefaultChunkBytes
+	// Style is custom per-pair translation instructions appended to every
+	// chunk prompt (see ResolveStyle).
+	Style string
 	// OnChunk, when set, reports progress: 1-based chunk index and total.
 	OnChunk func(chunk, total int)
 }
@@ -107,7 +110,7 @@ func ChunkText(text string, approxBytes int) []string {
 
 // Prompt builds the format-aware instruction for one chunk. reminder adds
 // the strict structural rules for the verification retry.
-func Prompt(format, from, to string, reminder bool) string {
+func Prompt(format, from, to string, reminder bool, style string) string {
 	if from == "" {
 		from = "auto"
 	}
@@ -135,6 +138,12 @@ func Prompt(format, from, to string, reminder bool) string {
 	if reminder {
 		b.WriteString("TRANSLATION VERIFICATION FAILED LAST TIME because structural lines were altered. They must stay byte-for-byte identical.\n")
 	}
+	if style != "" {
+		b.WriteString(style)
+		if !strings.HasSuffix(style, "\n") {
+			b.WriteString("\n")
+		}
+	}
 	b.WriteString("Reply with ONLY the translated content — no preamble, no commentary, no code fences.\n\n")
 	return b.String()
 }
@@ -157,7 +166,7 @@ func Translate(ctx context.Context, client *deepseek.Client, sessionID string, c
 	conversation := sessionID
 	var translated []string
 	for i, chunk := range chunks {
-		prompt := Prompt(format, opts.From, opts.To, false) + chunk
+		prompt := Prompt(format, opts.From, opts.To, false, opts.Style) + chunk
 		text, convID, err := translateChunk(ctx, client, conversation, prompt, model)
 		if err != nil {
 			return "", fmt.Errorf("chunk %d/%d: %w", i+1, len(chunks), err)
@@ -168,7 +177,7 @@ func Translate(ctx context.Context, client *deepseek.Client, sessionID string, c
 		// byte-for-byte (ProtectedLines is empty for text/markdown, so the
 		// verification passes trivially there).
 		if err := filetools.VerifyProtected(format, chunk, text); err != nil {
-			strict := Prompt(format, opts.From, opts.To, true) +
+			strict := Prompt(format, opts.From, opts.To, true, opts.Style) +
 				"The previous attempt changed a protected (timestamps/header) line.\n" +
 				"Keep every line with a timestamp or the WEBVTT/header syntax EXACTLY as in the original. Retry the chunk:\n\n" + chunk
 			text2, convID2, err2 := translateChunk(ctx, client, conversation, strict, model)
@@ -253,4 +262,78 @@ func formatName(format string) string {
 		return "Markdown document"
 	}
 	return "text file"
+}
+
+// DefaultStyle is the built-in, pair-agnostic instruction set: a
+// generalisation of the Japanese→English principles that apply to any
+// source/target pair.
+func DefaultStyle() string {
+	return `[STYLE: GENERAL]
+Translate into natural, unambiguous, and contextually accurate target-language text.
+1. Resolve dropped or ambiguous subjects/objects from context; never default to "he" or random pronouns.
+2. If true ambiguity remains, stay faithful or append a bracketed [TN: ...] note rather than guessing.
+3. Prefer active voice; keep the passive only when the agent is unknown or the focus must stay on the receiver.
+4. Match the source's register: honorifics, casual speech and business distance map to equivalent constructions in the target language.
+5. Beware false friends, coined loanwords and direct calques — translate meaning, not literal form.
+6. Avoid mechanical connectors; vary transitions or omit them when the logical flow is clear.
+7. Follow the source's structure: headings, lists, blank lines, scene breaks and unlocalisable lines (URLs, tags) preserved exactly.
+8. Keep names and terminology consistent throughout the document.
+9. Output only the translation — no commentary, no meta text, no code fences.
+`
+}
+
+// styleDirs lists directories searched for per-pair instruction files,
+// in order: <pair>.md, then default.md. Overridable in tests.
+var styleDirs = func() []string {
+	dirs := []string{"translate"}
+	if cd, err := os.UserConfigDir(); err == nil {
+		dirs = append(dirs, filepath.Join(cd, "dscli", "translate"))
+	}
+	return dirs
+}()
+
+// pairKey normalises a language label for file lookup: lowercase, letters and
+// digits only ("Japanese" → "japanese", "ja" → "ja").
+func pairKey(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// FindStyleFile searches styleDirs for <pair>.md and default.md.
+func FindStyleFile(from, to string) string {
+	key := pairKey(from) + "-" + pairKey(to)
+	for _, dir := range styleDirs {
+		for _, name := range []string{key + ".md", "default.md"} {
+			p := filepath.Join(dir, name)
+			if _, err := os.Stat(p); err == nil {
+				return p
+			}
+		}
+	}
+	return ""
+}
+
+// ResolveStyle returns the instructions for a pair: an explicit file when
+// given, else a discovered per-pair file, else the built-in default.
+func ResolveStyle(explicit, from, to string) (string, error) {
+	if explicit != "" {
+		data, err := os.ReadFile(explicit)
+		if err != nil {
+			return "", fmt.Errorf("read instructions file: %w", err)
+		}
+		return strings.TrimSpace(string(data)), nil
+	}
+	if p := FindStyleFile(from, to); p != "" {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return "", fmt.Errorf("read instructions file: %w", err)
+		}
+		return strings.TrimSpace(string(data)), nil
+	}
+	return strings.TrimSpace(DefaultStyle()), nil
 }

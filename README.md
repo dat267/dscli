@@ -105,6 +105,33 @@ those are cleaned up on close too. So the conversation id shown is the live
 thread's id — useful while the session lasts, but the session is gone once
 you leave. One line per question; multi-line input is not supported.
 
+## Custom translation styles
+
+Every language pair can carry its own translation instructions. Inside each
+chunk prompt, the style is appended after the format rules; the `translate_file`
+chat tool resolves the same way, so CLI and chat mode stay consistent.
+
+**Resolution order** for a `from → to` pair:
+
+1. `--instructions <file>` (explicit, any pair, both `dscli translate` and
+   `dscli chat`).
+2. A sidecar file `translate/<from>-<to>.md` (language labels lowercased,
+   e.g. `translate/ja-en.md`), searched in `./translate/` then
+   `~/.config/dscli/translate/`; `translate/default.md` is the fallback.
+3. A built-in general style — the Japanese→English principles phrased
+   universally (subject inference, gender neutrality, active voice, register,
+   false friends, connectors, structure preservation) — applies to all pairs
+   with no custom file.
+
+drop your own
+`translate/zh-en.md` (or point `--instructions` at any file) and it applies
+to that pair everywhere:
+
+```bash
+dscli translate book.lrc --from Japanese --to English   # picks up translate/ja-en.md
+dscli translate --instructions my-style.md chapter.md  # explicit file for any pair
+```
+
 ## Batch translation in chat
 
 With `/files` on you can drive translation as part of an organising session —
