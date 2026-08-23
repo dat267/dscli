@@ -239,6 +239,13 @@ func TestPlanEditPreview(t *testing.T) {
 			t.Errorf("preview missing %q:\n%s", want, p1.Preview)
 		}
 	}
+	// Unified-diff order: removal, then replacement IN PLACE, then context —
+	// never the replacement after the trailing context.
+	if i, j, k := strings.Index(p1.Preview, "-  3 │ require y"),
+		strings.Index(p1.Preview, "+  3 │ require z"),
+		strings.Index(p1.Preview, "   4 │ module x"); i < 0 || j < 0 || k < 0 || !(i < j && j < k) {
+		t.Errorf("preview lines out of order (got %d, %d, %d):\n%s", i, j, k, p1.Preview)
+	}
 
 	// Applying the planned content lands exactly the previewed change.
 	if err := ApplyEdit(dir, c, p1.NewContent); err != nil {

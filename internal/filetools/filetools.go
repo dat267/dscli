@@ -330,15 +330,23 @@ func buildPreview(path, content, old, new string, count int) string {
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s — replacing first of %d occurrence(s)\n", path, count)
-	for ln := from; ln <= to; ln++ {
-		mark := " "
-		if ln >= startLine && ln < startLine+oldLines {
-			mark = "-"
+	// Walk the visible window; at the change position, print the removed
+	// lines and then the replacement lines IN PLACE (unified-diff order),
+	// so the context reads top-to-bottom as the file will.
+	ln := from
+	for ln <= to {
+		if ln == startLine {
+			for i := 0; i < oldLines; i++ {
+				fmt.Fprintf(&b, "-%3d │ %s\n", startLine+i, lines[startLine+i-1])
+				ln++
+			}
+			for i, l := range strings.Split(new, "\n") {
+				fmt.Fprintf(&b, "+%3d │ %s\n", startLine+i, l)
+			}
+			continue
 		}
-		fmt.Fprintf(&b, "%s%3d │ %s\n", mark, ln, lines[ln-1])
-	}
-	for i, l := range strings.Split(new, "\n") {
-		fmt.Fprintf(&b, "+%3d │ %s\n", startLine+i, l)
+		fmt.Fprintf(&b, " %3d │ %s\n", ln, lines[ln-1])
+		ln++
 	}
 	return b.String()
 }
