@@ -607,3 +607,67 @@ func TestFileToolsLoopBounded(t *testing.T) {
 		t.Errorf("forced final prompt wrong: %q", final)
 	}
 }
+
+// TestFileToolsRenameLoop: renaming goes through preview + confirm and lands
+// the move; a denial leaves everything untouched.
+func TestFileToolsRenameLoop(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "old.txt"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	renameCall := `{"tool":"rename_file","path":"old.txt","new":"new.txt"}`
+	srv, rec := fakeDeepSeekServerWith(t, []string{
+		completionSSE(t, 2, renameCall),
+		completionSSE(t, 3, "Renamed."),
+	})
+	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
+	cmd := &ChatCmd{Workdir: dir}
+
+	orig := confirmWrite
+	t.Cleanup(func() { confirmWrite = orig })
+
+	// Denied: nothing moves.
+	confirmWrite = func(string) bool { return false }
+	var note strings.Builder
+	_, stdout, stderr, err := turnWith(t, cmd, client, "rename old.txt", &note)
+	if err != nil {
+		t.Fatalf("turn: %v", err)
+	}
+	if stdout != "Renamed.\n" {
+		t.Errorf("stdout = %q", stdout)
+	}
+	for _, want := range []string{"old.txt → new.txt", "(file", "bytes)"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr missing %q:\n%s", want, stderr)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "old.txt")); err != nil {
+		t.Errorf("denied rename must keep the file: %v", err)
+	}
+	prompt2, _ := completionBody(t, rec, 1)
+	if !strings.Contains(prompt2, "rename rejected by user") {
+		t.Errorf("rejection not fed back:\n%s", prompt2)
+	}
+
+	// Accepted (fresh server, fresh file): the move lands.
+	if err := os.WriteFile(filepath.Join(dir, "old.txt"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	srv2, rec2 := fakeDeepSeekServerWith(t, []string{
+		completionSSE(t, 2, renameCall),
+		completionSSE(t, 3, "Renamed."),
+	})
+	client2 := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv2.URL)
+	confirmWrite = func(string) bool { return true }
+	_, _, _, err = turnWith(t, cmd, client2, "rename old.txt", &strings.Builder{})
+	if err != nil {
+		t.Fatalf("turn (accepted): %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "new.txt")); err != nil {
+		t.Errorf("accepted rename must move the file: %v", err)
+	}
+	promptResult, _ := completionBody(t, rec2, 1)
+	if !strings.Contains(promptResult, "renamed old.txt → new.txt") {
+		t.Errorf("rename result not fed back:\n%s", promptResult)
+	}
+}

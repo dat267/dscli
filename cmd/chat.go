@@ -239,6 +239,23 @@ func (c *ChatCmd) turn(ctx context.Context, client *deepseek.Client, conversatio
 			}
 			curPrompt = filetools.FormatResult(call.Tool, call.Path, fmt.Sprintf("created %s (%d bytes)", display, len(plan.NewContent)))
 			continue
+		case "rename_file":
+			plan := filetools.PlanRename(workdir, call)
+			if plan.Result != "" {
+				curPrompt = filetools.FormatResult(call.Tool, call.Path, plan.Result)
+				continue
+			}
+			fmt.Fprintln(os.Stderr, plan.Preview)
+			if !confirmWrite(fmt.Sprintf("rename %s → %s?", plan.OldName, plan.NewName)) {
+				curPrompt = filetools.FormatResult(call.Tool, call.Path, "ERROR: rename rejected by user; do not retry it")
+				continue
+			}
+			if err := filetools.ApplyRename(workdir, call); err != nil {
+				curPrompt = filetools.FormatResult(call.Tool, call.Path, "ERROR: "+err.Error())
+				continue
+			}
+			curPrompt = filetools.FormatResult(call.Tool, call.Path, fmt.Sprintf("renamed %s → %s", plan.OldName, plan.NewName))
+			continue
 		case "delete_file":
 			plan := filetools.PlanDelete(workdir, call)
 			if plan.Result != "" {
@@ -534,7 +551,7 @@ func printReplHelp(u ui) {
   /model <default|expert>     switch model (starts a fresh conversation)
   /thinking [on|off]          toggle DeepThink reasoning
   /search [on|off]            toggle web search
-  /files [on|off]             toggle file tools (list/read/create/edit/delete in the CWD; writes ask first)
+  /files [on|off]             toggle file tools (list/read/create/edit/rename/delete in the CWD; writes ask first)
   /help                       this help`))
 }
 

@@ -7,8 +7,10 @@
 package filetools
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"os"
@@ -61,10 +63,10 @@ func isText(data []byte) bool {
 
 // Call is the JSON object the model emits to request a file operation.
 type Call struct {
-	Tool    string `json:"tool"` // "list_directory" | "read_file" | "edit_file" | "create_file" | "delete_file"
+	Tool    string `json:"tool"` // "list_directory" | "read_file" | "create_file" | "edit_file" | "rename_file" | "delete_file"
 	Path    string `json:"path"`
 	Old     string `json:"old"`     // edit_file: exact existing text (first occurrence replaced)
-	New     string `json:"new"`     // edit_file: replacement text
+	New     string `json:"new"`     // edit_file: replacement text; rename_file: destination name/path
 	Content string `json:"content"` // create_file: full content of the new file
 }
 
@@ -77,6 +79,7 @@ You can inspect and change files inside %s. To use a tool, reply with ONLY a JSO
   {"tool":"read_file","path":"<file>"}
   {"tool":"create_file","path":"<file>","content":"<full content>"}
   {"tool":"edit_file","path":"<file>","old":"<exact existing text>","new":"<replacement text>"}
+  {"tool":"rename_file","path":"<source>","new":"<new name or path>"}
   {"tool":"delete_file","path":"<file>"}
 Rules:
 - ACT, don't announce. When the user asks you to inspect or change files, perform the tool calls yourself in the same reply series; never reply with prose about what you are about to do ("let me...", "I'll...", "first I need to...").
@@ -84,7 +87,7 @@ Rules:
 - Every turn is exactly ONE of two things: a single tool-call JSON object, or — only when your task is fully complete — your final answer in plain text.
 - To explore: start with {"tool":"list_directory","path":"."}, which lists ONE directory, non-recursive, directories marked with a trailing /; drill into subdirectories, then read what you need.
 - read_file only reads TEXT files up to %d bytes: larger or binary files are rejected — do not retry them, tell the user instead.
-- To change: create_file makes a NEW file (it errors if the file already exists — then use edit_file or delete_file first); edit_file replaces the first exact occurrence of "old" (whitespace, quotes and indentation count — read the file first and copy from it); delete_file removes a file permanently. Creating or deleting files asks the user for confirmation; if the user rejects, do not retry.
+- To change: create_file makes a NEW file (it errors if the file already exists — then use edit_file or delete_file first); edit_file replaces the first exact occurrence of "old" (whitespace, quotes and indentation count — read the file first and copy from it); rename_file renames or moves a file/directory (the destination must not exist); delete_file removes a file permanently. Creating, renaming or deleting files asks the user for confirmation; if the user rejects, do not retry.
 - After every tool call you receive a <tool_result> block. React to it with the next tool call, or your final answer. If an edit reports the pattern was not found, re-read the file and retry with the correct "old" text.
 - Paths may be relative to %s or absolute inside it.
 [END FILE TOOLS]
@@ -131,6 +134,8 @@ func valid(c Call) bool {
 		return c.Path != ""
 	case "edit_file":
 		return c.Path != "" && c.Old != ""
+	case "rename_file":
+		return c.Path != "" && c.New != ""
 	}
 	return false
 }
@@ -294,6 +299,8 @@ func (c Call) Run(workdir string) string {
 		return c.runRead(workdir)
 	case "edit_file":
 		return c.runEdit(workdir)
+	case "rename_file":
+		return c.runRename(workdir)
 	case "create_file":
 		return c.runCreate(workdir)
 	case "delete_file":
@@ -323,6 +330,8 @@ func (c Call) runList(workdir string) string {
 			name := e.Name()
 			if e.IsDir() {
 				name += "/"
+			} else if info, err := e.Info(); err == nil {
+				name += " (" + humanSize(info.Size()) + ")"
 			}
 			lines = append(lines, name)
 			if len(lines) > MaxListEntries {
@@ -364,6 +373,11 @@ func (c Call) runRead(workdir string) string {
 	if info.IsDir() {
 		return FormatResult(c.Tool, c.Path, "ERROR: is a directory; read_file reads a single file")
 	}
+	// EPUB files are ZIP archives of XHTML; extract their text so "read my
+	// book" works even though the container is binary.
+	if strings.EqualFold(filepath.Ext(path), ".epub") {
+		return c.readEPUB(path)
+	}
 	// Hard size ceiling, checked before reading so large files are never
 	// pulled into memory or context.
 	if info.Size() > int64(MaxReadBytes) {
@@ -379,6 +393,189 @@ func (c Call) runRead(workdir string) string {
 		return FormatResult(c.Tool, c.Path, "ERROR: not a text file (binary content); read_file only reads text")
 	}
 	return FormatResult(c.Tool, c.Path, string(data))
+}
+
+// readEPUB extracts the chapter text of an EPUB (ZIP of XHTML) in spine
+// order, stripped of markup, capped at MaxReadBytes of extracted text.
+func (c Call) readEPUB(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return FormatResult(c.Tool, c.Path, "ERROR: "+err.Error())
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil {
+		return FormatResult(c.Tool, c.Path, "ERROR: "+err.Error())
+	}
+	zr, err := zip.NewReader(f, info.Size())
+	if err != nil {
+		return FormatResult(c.Tool, c.Path, "ERROR: not a readable EPUB: "+err.Error())
+	}
+	chapters, err := epubChapters(zr)
+	if err != nil {
+		return FormatResult(c.Tool, c.Path, "ERROR: EPUB parse failed: "+err.Error())
+	}
+	var out strings.Builder
+	fmt.Fprintf(&out, "EPUB text extracted from %s (%d sections)\n\n", c.Path, len(chapters))
+	for _, ch := range chapters {
+		text, err := stripHTML(ch)
+		if err != nil {
+			return FormatResult(c.Tool, c.Path, "ERROR: EPUB chapter parse failed: "+err.Error())
+		}
+		if text == "" {
+			continue
+		}
+		if out.Len()+len(text) > MaxReadBytes {
+			out.WriteString("\n[truncated: remaining chapters exceed the read size limit]\n")
+			break
+		}
+		out.WriteString(text)
+		out.WriteString("\n\n")
+	}
+	return FormatResult(c.Tool, c.Path, out.String())
+}
+
+// epubChapters returns the XHTML files of an EPUB in spine order, reading
+// META-INF/container.xml → OPF → manifest/spine.
+func epubChapters(zr *zip.Reader) ([]string, error) {
+	find := func(name string) (*zip.File, bool) {
+		for _, f := range zr.File {
+			if strings.EqualFold(f.Name, name) {
+				return f, true
+			}
+		}
+		return nil, false
+	}
+	container, ok := find("META-INF/container.xml")
+	if !ok {
+		return nil, fmt.Errorf("missing META-INF/container.xml")
+	}
+	rc, err := container.Open()
+	if err != nil {
+		return nil, err
+	}
+	var ctr struct {
+		Rootfiles struct {
+			Rootfile []struct {
+				FullPath string `xml:"full-path,attr"`
+			} `xml:"rootfile"`
+		} `xml:"rootfiles"`
+	}
+	if err := xml.NewDecoder(rc).Decode(&ctr); err != nil {
+		rc.Close()
+		return nil, fmt.Errorf("container.xml: %w", err)
+	}
+	rc.Close()
+	if len(ctr.Rootfiles.Rootfile) == 0 {
+		return nil, fmt.Errorf("container.xml has no rootfile")
+	}
+	opfFile, ok := find(ctr.Rootfiles.Rootfile[0].FullPath)
+	if !ok {
+		return nil, fmt.Errorf("OPF %q not found", ctr.Rootfiles.Rootfile[0].FullPath)
+	}
+	rc, err = opfFile.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	var opf struct {
+		Manifest struct {
+			Items []struct {
+				ID   string `xml:"id,attr"`
+				Href string `xml:"href,attr"`
+			} `xml:"item"`
+		} `xml:"manifest"`
+		Spine struct {
+			Itemrefs []struct {
+				IDRef string `xml:"idref,attr"`
+			} `xml:"itemref"`
+		} `xml:"spine"`
+	}
+	if err := xml.NewDecoder(rc).Decode(&opf); err != nil {
+		return nil, fmt.Errorf("OPF: %w", err)
+	}
+	hrefs := make(map[string]string, len(opf.Manifest.Items))
+	for _, it := range opf.Manifest.Items {
+		hrefs[it.ID] = it.Href
+	}
+	base := filepath.Dir(opfFile.Name)
+	var chapters []string
+	for _, ref := range opf.Spine.Itemrefs {
+		href, ok := hrefs[ref.IDRef]
+		if !ok {
+			continue
+		}
+		name := filepath.ToSlash(filepath.Join(base, href))
+		f, ok := find(name)
+		if !ok {
+			continue
+		}
+		rc, err := f.Open()
+		if err != nil {
+			continue
+		}
+		data, err := io.ReadAll(io.LimitReader(rc, int64(MaxReadBytes+1)))
+		rc.Close()
+		if err != nil {
+			return nil, err
+		}
+		chapters = append(chapters, string(data))
+	}
+	return chapters, nil
+}
+
+// stripHTML removes markup and decodes common entities, returning visible
+// text. Deterministic and deliberately simple — formatting is irrelevant to
+// the model.
+func stripHTML(s string) (string, error) {
+	var r strings.Builder
+	r.Grow(len(s))
+	inTag := false
+	inScript := false
+	i := 0
+	for i < len(s) {
+		switch {
+		case inTag:
+			if s[i] == '>' {
+				inTag = false
+			}
+		case !inTag && i+7 <= len(s) && strings.EqualFold(s[i:i+6], "<script"):
+			inTag = true
+			inScript = true
+		case inScript && strings.HasPrefix(strings.ToLower(s[i:]), "</script"):
+			inScript = false
+			inTag = true
+		case s[i] == '<':
+			inTag = true
+		case s[i] == '&':
+			end := strings.IndexByte(s[i:], ';')
+			if end >= 0 && end <= 8 {
+				switch s[i+1 : i+end] {
+				case "amp":
+					r.WriteByte('&')
+				case "lt":
+					r.WriteByte('<')
+				case "gt":
+					r.WriteByte('>')
+				case "quot":
+					r.WriteByte('"')
+				case "#39", "apos":
+					r.WriteByte('\'')
+				case "nbsp":
+					r.WriteByte(' ')
+				default:
+					r.WriteString(s[i : i+end+1])
+				}
+				i += end + 1
+				continue
+			}
+			r.WriteByte('&')
+		default:
+			r.WriteByte(s[i])
+		}
+		i++
+	}
+	return r.String(), nil
 }
 
 func (c Call) runEdit(workdir string) string {
@@ -463,6 +660,102 @@ func ApplyEdit(workdir string, c Call, plan EditPlan) error {
 		perm = 0644
 	}
 	return os.WriteFile(path, []byte(plan.NewContent), perm)
+}
+
+// humanSize renders a byte count compactly for listings.
+func humanSize(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.1f GB", float64(n)/(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1f KB", float64(n)/(1<<10))
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
+}
+
+// RenamePlan is the deterministic outcome of planning a rename_file call.
+type RenamePlan struct {
+	Preview string
+	Bytes   int64
+	IsDir   bool
+	OldName string
+	NewName string
+	Result  string // non-empty means the plan failed
+}
+
+// PlanRename verifies the source exists, the destination is free, and both
+// stay inside the workdir (a destination in a subdirectory moves the item).
+// Nothing is renamed here.
+func PlanRename(workdir string, c Call) RenamePlan {
+	oldPath, err := workdirPath(workdir, c.Path)
+	if err != nil {
+		return RenamePlan{Result: "ERROR: " + err.Error()}
+	}
+	newPath, err := workdirPath(workdir, c.New)
+	if err != nil {
+		return RenamePlan{Result: "ERROR: " + err.Error()}
+	}
+	if oldPath == newPath {
+		return RenamePlan{Result: "ERROR: source and destination are the same path"}
+	}
+	info, err := os.Stat(oldPath)
+	if err != nil {
+		return RenamePlan{Result: "ERROR: " + err.Error()}
+	}
+	if _, err := os.Lstat(newPath); err == nil {
+		return RenamePlan{Result: "ERROR: destination already exists; choose a free name"}
+	} else if !os.IsNotExist(err) {
+		return RenamePlan{Result: "ERROR: " + err.Error()}
+	}
+	kind := "file"
+	if info.IsDir() {
+		kind = "directory"
+	}
+	preview := fmt.Sprintf("%s → %s\n(%s, %d bytes)",
+		Display(workdir, c.Path), Display(workdir, c.New), kind, info.Size())
+	return RenamePlan{
+		Preview: preview,
+		Bytes:   info.Size(),
+		IsDir:   info.IsDir(),
+		OldName: Display(workdir, c.Path),
+		NewName: Display(workdir, c.New),
+	}
+}
+
+// ApplyRename performs the rename the plan previewed, re-verifying the source
+// still exists and the destination is still free.
+func ApplyRename(workdir string, c Call) error {
+	oldPath, err := workdirPath(workdir, c.Path)
+	if err != nil {
+		return err
+	}
+	newPath, err := workdirPath(workdir, c.New)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(oldPath); err != nil {
+		return fmt.Errorf("source no longer exists: %w", err)
+	}
+	if _, err := os.Lstat(newPath); err == nil {
+		return fmt.Errorf("destination appeared since the preview; rename not applied")
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return os.Rename(oldPath, newPath)
+}
+
+func (c Call) runRename(workdir string) string {
+	plan := PlanRename(workdir, c)
+	if plan.Result != "" {
+		return FormatResult(c.Tool, c.Path, plan.Result)
+	}
+	if err := ApplyRename(workdir, c); err != nil {
+		return FormatResult(c.Tool, c.Path, "ERROR: "+err.Error())
+	}
+	return FormatResult(c.Tool, c.Path, fmt.Sprintf("renamed %s → %s", plan.OldName, plan.NewName))
 }
 
 // EditSummary is the compact <tool_result> body fed back to the model after a

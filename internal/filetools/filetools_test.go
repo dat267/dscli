@@ -1,6 +1,7 @@
 package filetools
 
 import (
+	"archive/zip"
 	"bytes"
 	"fmt"
 	"os"
@@ -52,6 +53,15 @@ func TestExtract(t *testing.T) {
 		c, ok := Extract(`{"tool":"delete_file","path":"old.txt"}`)
 		if !ok || c.Tool != "delete_file" || c.Path != "old.txt" {
 			t.Errorf("got %+v ok=%v", c, ok)
+		}
+	})
+	t.Run("rename_file", func(t *testing.T) {
+		c, ok := Extract(`{"tool":"rename_file","path":"a.txt","new":"b.txt"}`)
+		if !ok || c.Tool != "rename_file" || c.New != "b.txt" {
+			t.Errorf("got %+v ok=%v", c, ok)
+		}
+		if _, ok := Extract(`{"tool":"rename_file","path":"a.txt"}`); ok {
+			t.Error("rename without a destination must be rejected")
 		}
 	})
 	t.Run("prose is not a call", func(t *testing.T) {
@@ -598,5 +608,178 @@ func TestApplyDeleteVerifies(t *testing.T) {
 	}
 	if _, err := os.Stat(f); err != nil {
 		t.Errorf("directory must not be removed: %v", err)
+	}
+}
+
+func TestRunRename(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "old.txt")
+	if err := os.WriteFile(f, []byte("content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(dir, "sub")
+	if err := os.Mkdir(sub, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	c := Call{Tool: "rename_file", Path: "old.txt", New: "new.txt"}
+	p := PlanRename(dir, c)
+	if p.Result != "" {
+		t.Fatalf("plan failed: %q", p.Result)
+	}
+	if !strings.Contains(p.Preview, "old.txt → new.txt") || !strings.Contains(p.Preview, "file") {
+		t.Errorf("preview wrong:\n%s", p.Preview)
+	}
+	if err := ApplyRename(dir, c); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "old.txt")); !os.IsNotExist(err) {
+		t.Error("old name must be gone after rename")
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "new.txt"))
+	if err != nil || string(got) != "content" {
+		t.Errorf("renamed file = %q err=%v", got, err)
+	}
+
+	// Destination already taken → error, nothing changes.
+	if err := os.WriteFile(filepath.Join(dir, "taken.txt"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if p := PlanRename(dir, Call{Tool: "rename_file", Path: "new.txt", New: "taken.txt"}); !strings.Contains(p.Result, "already exists") {
+		t.Errorf("expected destination-exists error, got %q", p.Result)
+	}
+
+	// Same path → error.
+	if p := PlanRename(dir, Call{Tool: "rename_file", Path: "new.txt", New: "new.txt"}); !strings.Contains(p.Result, "same") {
+		t.Errorf("expected same-path error, got %q", p.Result)
+	}
+
+	// Moving into a subdirectory renames across directories (still inside
+	// the workdir).
+	if p := PlanRename(dir, Call{Tool: "rename_file", Path: "new.txt", New: "sub/moved.txt"}); p.Result != "" {
+		t.Fatalf("move plan failed: %q", p.Result)
+	}
+	if err := ApplyRename(dir, Call{Tool: "rename_file", Path: "new.txt", New: "sub/moved.txt"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(sub, "moved.txt")); err != nil {
+		t.Errorf("move failed: %v", err)
+	}
+
+	// Renaming a directory works.
+	if err := ApplyRename(dir, Call{Tool: "rename_file", Path: "sub", New: "folder"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "folder", "moved.txt")); err != nil {
+		t.Errorf("dir rename failed: %v", err)
+	}
+}
+
+func TestApplyRenameVerifies(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "src.txt")
+	if err := os.WriteFile(f, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	c := Call{Tool: "rename_file", Path: "src.txt", New: "dst.txt"}
+	if p := PlanRename(dir, c); p.Result != "" {
+		t.Fatal(p.Result)
+	}
+	// Source vanishes after the plan → cannot rename.
+	if err := os.Remove(f); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyRename(dir, c); err == nil {
+		t.Fatal("expected rename to fail when the source disappeared")
+	}
+	// Destination appears after the plan → cannot clobber it.
+	if err := os.WriteFile(f, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "dst.txt"), []byte("other"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyRename(dir, c); err == nil {
+		t.Fatal("expected rename to refuse clobbering an appeared destination")
+	}
+	got, _ := os.ReadFile(filepath.Join(dir, "dst.txt"))
+	if string(got) != "other" {
+		t.Errorf("destination was clobbered: %q", got)
+	}
+}
+
+func TestRunReadEPUB(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "book.epub")
+	if err := writeTestEPUB(f); err != nil {
+		t.Fatal(err)
+	}
+	res := (Call{Tool: "read_file", Path: "book.epub"}).Run(dir)
+	if !strings.Contains(res, "EPUB text extracted") {
+		t.Errorf("expected EPUB extraction marker, got %q", res)
+	}
+	for _, want := range []string{"Chapter one content", "Chapter two content"} {
+		if !strings.Contains(res, want) {
+			t.Errorf("EPUB text missing %q:\n%s", want, res)
+		}
+	}
+	if strings.Contains(res, "<p>") || strings.Contains(res, "<html") {
+		t.Errorf("markup not stripped:\n%s", res)
+	}
+}
+
+// writeTestEPUB builds a minimal EPUB: container.xml → OPF → two XHTML
+// chapters.
+func writeTestEPUB(path string) error {
+	ch1 := "<html><body><h1>One</h1><p>Chapter one content &amp; stuff</p></body></html>"
+	ch2 := "<html><body><p>Chapter two content</p></body></html>"
+	files := map[string]string{
+		"META-INF/container.xml": `<?xml version="1.0"?><container><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>`,
+		"OEBPS/content.opf": `<?xml version="1.0"?><package><manifest>
+			<item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+			<item id="c2" href="ch2.xhtml" media-type="application/xhtml+xml"/>
+			</manifest><spine>
+			<itemref idref="c1"/><itemref idref="c2"/>
+			</spine></package>`,
+		"OEBPS/ch1.xhtml": ch1,
+		"OEBPS/ch2.xhtml": ch2,
+	}
+	out, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	zw := zip.NewWriter(out)
+	for name, content := range files {
+		w, err := zw.Create(name)
+		if err != nil {
+			return err
+		}
+		if _, err := w.Write([]byte(content)); err != nil {
+			return err
+		}
+	}
+	return zw.Close()
+}
+
+func TestRunListShowsSizes(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "big.bin"), make([]byte, 1500), 0644); err != nil {
+		t.Fatal(err)
+	}
+	res := (Call{Tool: "list_directory", Path: "."}).Run(dir)
+	if !strings.Contains(res, "big.bin (1.5 KB)") {
+		t.Errorf("listing missing humanised size: %q", res)
+	}
+	// Boundary sanity for humanSize itself.
+	for n, want := range map[int64]string{
+		500:        "500 B",
+		1500:       "1.5 KB",
+		3 << 20:    "3.0 MB",
+		1536 << 20: "1.5 GB",
+	} {
+		if got := humanSize(n); got != want {
+			t.Errorf("humanSize(%d) = %q, want %q", n, got, want)
+		}
 	}
 }
