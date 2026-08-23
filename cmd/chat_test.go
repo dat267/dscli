@@ -32,18 +32,31 @@ func TestSplitConversation(t *testing.T) {
 
 func TestConversationID(t *testing.T) {
 	tests := []struct {
-		session  string
-		parent   *int64
-		msgID    int64
-		want     string
+		session string
+		parent  *int64
+		msgID   int64
+		want    string
 	}{
 		{"s", nil, 0, "s"},
 		{"s", nil, 7, "s:7"},
-		{"s", int64ptr(3), 7, "s:3"}, // resuming keeps the id used to ask
+		{"s", int64ptr(3), 7, "s:7"}, // fresh message id wins over the id used to ask
+		{"s", int64ptr(3), 0, "s:3"}, // ...falling back to the id used to ask
 	}
 	for _, tc := range tests {
 		if got := conversationID(tc.session, tc.parent, tc.msgID); got != tc.want {
 			t.Errorf("conversationID(%q,%v,%d) = %q, want %q", tc.session, tc.parent, tc.msgID, got, tc.want)
+		}
+	}
+}
+
+// TestConversationRoundTrip guards the REPL carry-forward: the id a turn
+// produces must parse back into the same session + parent for the next turn,
+// so follow-ups stay in the same thread instead of spawning a new session.
+func TestConversationRoundTrip(t *testing.T) {
+	for _, cid := range []string{"sess", "sess:7", "sess:42", "a9b8c7:2"} {
+		sess, parent := splitConversation(cid)
+		if got := conversationID(sess, parent, 0); got != cid {
+			t.Errorf("round trip of %q = %q (sess=%q parent=%v)", cid, got, sess, parent)
 		}
 	}
 }

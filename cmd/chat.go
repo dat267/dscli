@@ -59,15 +59,15 @@ func (c *ChatCmd) newClient() *deepseek.Client {
 	}, c.Timeout)
 }
 
-// oneTurn asks one question in the given conversation and returns the reply's
-// message id (nil when the stream produced none).
-func (c *ChatCmd) oneTurn(ctx context.Context, client *deepseek.Client, conversation, prompt, model string) (*int64, error) {
+// oneTurn asks one question in the given conversation and returns the
+// conversation id to use on the NEXT turn ("<session_id>:<message_id>").
+func (c *ChatCmd) oneTurn(ctx context.Context, client *deepseek.Client, conversation, prompt, model string) (string, error) {
 	sessionID, parentID := splitConversation(conversation)
 	if sessionID == "" {
 		var err error
 		sessionID, err = client.CreateChatSession(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("create chat session: %w", err)
+			return "", fmt.Errorf("create chat session: %w", err)
 		}
 	}
 	// model_type is only sent (and only meaningful) on the first turn of a
@@ -94,25 +94,22 @@ func (c *ChatCmd) oneTurn(ctx context.Context, client *deepseek.Client, conversa
 		SearchEnabled:   c.Search,
 	}, write)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	convID := conversationID(sessionID, parentID, reply.MessageID)
-	if c.JSONOut {
-		if err := json.NewEncoder(os.Stdout).Encode(map[string]any{"done": true, "conversation_id": convID}); err != nil {
-			return nil, err
-		}
-	} else if reply.MessageID != 0 {
-		fmt.Fprintf(os.Stderr, "\nconversation: %s\n", convID)
-	}
-	return parentOrMessage(parentID, reply.MessageID), nil
+	return conversationID(sessionID, parentID, reply.MessageID), nil
 }
 
 // ask answers a single question and exits.
 func (c *ChatCmd) ask(ctx context.Context, prompt string) error {
 	client := c.newClient()
-	if _, err := c.oneTurn(ctx, client, c.Conversation, prompt, effectiveModel(c.Model)); err != nil {
+	convID, err := c.oneTurn(ctx, client, c.Conversation, prompt, effectiveModel(c.Model))
+	if err != nil {
 		return err
 	}
+	if c.JSONOut {
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"done": true, "conversation_id": convID})
+	}
+	fmt.Fprintf(os.Stderr, "\nconversation: %s\n", convID)
 	return nil
 }
 
@@ -172,13 +169,12 @@ func (c *ChatCmd) repl(ctx context.Context) error {
 			continue
 		}
 
-		msgID, err := c.oneTurn(ctx, client, conversation, line, model)
+		convID, err := c.oneTurn(ctx, client, conversation, line, model)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			continue
 		}
-		sessionID, _ := splitConversation(conversation)
-		conversation = conversationID(sessionID, msgID, 0)
+		conversation = convID
 		turns++
 	}
 	if err := scanner.Err(); err != nil {
@@ -239,25 +235,15 @@ func splitConversation(id string) (sessionID string, parentID *int64) {
 	return session, nil
 }
 
-// conversationID renders the resumable conversation id. msgID is the newly
-// produced assistant message id (0 when the stream produced none); parentID
-// is the id used to ask (nil on the first turn).
+// conversationID renders the id to pass on the NEXT turn: the freshly
+// produced assistant message id when available (msgID), else the id used to
+// ask (parentID), else the bare session.
 func conversationID(sessionID string, parentID *int64, msgID int64) string {
-	if parentID != nil {
-		return fmt.Sprintf("%s:%d", sessionID, *parentID)
-	}
 	if msgID != 0 {
 		return fmt.Sprintf("%s:%d", sessionID, msgID)
 	}
-	return sessionID
-}
-
-// parentOrMessage returns the id to remember for the NEXT turn: the freshly
-// produced message id when available, otherwise the id that was used.
-func parentOrMessage(parent *int64, msgID int64) *int64 {
-	if msgID != 0 {
-		id := msgID
-		return &id
+	if parentID != nil {
+		return fmt.Sprintf("%s:%d", sessionID, *parentID)
 	}
-	return parent
+	return sessionID
 }

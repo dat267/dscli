@@ -89,6 +89,30 @@ conversation: 0123456789:42
 
 One line per question; multi-line input is not supported.
 
+## Models, DeepThink & web search
+
+Model, DeepThink (thinking) and web search are per-thread or per-request
+toggles:
+
+```bash
+dscli chat -m expert "explain Gödel's incompleteness"   # strong model
+dscli chat -t "reason step by step"                     # DeepThink
+dscli chat -s "latest Mars rover news"                  # web search
+dscli chat -t -s -m expert "both, on the strong model"
+```
+
+Inside the REPL the same switches are slash commands (see `/help`):
+
+```
+you> /thinking on
+you> /search off
+you> /model expert          # switches model; starts a fresh conversation
+```
+
+A thread's model is fixed when it is created: `--model`/`/model` always start
+a new conversation, and `--model` cannot be combined with `--conversation`.
+DeepThink and search can be toggled freely at any point of a thread.
+
 ## Scripting
 
 ```bash
