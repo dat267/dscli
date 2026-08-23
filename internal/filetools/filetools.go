@@ -35,18 +35,20 @@ type Call struct {
 // model. It is prepended to the user's prompt.
 func Instructions(workdir string) string {
 	return fmt.Sprintf(`[FILE TOOLS]
-You can work with files inside %s by replying with ONLY a JSON object (no other text, no markdown):
+You can inspect and edit files inside %s. To use a tool, reply with ONLY a JSON object (no other text, no markdown):
   {"tool":"list_directory","path":"<dir>"}
   {"tool":"read_file","path":"<file>"}
   {"tool":"edit_file","path":"<file>","old":"<exact existing text>","new":"<replacement text>"}
 Rules:
-- Start with {"tool":"list_directory","path":"."} to see what is in %s. list_directory lists ONE directory non-recursively (directories are marked with a trailing /); drill into subdirectories by listing them, then read the files you need.
+- ACT, don't announce. When the user asks you to inspect or change files, perform the tool calls yourself in the same reply series; never reply with prose about what you are about to do ("let me...", "I'll...", "first I need to...").
+- Every turn is exactly ONE of two things: a single tool-call JSON object, or — only when your task is fully complete — your final answer in plain text.
+- To explore: start with {"tool":"list_directory","path":"."}, which lists ONE directory, non-recursive, directories marked with a trailing /; drill into subdirectories, then read what you need.
+- To edit: first read the file, then emit edit_file with "old" copied EXACTLY from the file content (whitespace, quotes and indentation count); the first occurrence is replaced.
+- After every tool call you receive a <tool_result> block. React to it with the next tool call, or your final answer. If an edit reports the pattern was not found, re-read the file and retry with the correct "old" text.
 - Paths may be relative to %s or absolute inside it.
-- Before editing, always read the file so "old" matches the current content EXACTLY (whitespace, quotes and indentation count); the first occurrence is replaced.
-- After each tool call you receive a <tool_result> block. Reply with the next tool call, or — when done — with your final answer in plain text.
 [END FILE TOOLS]
 
-User: `, workdir, workdir, workdir)
+User: `, workdir, workdir)
 }
 
 // FormatResult wraps a tool outcome for feeding back to the model.
