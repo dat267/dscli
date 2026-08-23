@@ -131,6 +131,39 @@ DeepThink and search can be toggled freely at any point of a thread — and
 **both default to off** (the status line in the REPL shows the current state:
 `thinking off · search off`).
 
+## File tools
+
+The model can read and edit files in a working directory — enabled per run
+with `--file-tools` (and `--workdir` to scope it, defaulting to the current
+directory), or mid-session with `/files`:
+
+```bash
+dscli chat --file-tools "what does this repo's Makefile do?"
+dscli chat --file-tools --workdir /path/to/project "rename the Foo function to Bar"
+```
+
+It calls a tool by replying with *only* a JSON object:
+
+```json
+{"tool":"read_file","path":"Makefile"}
+{"tool":"edit_file","path":"src/cli.go","old":"func Foo(","new":"func Bar("}
+```
+
+- **`read_file` runs without prompting** — reading inside the workdir is
+  always allowed (files are capped at 48 KB and the text is fed back to the
+  model).
+- **`edit_file` always asks first** (`apply edit to ...? [y/N]`). The answer
+  is read from the controlling terminal (`/dev/tty`), so it never collides
+  with the REPL's input; if no terminal is available the edit is denied and
+  the model is told not to retry. The *first* occurrence of `old` is
+  replaced; if the pattern doesn't match, the model is told to re-read the
+  file and copy the exact text.
+- Tool calls resolve within the same session (each `read_file`/`edit_file`
+  turn feeds a `<tool_result>` back), capped at 12 iterations, and the final
+  prose answer is what you see. The raw JSON never reaches your screen; a dim
+  note shows each call (`read_file Makefile`). All paths are confined to the
+  workdir (no `..` escapes), and the session is still deleted on close.
+
 ## Scripting
 
 ```bash

@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/dat267/dscli/internal/deepseek"
+	"github.com/dat267/dscli/internal/filetools"
 )
 
 // ChatCmd implements `dscli chat`: a one-shot question, or an interactive
@@ -29,6 +31,41 @@ type ChatCmd struct {
 	Token     string `env:"DS_TOKEN" help:"DeepSeek user token (localStorage.userToken). Alternatively: config set token"`
 	Cookie    string `env:"DS_COOKIE" help:"DeepSeek ds_session_id cookie value. Alternatively: config set cookie"`
 	UserAgent string `env:"DS_USER_AGENT" help:"Browser user-agent; some deployments reject non-browser UAs"`
+
+	FileTools bool   `help:"Let the model read and edit files in the working directory (writes always ask for confirmation first)"`
+	Workdir   string `help:"Working directory for file tools" default:"."`
+}
+
+// confirmWrite asks the user to approve a file write. It reads from the
+// controlling terminal (/dev/tty) so it never clashes with the REPL's stdin
+// scanner; when that is unavailable it falls back to a terminal stdin, and
+// denies the write if no terminal exists at all. Overridable in tests.
+var confirmWrite = func(msg string) bool {
+	prompt := fmt.Sprintf("%s [y/N] ", msg)
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err == nil {
+		defer tty.Close()
+		fmt.Fprint(os.Stderr, prompt)
+		var answer string
+		_, _ = fmt.Fscanln(tty, &answer)
+		return yes(answer)
+	}
+	if isTerminal(os.Stdin) {
+		fmt.Fprint(os.Stderr, prompt)
+		var answer string
+		_, _ = fmt.Scanln(&answer)
+		return yes(answer)
+	}
+	fmt.Fprintln(os.Stderr, "edit denied: no terminal available for confirmation")
+	return false
+}
+
+func yes(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "y", "yes":
+		return true
+	}
+	return false
 }
 
 func (c *ChatCmd) Run(app *App, ctx context.Context) error {
@@ -93,17 +130,84 @@ func (c *ChatCmd) oneTurn(ctx context.Context, client *deepseek.Client, conversa
 	return conversationID(sessionID, parentID, reply.MessageID), nil
 }
 
-// ask answers a single question and exits.
-func (c *ChatCmd) ask(ctx context.Context, prompt string) error {
-	client := c.newClient()
-	write := func(delta string) error {
+// deltaWriter returns the writer that renders reply deltas to the user:
+// NDJSON lines in --json-out mode, plain text otherwise.
+func (c *ChatCmd) deltaWriter() func(string) error {
+	return func(delta string) error {
 		if c.JSONOut {
 			return json.NewEncoder(os.Stdout).Encode(map[string]string{"delta": delta})
 		}
 		_, err := os.Stdout.WriteString(delta)
 		return err
 	}
-	convID, err := c.oneTurn(ctx, client, c.Conversation, prompt, effectiveModel(c.Model), write)
+}
+
+// turn answers one user message and returns the conversation id for the next
+// turn. With fileTools enabled it runs the model↔file loop: a reply that is a
+// single file-tool JSON object is executed (writes always confirm first) and
+// the <tool_result> fed back as the next turn, until the model answers in
+// prose. Tool turns print a dim note instead of the raw JSON; the final prose
+// is rendered when it arrives.
+func (c *ChatCmd) turn(ctx context.Context, client *deepseek.Client, conversation, prompt, model string, fileTools bool, note func(string)) (string, error) {
+	if !fileTools {
+		return c.oneTurn(ctx, client, conversation, prompt, model, c.deltaWriter())
+	}
+
+	workdir, err := filepath.Abs(c.Workdir)
+	if err != nil {
+		return "", fmt.Errorf("resolve working directory: %w", err)
+	}
+	write := func(delta string) error {
+		_, err := os.Stdout.WriteString(delta)
+		return err
+	}
+
+	cur := conversation
+	curPrompt := filetools.Instructions(workdir) + prompt
+	for i := 0; i < filetools.MaxIterations; i++ {
+		var buf strings.Builder
+		convID, err := c.oneTurn(ctx, client, cur, curPrompt, model, func(d string) error {
+			buf.WriteString(d)
+			return nil
+		})
+		if err != nil {
+			return "", err
+		}
+		cur = convID
+
+		call, ok := filetools.Extract(buf.String())
+		if !ok {
+			// Final answer: render the buffered text now, terminated by a
+			// newline so callers can add a clean blank separator.
+			text := buf.String()
+			if !strings.HasSuffix(text, "\n") {
+				text += "\n"
+			}
+			if err := write(text); err != nil {
+				return "", err
+			}
+			return cur, nil
+		}
+
+		// Tool turn: never prints the raw JSON. Writes must be confirmed.
+		note(fmt.Sprintf("%s %s", call.Tool, call.Path))
+		if call.Tool == "edit_file" {
+			if !confirmWrite(fmt.Sprintf("apply edit to %s?", call.Path)) {
+				curPrompt = filetools.FormatResult(call.Tool, call.Path, "ERROR: edit rejected by user; do not retry it")
+				continue
+			}
+		}
+		curPrompt = call.Run(workdir)
+	}
+	return "", fmt.Errorf("file tool loop exceeded %d turns", filetools.MaxIterations)
+}
+
+// ask answers a single question and exits.
+func (c *ChatCmd) ask(ctx context.Context, prompt string) error {
+	client := c.newClient()
+	convID, err := c.turn(ctx, client, c.Conversation, prompt, effectiveModel(c.Model), c.FileTools, func(s string) {
+		fmt.Fprintln(os.Stderr, s)
+	})
 	if err != nil {
 		return err
 	}
@@ -173,6 +277,7 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 	model := effectiveModel(c.Model)
 	thinking := c.Thinking
 	search := c.Search
+	fileTools := c.FileTools
 	u := ui{color: isTerminal(os.Stderr)}
 	interactive := isTerminal(os.Stdin)
 
@@ -202,11 +307,11 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 		mode = "continuing conversation"
 	}
 	// status redraws the live settings line; it is shown at launch and after
-	// every /thinking, /search or /model change.
+	// every /thinking, /search, /files or /model change.
 	status := func() {
 		fmt.Fprintf(os.Stderr, "%s\n", u.dim(fmt.Sprintf(
-			"DeepSeek · model %s · thinking %s · search %s · %s",
-			model, onoff(thinking), onoff(search), mode,
+			"DeepSeek · model %s · thinking %s · search %s · files %s · %s",
+			model, onoff(thinking), onoff(search), onoff(fileTools), mode,
 		)))
 	}
 	status()
@@ -262,6 +367,10 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 			search = toggleState(line, "/search", search)
 			status()
 			continue
+		case line == "/files" || strings.HasPrefix(line, "/files "):
+			fileTools = toggleState(line, "/files", fileTools)
+			status()
+			continue
 		case strings.HasPrefix(line, "/"):
 			fmt.Fprintln(os.Stderr, "unknown command (/help for commands)")
 			continue
@@ -279,9 +388,24 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 			owned = append(owned, sid)
 		}
 
-		// Stream the reply to stdout while remembering its final character so
-		// the next prompt always begins on a fresh line, with one blank line
-		// separating turns.
+		// With file tools off the reply streams live and the final character is
+		// tracked so the next prompt starts on a fresh line. With file tools on
+		// turn() buffers and sieves tool calls, so last-char tracking is moot.
+		if fileTools {
+			convID, err := c.turn(ctx, client, conversation, line, model, true, func(s string) {
+				fmt.Fprintln(os.Stderr, u.dim(s))
+			})
+			if err != nil {
+				fmt.Fprintln(os.Stderr, u.red("error: "+err.Error()))
+				fmt.Fprintln(os.Stdout)
+				continue
+			}
+			conversation = convID
+			fmt.Fprintln(os.Stdout) // blank line before the next prompt
+			turns++
+			continue
+		}
+
 		var last byte
 		write := func(delta string) error {
 			if len(delta) > 0 {
@@ -332,6 +456,7 @@ func printReplHelp(u ui) {
   /model <default|expert>     switch model (starts a fresh conversation)
   /thinking [on|off]          toggle DeepThink reasoning
   /search [on|off]            toggle web search
+  /files [on|off]             toggle file tools (read_file/edit_file in the CWD; writes ask first)
   /help                       this help`))
 }
 
