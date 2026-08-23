@@ -37,9 +37,17 @@ var MaxReadBytes = DefaultMaxReadBytes
 // encodings read here (UTF-8/ASCII).
 const binaryProbeSize = 8000
 
-// MaxListEntries caps how many directory entries a list_directory result
-// reports in one call.
+// MaxListEntries caps how many directory entries a single (non-recursive)
+// list_directory result reports.
 const MaxListEntries = 200
+
+// MaxRecursiveEntries caps the TOTAL entries a recursive listing reports —
+// the whole subtree fits in one bounded response instead of one call per
+// directory.
+const MaxRecursiveEntries = 500
+
+// MaxListDepth caps how deep a recursive listing descends.
+const MaxListDepth = 6
 
 // MaxIterations caps how many tool calls the model may make for one user
 // message. The loop is hard-bounded: after the cap the CLI forces a final
@@ -63,11 +71,12 @@ func isText(data []byte) bool {
 
 // Call is the JSON object the model emits to request a file operation.
 type Call struct {
-	Tool    string `json:"tool"` // "list_directory" | "read_file" | "create_file" | "edit_file" | "rename_file" | "delete_file"
-	Path    string `json:"path"`
-	Old     string `json:"old"`     // edit_file: exact existing text (first occurrence replaced)
-	New     string `json:"new"`     // edit_file: replacement text; rename_file: destination name/path
-	Content string `json:"content"` // create_file: full content of the new file
+	Tool      string `json:"tool"` // "list_directory" | "read_file" | "create_file" | "edit_file" | "rename_file" | "delete_file"
+	Path      string `json:"path"`
+	Old       string `json:"old"`       // edit_file: exact existing text (first occurrence replaced)
+	New       string `json:"new"`       // edit_file: replacement text; rename_file: destination name/path
+	Content   string `json:"content"`   // create_file: full content of the new file
+	Recursive bool   `json:"recursive"` // list_directory: list the whole subtree at once
 }
 
 // Instructions returns the prompt fragment that defines the tools for the
@@ -85,7 +94,7 @@ Rules:
 - ACT, don't announce. When the user asks you to inspect or change files, perform the tool calls yourself in the same reply series; never reply with prose about what you are about to do ("let me...", "I'll...", "first I need to...").
 - Budget: at most %d tool calls per user message; spend them on what matters, then give your final answer in prose.
 - Every turn is exactly ONE of two things: a single tool-call JSON object, or — only when your task is fully complete — your final answer in plain text.
-- To explore: start with {"tool":"list_directory","path":"."}, which lists ONE directory, non-recursive, directories marked with a trailing /; drill into subdirectories, then read what you need.
+- To explore: start with {"tool":"list_directory","path":"."}, which lists ONE directory, non-recursive, directories marked with a trailing /, files with sizes. Add "recursive":true to get the whole subtree in one bounded call ({\"tool\":\"list_directory\",\"path\":\".\",\"recursive\":true}) instead of listing directory by directory — prefer it for exploring a tree.
 - read_file only reads TEXT files up to %d bytes: larger or binary files are rejected — do not retry them, tell the user instead.
 - To change: create_file makes a NEW file (it errors if the file already exists — then use edit_file or delete_file first); edit_file replaces the first exact occurrence of "old" (whitespace, quotes and indentation count — read the file first and copy from it); rename_file renames or moves a file/directory (the destination must not exist); delete_file removes a file permanently. Creating, renaming or deleting files asks the user for confirmation; if the user rejects, do not retry.
 - After every tool call you receive a <tool_result> block. React to it with the next tool call, or your final answer. If an edit reports the pattern was not found, re-read the file and retry with the correct "old" text.
@@ -314,26 +323,40 @@ func (c Call) runList(workdir string) string {
 	if err != nil {
 		return FormatResult(c.Tool, c.Path, "ERROR: "+err.Error())
 	}
+	if !c.Recursive {
+		body, err := listOneDir(path)
+		if err != nil {
+			return FormatResult(c.Tool, c.Path, "ERROR: "+err.Error())
+		}
+		return FormatResult(c.Tool, c.Path, body)
+	}
+	if f, err := os.Open(path); err != nil {
+		return FormatResult(c.Tool, c.Path, "ERROR: "+err.Error())
+	} else {
+		_ = f.Close()
+	}
+	body, truncated := listTree(Display(workdir, c.Path), path)
+	if truncated {
+		body += fmt.Sprintf("\nWARNING: tree truncated (max %d entries, depth %d)", MaxRecursiveEntries, MaxListDepth)
+	}
+	return FormatResult(c.Tool, c.Path, body)
+}
+
+// listOneDir renders a non-recursive listing of a directory: sorted names,
+// files annotated with human-readable sizes, bounded batches so a huge
+// directory costs ~MaxListEntries of work.
+func listOneDir(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return FormatResult(c.Tool, c.Path, "ERROR: "+err.Error())
+		return "", err
 	}
 	defer func() { _ = f.Close() }()
 
-	// Read in bounded batches so a directory with hundreds of thousands of
-	// entries costs at most ~MaxListEntries+1 of work and memory, never a
-	// full scan. One extra entry beyond the cap marks the listing truncated.
 	var lines []string
 	for {
 		batch, err := f.ReadDir(256)
 		for _, e := range batch {
-			name := e.Name()
-			if e.IsDir() {
-				name += "/"
-			} else if info, err := e.Info(); err == nil {
-				name += " (" + humanSize(info.Size()) + ")"
-			}
-			lines = append(lines, name)
+			lines = append(lines, entryLine(e))
 			if len(lines) > MaxListEntries {
 				break
 			}
@@ -342,7 +365,7 @@ func (c Call) runList(workdir string) string {
 			break
 		}
 		if err != nil {
-			return FormatResult(c.Tool, c.Path, "ERROR: "+err.Error())
+			return "", err
 		}
 	}
 	sort.Strings(lines)
@@ -358,7 +381,81 @@ func (c Call) runList(workdir string) string {
 	if body == "" {
 		body = "(empty directory)"
 	}
-	return FormatResult(c.Tool, c.Path, body)
+	return body, nil
+}
+
+// entryLine formats one directory entry: directories with a trailing '/',
+// files with a human-readable size.
+func entryLine(e os.DirEntry) string {
+	name := e.Name()
+	if e.IsDir() {
+		return name + "/"
+	}
+	if info, err := e.Info(); err == nil {
+		return name + " (" + humanSize(info.Size()) + ")"
+	}
+	return name
+}
+
+// listTree renders a bounded depth-first tree of path: two-space indent per
+// level, directories with '/', files with sizes. rootLabel is the
+// workdir-relative name of the root ("." for the workdir itself). Returns
+// (body, truncated). Symlinked directories are listed but NOT descended
+// into, so the walk can never leave the workdir or loop.
+func listTree(rootLabel, path string) (string, bool) {
+	rootIsDot := rootLabel == "."
+	var b strings.Builder
+	count := 0
+	truncated := false
+	var walk func(dir, prefix string, depth int)
+	walk = func(dir, prefix string, depth int) {
+		if truncated {
+			return
+		}
+		f, err := os.Open(dir)
+		if err != nil {
+			fmt.Fprintf(&b, "%s(unreadable: %v)\n", prefix, err)
+			return
+		}
+		defer func() { _ = f.Close() }()
+
+		var entries []os.DirEntry
+		for {
+			batch, err := f.ReadDir(256)
+			entries = append(entries, batch...)
+			if len(entries) > MaxRecursiveEntries || err == io.EOF {
+				break
+			}
+			if err != nil {
+				break
+			}
+		}
+		sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+		for _, e := range entries {
+			if count >= MaxRecursiveEntries {
+				truncated = true
+				return
+			}
+			indent := prefix + "  "
+			fmt.Fprintf(&b, "%s%s\n", indent, entryLine(e))
+			count++
+			if depth >= MaxListDepth {
+				continue
+			}
+			if e.IsDir() {
+				walk(filepath.Join(dir, e.Name()), indent, depth+1)
+			}
+			// Symlinks are never descended into (DirEntry.IsDir does not
+			// follow links), so the tree cannot escape the workdir.
+		}
+	}
+	if rootIsDot {
+		b.WriteString(".\n")
+	} else {
+		b.WriteString(rootLabel + "/\n")
+	}
+	walk(path, "", 0)
+	return strings.TrimSuffix(b.String(), "\n"), truncated
 }
 
 func (c Call) runRead(workdir string) string {

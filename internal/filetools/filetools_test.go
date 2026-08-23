@@ -55,6 +55,16 @@ func TestExtract(t *testing.T) {
 			t.Errorf("got %+v ok=%v", c, ok)
 		}
 	})
+	t.Run("list_directory recursive", func(t *testing.T) {
+		c, ok := Extract(`{"tool":"list_directory","path":".","recursive":true}`)
+		if !ok || !c.Recursive {
+			t.Errorf("got %+v ok=%v (Recursive=%v)", c, ok, c.Recursive)
+		}
+		c2, _ := Extract(`{"tool":"list_directory","path":"."}`)
+		if c2.Recursive {
+			t.Errorf("recursive must default to false: %+v", c2)
+		}
+	})
 	t.Run("rename_file", func(t *testing.T) {
 		c, ok := Extract(`{"tool":"rename_file","path":"a.txt","new":"b.txt"}`)
 		if !ok || c.Tool != "rename_file" || c.New != "b.txt" {
@@ -781,5 +791,96 @@ func TestRunListShowsSizes(t *testing.T) {
 		if got := humanSize(n); got != want {
 			t.Errorf("humanSize(%d) = %q, want %q", n, got, want)
 		}
+	}
+}
+
+func TestRunListRecursive(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "top.txt"), []byte("t"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, sub := range []string{"cmd", "internal/deepseek"} {
+		if err := os.MkdirAll(filepath.Join(dir, sub), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "cmd", "chat.go"), []byte("c"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "internal", "deepseek", "client.go"), []byte("d"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	res := (Call{Tool: "list_directory", Path: ".", Recursive: true}).Run(dir)
+	for _, want := range []string{
+		".\n",               // root marker
+		"  cmd/\n",          // depth-1 dir
+		"    chat.go (1 B)", // depth-2 file with size
+		"  internal/",
+		"    deepseek/",
+		"      client.go (1 B)",
+		"  top.txt (1 B)",
+	} {
+		if !strings.Contains(res, want) {
+			t.Errorf("recursive listing missing %q:\n%s", want, res)
+		}
+	}
+	if strings.Contains(res, "ERROR") {
+		t.Errorf("unexpected error: %s", res)
+	}
+
+	// A nested root renders relative to the requested path.
+	nested := (Call{Tool: "list_directory", Path: "internal", Recursive: true}).Run(dir)
+	if !strings.Contains(nested, "internal/\n") || !strings.Contains(nested, "  deepseek/") {
+		t.Errorf("nested root wrong:\n%s", nested)
+	}
+}
+
+func TestRunListRecursiveBounded(t *testing.T) {
+	dir := t.TempDir()
+	// A deep chain far beyond the depth cap; the walk must stop at
+	// MaxListDepth and never blow past the entry budget.
+	cur := dir
+	for i := 0; i < MaxListDepth+4; i++ {
+		cur = filepath.Join(cur, fmt.Sprintf("d%d", i))
+	}
+	if err := os.MkdirAll(cur, 0755); err != nil {
+		t.Fatal(err)
+	}
+	res := (Call{Tool: "list_directory", Path: ".", Recursive: true}).Run(dir)
+	if strings.Contains(res, fmt.Sprintf("d%d", MaxListDepth+1)) {
+		t.Errorf("descended past the depth cap:\n%s", res)
+	}
+	// Wide tree past the entry budget → truncation warning.
+	wide := t.TempDir()
+	for i := 0; i < MaxRecursiveEntries+50; i++ {
+		if err := os.WriteFile(filepath.Join(wide, fmt.Sprintf("f%04d.txt", i)), []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res = (Call{Tool: "list_directory", Path: ".", Recursive: true}).Run(wide)
+	if !strings.Contains(res, "tree truncated") {
+		t.Errorf("expected truncation warning, got:\n%s", res[:min(400, len(res))])
+	}
+	if n := strings.Count(res, ".txt"); n > MaxRecursiveEntries+1 {
+		t.Errorf("recursive listing too large: %d entries", n)
+	}
+}
+
+func TestRunListRecursiveSymlinkNotDescended(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("s"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "escape")); err != nil {
+		t.Skipf("symlinks not supported: %v", err)
+	}
+	res := (Call{Tool: "list_directory", Path: ".", Recursive: true}).Run(dir)
+	if !strings.Contains(res, "escape") {
+		t.Errorf("symlink entry not listed: %s", res)
+	}
+	if strings.Contains(res, "secret.txt") {
+		t.Errorf("recursive listing escaped through a symlink:\n%s", res)
 	}
 }

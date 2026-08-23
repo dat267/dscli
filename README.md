@@ -145,16 +145,22 @@ dscli chat --file-tools --workdir /path/to/project "rename the Foo function to B
 It calls a tool by replying with *only* a JSON object:
 
 ```json
-{"tool":"list_directory","path":"."}
-{"tool":"read_file","path":"Makefile"}
+{"tool":"list_directory","path":".","recursive":true}
+{"tool":"read_file","path":"book.epub"}
 {"tool":"create_file","path":"notes.txt","content":"hello"}
 {"tool":"edit_file","path":"src/cli.go","old":"func Foo(","new":"func Bar("}
 {"tool":"delete_file","path":"old.txt"}
 ```
 
 - **`list_directory` and `read_file` run without prompting** — reading and
-  directory listing inside the workdir are always allowed, **but `read_file`
-  only reads text files**: binary content (NUL-byte detection over the leading
+  directory listing inside the workdir are always allowed. `list_directory`
+  lists ONE directory per call (directories marked with a trailing `/`,
+  files with human-readable sizes); add `"recursive": true` to map the whole
+  subtree in a single bounded call (≤ 500 entries, ≤ 6 levels deep) instead
+  of one call per directory — the model is instructed to prefer this when
+  exploring. `read_file` only reads text, **but `.epub` files are
+  auto-extracted** (ZIP of XHTML → spine-ordered chapters, markup stripped,
+  capped at the read limit) so books are readable.: binary content (NUL-byte detection over the leading
   8 KB) and files larger than the size ceiling are rejected outright — never
   truncated — and the rejection is fed back to the model, which is told not to
   retry. The ceiling defaults to 512 KiB and is tunable per run:

@@ -671,3 +671,51 @@ func TestFileToolsRenameLoop(t *testing.T) {
 		t.Errorf("rename result not fed back:\n%s", promptResult)
 	}
 }
+
+// TestFileToolsRecursiveListLoop: one recursive list call maps the whole
+// subtree — the model then answers without spending further list calls.
+func TestFileToolsRecursiveListLoop(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("hi"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "books", "scifi"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "books", "scifi", "dune.epub"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	listCall := `{"tool":"list_directory","path":".","recursive":true}`
+	srv, rec := fakeDeepSeekServerWith(t, []string{
+		completionSSE(t, 2, listCall),
+		completionSSE(t, 3, "I can see the whole tree."),
+	})
+	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
+	cmd := &ChatCmd{Workdir: dir}
+
+	var note strings.Builder
+	_, stdout, _, err := turnWith(t, cmd, client, "what's here?", &note)
+	if err != nil {
+		t.Fatalf("turn: %v", err)
+	}
+	if stdout != "I can see the whole tree.\n" {
+		t.Errorf("stdout = %q", stdout)
+	}
+	if !strings.Contains(note.String(), "list_directory .") {
+		t.Errorf("missing list note: %q", note.String())
+	}
+	// Exactly two completions: one recursive list + the final answer. The
+	// model never had to list directories one by one.
+	rec.mu.Lock()
+	n := len(rec.completionBodies)
+	rec.mu.Unlock()
+	if n != 2 {
+		t.Errorf("completions = %d, want 2 (recursive list + final answer)", n)
+	}
+	prompt2, _ := completionBody(t, rec, 1)
+	for _, want := range []string{"README.md", "books/", "scifi/", "dune.epub"} {
+		if !strings.Contains(prompt2, want) {
+			t.Errorf("tree not fed back (missing %q):\n%s", want, prompt2)
+		}
+	}
+}
