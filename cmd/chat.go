@@ -60,9 +60,10 @@ func (c *ChatCmd) newClient() *deepseek.Client {
 	}, c.Timeout)
 }
 
-// oneTurn asks one question in the given conversation and returns the
-// conversation id to use on the NEXT turn ("<session_id>:<message_id>").
-func (c *ChatCmd) oneTurn(ctx context.Context, client *deepseek.Client, conversation, prompt, model string) (string, error) {
+// oneTurn asks one question in the given conversation, feeding every reply
+// delta to write, and returns the conversation id to use on the NEXT turn
+// ("<session_id>:<message_id>").
+func (c *ChatCmd) oneTurn(ctx context.Context, client *deepseek.Client, conversation, prompt, model string, write func(string) error) (string, error) {
 	sessionID, parentID := splitConversation(conversation)
 	if sessionID == "" {
 		var err error
@@ -76,14 +77,6 @@ func (c *ChatCmd) oneTurn(ctx context.Context, client *deepseek.Client, conversa
 	modelType := ""
 	if parentID == nil {
 		modelType = model
-	}
-
-	write := func(delta string) error {
-		if c.JSONOut {
-			return json.NewEncoder(os.Stdout).Encode(map[string]string{"delta": delta})
-		}
-		_, err := os.Stdout.WriteString(delta)
-		return err
 	}
 
 	reply, err := client.StreamCompletion(ctx, deepseek.CompletionRequest{
@@ -103,7 +96,14 @@ func (c *ChatCmd) oneTurn(ctx context.Context, client *deepseek.Client, conversa
 // ask answers a single question and exits.
 func (c *ChatCmd) ask(ctx context.Context, prompt string) error {
 	client := c.newClient()
-	convID, err := c.oneTurn(ctx, client, c.Conversation, prompt, effectiveModel(c.Model))
+	write := func(delta string) error {
+		if c.JSONOut {
+			return json.NewEncoder(os.Stdout).Encode(map[string]string{"delta": delta})
+		}
+		_, err := os.Stdout.WriteString(delta)
+		return err
+	}
+	convID, err := c.oneTurn(ctx, client, c.Conversation, prompt, effectiveModel(c.Model), write)
 	if err != nil {
 		return err
 	}
@@ -136,10 +136,45 @@ func (c *ChatCmd) repl(ctx context.Context) error {
 	return c.replLoop(ctx, client, c.Conversation, owned)
 }
 
+// ui wraps the terminal styling used by the REPL. Colours are only emitted
+// when the note stream (stderr) is a terminal, so piped output stays clean.
+type ui struct {
+	color bool
+}
+
+var (
+	ansiDim   = "\x1b[2m"
+	ansiBold  = "\x1b[1m"
+	ansiCyan  = "\x1b[36m"
+	ansiRed   = "\x1b[31m"
+	ansiReset = "\x1b[0m"
+)
+
+func (u ui) dim(s string) string  { return u.wrap(ansiDim, s) }
+func (u ui) bold(s string) string { return u.wrap(ansiBold, s) }
+func (u ui) cyan(s string) string { return u.wrap(ansiCyan, s) }
+func (u ui) red(s string) string  { return u.wrap(ansiRed, s) }
+func (u ui) wrap(code, s string) string {
+	if !u.color {
+		return s
+	}
+	return code + s + ansiReset
+}
+
+func isTerminal(f *os.File) bool {
+	info, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
+}
+
 func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, conversation string, owned []string) error {
 	model := effectiveModel(c.Model)
 	thinking := c.Thinking
 	search := c.Search
+	u := ui{color: isTerminal(os.Stderr)}
+	interactive := isTerminal(os.Stdin)
 
 	deleteOwned := func() {
 		if len(owned) == 0 {
@@ -162,16 +197,20 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 		deleteOwned()
 	}()
 
-	fmt.Fprintln(os.Stderr, "Interactive DeepSeek session (one line per question; /help for commands).")
 	if c.Conversation == "" {
-		fmt.Fprintln(os.Stderr, "This session is ephemeral: it is deleted when you leave.")
+		fmt.Fprintln(os.Stderr, u.dim("DeepSeek · model "+model+" · ephemeral session (deleted on close)"))
+	} else {
+		fmt.Fprintln(os.Stderr, u.dim("DeepSeek · model "+model+" · continuing conversation"))
 	}
+	fmt.Fprintln(os.Stderr, u.dim("one question per line · /help for commands"))
 
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	var turns int
 	for {
-		fmt.Fprint(os.Stderr, "you> ")
+		if interactive {
+			fmt.Fprint(os.Stderr, u.bold(u.cyan("you> ")))
+		}
 		if !scanner.Scan() {
 			break
 		}
@@ -186,10 +225,10 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 			return nil
 		case line == "/new":
 			conversation = ""
-			fmt.Fprintln(os.Stderr, "new conversation")
+			fmt.Fprintln(os.Stderr, u.dim("new conversation"))
 			continue
 		case line == "/help":
-			printReplHelp()
+			printReplHelp(u)
 			continue
 		case strings.HasPrefix(line, "/model "):
 			m := strings.TrimSpace(strings.TrimPrefix(line, "/model "))
@@ -199,18 +238,18 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 			}
 			model = m
 			conversation = ""
-			fmt.Fprintf(os.Stderr, "model: %s (new conversation)\n", m)
+			fmt.Fprintf(os.Stderr, "%s\n", u.dim("model: "+m+" · new conversation"))
 			continue
 		case strings.HasPrefix(line, "/thinking "):
 			thinking = parseToggle(line, "/thinking ", thinking)
-			fmt.Fprintf(os.Stderr, "thinking: %v\n", thinking)
+			fmt.Fprintf(os.Stderr, "%s\n", u.dim("thinking "+onoff(thinking)))
 			continue
 		case strings.HasPrefix(line, "/search "):
 			search = parseToggle(line, "/search ", search)
-			fmt.Fprintf(os.Stderr, "search: %v\n", search)
+			fmt.Fprintf(os.Stderr, "%s\n", u.dim("search "+onoff(search)))
 			continue
 		case strings.HasPrefix(line, "/"):
-			fmt.Fprintln(os.Stderr, "unknown command (see /help)")
+			fmt.Fprintln(os.Stderr, "unknown command (/help for commands)")
 			continue
 		}
 
@@ -225,11 +264,33 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 			conversation = sid
 			owned = append(owned, sid)
 		}
-		convID, err := c.oneTurn(ctx, client, conversation, line, model)
+
+		// Stream the reply to stdout while remembering its final character so
+		// the next prompt always begins on a fresh line, with one blank line
+		// separating turns.
+		var last byte
+		write := func(delta string) error {
+			if len(delta) > 0 {
+				last = delta[len(delta)-1]
+			}
+			_, err := os.Stdout.WriteString(delta)
+			return err
+		}
+		convID, err := c.oneTurn(ctx, client, conversation, line, model, write)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			if last != '\n' && last != 0 {
+				fmt.Fprintln(os.Stdout)
+			}
+			fmt.Fprintln(os.Stderr, u.red("error: "+err.Error()))
+			if last != '\n' {
+				fmt.Fprintln(os.Stdout)
+			}
 			continue
 		}
+		if last != '\n' {
+			fmt.Fprintln(os.Stdout)
+		}
+		fmt.Fprintln(os.Stdout) // blank line before the next prompt
 		conversation = convID
 		turns++
 	}
@@ -242,14 +303,22 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 	return nil
 }
 
-func printReplHelp() {
-	fmt.Fprintln(os.Stderr, `commands:
-  /exit, /quit          leave the session
-  /new                  start a fresh conversation
-  /model <default|expert>  switch model (starts a new conversation)
-  /thinking <on|off>    toggle DeepThink reasoning
-  /search <on|off>      toggle web search
-  /help                 this help`)
+// onoff renders a boolean as "on"/"off".
+func onoff(v bool) string {
+	if v {
+		return "on"
+	}
+	return "off"
+}
+
+func printReplHelp(u ui) {
+	fmt.Fprintln(os.Stderr, u.dim(`commands:
+  /exit, /quit             leave the session
+  /new                     start a fresh conversation
+  /model <default|expert>  switch model (starts a fresh conversation)
+  /thinking <on|off>       toggle DeepThink reasoning
+  /search <on|off>         toggle web search
+  /help                    this help`))
 }
 
 func parseToggle(line, prefix string, current bool) bool {

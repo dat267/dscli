@@ -51,15 +51,20 @@ type Client struct {
 
 // NewClient builds a client for the given session. timeout bounds the whole
 // completion exchange (including streaming); zero means no bound (rely on the
-// context passed per call).
-func NewClient(sess Session, timeout time.Duration) *Client {
+// context passed per call). A base URL beyond the default may be supplied for
+// tests or proxies.
+func NewClient(sess Session, timeout time.Duration, base ...string) *Client {
 	ua := sess.UserAgent
 	if ua == "" {
 		ua = DefaultUserAgent
 	}
+	b := BaseURL
+	if len(base) > 0 && base[0] != "" {
+		b = base[0]
+	}
 	return &Client{
 		http: &http.Client{Timeout: timeout},
-		base: BaseURL,
+		base: b,
 		sess: sess,
 		ua:   ua,
 	}

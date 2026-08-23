@@ -74,11 +74,15 @@ dscli chat -m expert             # REPL on the stronger model
 dscli chat --thinking --search   # DeepThink + web search
 ```
 
-Inside the REPL:
+Inside the REPL (status line is dimmed; the `you>` prompt is styled only when
+attached to a terminal):
 
 ```
+DeepSeek · model default · ephemeral session (deleted on close)
+one question per line · /help for commands
 you> What is 2+2?
 4
+
 you> /model expert              # switch model (starts a fresh conversation)
 you> /thinking on
 you> /search off
@@ -86,6 +90,10 @@ you> /new                       # start a fresh conversation
 you> /exit
 conversation: 0123456789:42
 ```
+
+Replies stream to stdout as they are generated; a blank line separates turns
+(even when the model text ends without a newline). Piped input produces no
+prompts, and colours are disabled when stderr is not a terminal.
 
 **No persistence.** Launching `dscli chat` without `-c` creates a *fresh*
 session, keeps every turn in that one session, and deletes it when the REPL
@@ -126,7 +134,8 @@ dscli chat --json-out "Summarize this repo" | jq -s 'map(.delta) | join("")'
 ```
 
 `--json-out` emits NDJSON: one `{"delta":"..."}` line per chunk, then a final
-`{"done":true,"conversation_id":"..."}` line. Text output is written to
+`{"done":true,"conversation_id":"..."}` line. It is for one-shot scripting —
+the interactive REPL always prints plain text. Text output is written to
 stdout; prompts, warnings and the conversation id go to stderr, so piping
 plain `dscli chat` also gives you clean text.
 
