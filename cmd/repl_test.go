@@ -420,3 +420,115 @@ func TestFileToolsListLoop(t *testing.T) {
 		}
 	}
 }
+
+// TestFileToolsCreateLoop: creating a new file goes through preview + confirm
+// and lands exactly the model-supplied content.
+func TestFileToolsCreateLoop(t *testing.T) {
+	dir := t.TempDir()
+	createCall := `{"tool":"create_file","path":"new.txt","content":"line1\nline2"}`
+	srv, rec := fakeDeepSeekServerWith(t, []string{
+		completionSSE(t, 2, createCall),
+		completionSSE(t, 3, "Created."),
+	})
+	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
+	cmd := &ChatCmd{Workdir: dir}
+
+	orig := confirmWrite
+	t.Cleanup(func() { confirmWrite = orig })
+	confirmWrite = func(string) bool { return true }
+
+	var note strings.Builder
+	_, stdout, stderr, err := turnWith(t, cmd, client, "create a file", &note)
+	if err != nil {
+		t.Fatalf("turn: %v", err)
+	}
+	if stdout != "Created.\n" {
+		t.Errorf("stdout = %q", stdout)
+	}
+	for _, want := range []string{"new.txt — creating (2 lines, 11 bytes)", "+  1 │ line1", "+  2 │ line2"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr missing %q:\n%s", want, stderr)
+		}
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "new.txt"))
+	if err != nil || string(got) != "line1\nline2" {
+		t.Errorf("created file = %q err=%v", got, err)
+	}
+	prompt2, _ := completionBody(t, rec, 1)
+	if !strings.Contains(prompt2, "created new.txt (11 bytes)") {
+		t.Errorf("create result not fed back:\n%s", prompt2)
+	}
+}
+
+// TestFileToolsDeleteLoop: deleting goes through preview + confirm, and a
+// denial leaves the file untouched.
+func TestFileToolsDeleteLoop(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "old.txt")
+	if err := os.WriteFile(f, []byte("alpha\nbeta\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	deleteCall := `{"tool":"delete_file","path":"old.txt"}`
+
+	orig := confirmWrite
+	t.Cleanup(func() { confirmWrite = orig })
+
+	// Denied: file stays, model told to stop.
+	srv, rec := fakeDeepSeekServerWith(t, []string{
+		completionSSE(t, 2, deleteCall),
+		completionSSE(t, 3, "Deleted."),
+	})
+	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
+	cmd := &ChatCmd{Workdir: dir}
+	confirmWrite = func(string) bool { return false }
+
+	var note strings.Builder
+	_, stdout, stderr, err := turnWith(t, cmd, client, "delete the file", &note)
+	if err != nil {
+		t.Fatalf("turn: %v", err)
+	}
+	if stdout != "Deleted.\n" {
+		t.Errorf("stdout = %q", stdout)
+	}
+	for _, want := range []string{"old.txt — deleting", "-  1 │ alpha"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr missing %q:\n%s", want, stderr)
+		}
+	}
+	if _, err := os.Stat(f); err != nil {
+		t.Errorf("denied delete must leave the file, got %v", err)
+	}
+	if !strings.Contains(note.String(), "delete_file old.txt") {
+		t.Errorf("missing delete note: %q", note.String())
+	}
+	prompt2, _ := completionBody(t, rec, 1)
+	if !strings.Contains(prompt2, "delete rejected by user") {
+		t.Errorf("model not told about the rejection:\n%s", prompt2)
+	}
+
+	// Accepted: file gone, result fed back (fresh fake server — the first
+	// one's completion queue is consumed).
+	if err := os.WriteFile(f, []byte("alpha\nbeta\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	srv2, rec2 := fakeDeepSeekServerWith(t, []string{
+		completionSSE(t, 2, deleteCall),
+		completionSSE(t, 3, "Deleted."),
+	})
+	client2 := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv2.URL)
+	cmd2 := &ChatCmd{Workdir: dir}
+	confirmWrite = func(string) bool { return true }
+
+	var note2 strings.Builder
+	_, _, _, err = turnWith(t, cmd2, client2, "delete the file", &note2)
+	if err != nil {
+		t.Fatalf("turn (accepted): %v", err)
+	}
+	if _, err := os.Stat(f); !os.IsNotExist(err) {
+		t.Errorf("accepted delete must remove the file, got %v", err)
+	}
+	promptResult, _ := completionBody(t, rec2, 1)
+	if !strings.Contains(promptResult, "deleted old.txt") {
+		t.Errorf("delete result not fed back:\n%s", promptResult)
+	}
+}

@@ -25,25 +25,28 @@ const MaxIterations = 12
 
 // Call is the JSON object the model emits to request a file operation.
 type Call struct {
-	Tool string `json:"tool"` // "list_directory" | "read_file" | "edit_file"
-	Path string `json:"path"`
-	Old  string `json:"old"` // edit_file: exact existing text (first occurrence replaced)
-	New  string `json:"new"` // edit_file: replacement text
+	Tool    string `json:"tool"` // "list_directory" | "read_file" | "edit_file" | "create_file" | "delete_file"
+	Path    string `json:"path"`
+	Old     string `json:"old"`     // edit_file: exact existing text (first occurrence replaced)
+	New     string `json:"new"`     // edit_file: replacement text
+	Content string `json:"content"` // create_file: full content of the new file
 }
 
 // Instructions returns the prompt fragment that defines the tools for the
 // model. It is prepended to the user's prompt.
 func Instructions(workdir string) string {
 	return fmt.Sprintf(`[FILE TOOLS]
-You can inspect and edit files inside %s. To use a tool, reply with ONLY a JSON object (no other text, no markdown):
+You can inspect and change files inside %s. To use a tool, reply with ONLY a JSON object (no other text, no markdown):
   {"tool":"list_directory","path":"<dir>"}
   {"tool":"read_file","path":"<file>"}
+  {"tool":"create_file","path":"<file>","content":"<full content>"}
   {"tool":"edit_file","path":"<file>","old":"<exact existing text>","new":"<replacement text>"}
+  {"tool":"delete_file","path":"<file>"}
 Rules:
 - ACT, don't announce. When the user asks you to inspect or change files, perform the tool calls yourself in the same reply series; never reply with prose about what you are about to do ("let me...", "I'll...", "first I need to...").
 - Every turn is exactly ONE of two things: a single tool-call JSON object, or — only when your task is fully complete — your final answer in plain text.
 - To explore: start with {"tool":"list_directory","path":"."}, which lists ONE directory, non-recursive, directories marked with a trailing /; drill into subdirectories, then read what you need.
-- To edit: first read the file, then emit edit_file with "old" copied EXACTLY from the file content (whitespace, quotes and indentation count); the first occurrence is replaced.
+- To change: create_file makes a NEW file (it errors if the file already exists — then use edit_file or delete_file first); edit_file replaces the first exact occurrence of "old" (whitespace, quotes and indentation count — read the file first and copy from it); delete_file removes a file permanently. Creating or deleting files asks the user for confirmation; if the user rejects, do not retry.
 - After every tool call you receive a <tool_result> block. React to it with the next tool call, or your final answer. If an edit reports the pattern was not found, re-read the file and retry with the correct "old" text.
 - Paths may be relative to %s or absolute inside it.
 [END FILE TOOLS]
@@ -86,12 +89,26 @@ func Extract(text string) (Call, bool) {
 
 func valid(c Call) bool {
 	switch c.Tool {
-	case "read_file", "list_directory":
+	case "read_file", "list_directory", "create_file", "delete_file":
 		return c.Path != ""
 	case "edit_file":
 		return c.Path != "" && c.Old != ""
 	}
 	return false
+}
+
+// Display renders a path for the user: relative to the workdir when it lies
+// inside it, otherwise as given. Used for preview headers and confirmations.
+func Display(workdir, p string) string {
+	path, err := workdirPath(workdir, p)
+	if err != nil {
+		return p
+	}
+	rel, err := filepath.Rel(workdir, path)
+	if err != nil {
+		return p
+	}
+	return rel
 }
 
 // fencedJSON extracts the content of a ```json ... ``` (or plain ``` ... ```)
@@ -175,6 +192,9 @@ func workdirPath(workdir, p string) (string, error) {
 
 // Run executes the call inside workdir and returns the <tool_result> text to
 // feed back to the model (never a Go error: the outcome is for the model).
+// Note: the write/delete variants apply immediately — the interactive flow
+// that requires confirmation lives in the cmd layer (plan → preview →
+// confirm → apply).
 func (c Call) Run(workdir string) string {
 	switch c.Tool {
 	case "list_directory":
@@ -183,6 +203,10 @@ func (c Call) Run(workdir string) string {
 		return c.runRead(workdir)
 	case "edit_file":
 		return c.runEdit(workdir)
+	case "create_file":
+		return c.runCreate(workdir)
+	case "delete_file":
+		return c.runDelete(workdir)
 	}
 	return FormatResult(c.Tool, c.Path, "ERROR: unknown tool")
 }
@@ -349,4 +373,117 @@ func buildPreview(path, content, old, new string, count int) string {
 		ln++
 	}
 	return b.String()
+}
+
+// CreatePlan is the deterministic outcome of planning a create_file call.
+type CreatePlan struct {
+	NewContent string
+	Preview    string
+	Result     string // non-empty means the plan failed
+}
+
+// PlanCreate checks the target does not exist and renders a preview of the
+// new file, without writing anything.
+func PlanCreate(workdir string, c Call) CreatePlan {
+	path, err := workdirPath(workdir, c.Path)
+	if err != nil {
+		return CreatePlan{Result: "ERROR: " + err.Error()}
+	}
+	if _, err := os.Stat(path); err == nil {
+		return CreatePlan{Result: "ERROR: file already exists; use edit_file to modify existing files"}
+	} else if !os.IsNotExist(err) {
+		return CreatePlan{Result: "ERROR: " + err.Error()}
+	}
+	var b strings.Builder
+	lines := strings.Split(c.Content, "\n")
+	if c.Content == "" {
+		lines = nil
+	}
+	fmt.Fprintf(&b, "%s — creating (%d lines, %d bytes)\n", Display(workdir, c.Path), len(lines), len(c.Content))
+	for i, l := range lines {
+		fmt.Fprintf(&b, "+%3d │ %s\n", i+1, l)
+	}
+	return CreatePlan{NewContent: c.Content, Preview: b.String()}
+}
+
+// ApplyCreate writes the new file (creating parent directories within the
+// workdir), with the exact content the plan previewed.
+func ApplyCreate(workdir string, c Call, content string) error {
+	path, err := workdirPath(workdir, c.Path)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(content), 0644)
+}
+
+func (c Call) runCreate(workdir string) string {
+	plan := PlanCreate(workdir, c)
+	if plan.Result != "" {
+		return FormatResult(c.Tool, c.Path, plan.Result)
+	}
+	if err := ApplyCreate(workdir, c, plan.NewContent); err != nil {
+		return FormatResult(c.Tool, c.Path, "ERROR: "+err.Error())
+	}
+	return FormatResult(c.Tool, c.Path, fmt.Sprintf("created %s (%d bytes)", c.Path, len(plan.NewContent)))
+}
+
+// DeletePlan is the deterministic outcome of planning a delete_file call.
+type DeletePlan struct {
+	Preview string
+	Bytes   int64
+	Result  string // non-empty means the plan failed
+}
+
+// PlanDelete verifies the target is a regular file and previews its head,
+// without deleting anything.
+func PlanDelete(workdir string, c Call) DeletePlan {
+	path, err := workdirPath(workdir, c.Path)
+	if err != nil {
+		return DeletePlan{Result: "ERROR: " + err.Error()}
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return DeletePlan{Result: "ERROR: " + err.Error()}
+	}
+	if info.IsDir() {
+		return DeletePlan{Result: "ERROR: is a directory; delete_file removes a single file"}
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return DeletePlan{Result: "ERROR: " + err.Error()}
+	}
+	lines := strings.Split(string(data), "\n")
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s — deleting (%d lines, %d bytes)\n", Display(workdir, c.Path), len(lines), info.Size())
+	show := min(len(lines), 12)
+	for i := 0; i < show; i++ {
+		fmt.Fprintf(&b, "-%3d │ %s\n", i+1, lines[i])
+	}
+	if show < len(lines) {
+		fmt.Fprintf(&b, "  … %d more line(s)\n", len(lines)-show)
+	}
+	return DeletePlan{Preview: b.String(), Bytes: info.Size()}
+}
+
+// ApplyDelete removes the file the plan previewed.
+func ApplyDelete(workdir string, c Call) error {
+	path, err := workdirPath(workdir, c.Path)
+	if err != nil {
+		return err
+	}
+	return os.Remove(path)
+}
+
+func (c Call) runDelete(workdir string) string {
+	plan := PlanDelete(workdir, c)
+	if plan.Result != "" {
+		return FormatResult(c.Tool, c.Path, plan.Result)
+	}
+	if err := ApplyDelete(workdir, c); err != nil {
+		return FormatResult(c.Tool, c.Path, "ERROR: "+err.Error())
+	}
+	return FormatResult(c.Tool, c.Path, fmt.Sprintf("deleted %s (%d bytes)", c.Path, plan.Bytes))
 }

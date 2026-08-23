@@ -189,18 +189,23 @@ func (c *ChatCmd) turn(ctx context.Context, client *deepseek.Client, conversatio
 			return cur, nil
 		}
 
-		// Tool turn: never prints the raw JSON. Writes must be confirmed.
-		note(fmt.Sprintf("%s %s", call.Tool, call.Path))
-		if call.Tool == "edit_file" {
-			// Plan first: the preview and the write derive from the same read,
-			// so what the user approves is exactly what lands on disk.
+		// Tool turn: never prints the raw JSON. Writes and deletions are planned,
+		// previewed, confirmed, then applied — the preview and the write derive
+		// from the same read, so what the user approves is exactly what happens.
+		display := filetools.Display(workdir, call.Path)
+		note(fmt.Sprintf("%s %s", call.Tool, display))
+		switch call.Tool {
+		case "read_file", "list_directory":
+			curPrompt = call.Run(workdir)
+			continue
+		case "edit_file":
 			plan := filetools.PlanEdit(workdir, call)
 			if plan.Result != "" {
 				curPrompt = filetools.FormatResult(call.Tool, call.Path, plan.Result)
 				continue
 			}
 			fmt.Fprintln(os.Stderr, plan.Preview)
-			if !confirmWrite(fmt.Sprintf("apply edit to %s?", call.Path)) {
+			if !confirmWrite(fmt.Sprintf("apply edit to %s?", display)) {
 				curPrompt = filetools.FormatResult(call.Tool, call.Path, "ERROR: edit rejected by user; do not retry it")
 				continue
 			}
@@ -210,8 +215,42 @@ func (c *ChatCmd) turn(ctx context.Context, client *deepseek.Client, conversatio
 			}
 			curPrompt = filetools.FormatResult(call.Tool, call.Path, filetools.EditSummary(plan.Count, call.Old, call.New))
 			continue
+		case "create_file":
+			plan := filetools.PlanCreate(workdir, call)
+			if plan.Result != "" {
+				curPrompt = filetools.FormatResult(call.Tool, call.Path, plan.Result)
+				continue
+			}
+			fmt.Fprintln(os.Stderr, plan.Preview)
+			if !confirmWrite(fmt.Sprintf("create %s?", display)) {
+				curPrompt = filetools.FormatResult(call.Tool, call.Path, "ERROR: create rejected by user; do not retry it")
+				continue
+			}
+			if err := filetools.ApplyCreate(workdir, call, plan.NewContent); err != nil {
+				curPrompt = filetools.FormatResult(call.Tool, call.Path, "ERROR: "+err.Error())
+				continue
+			}
+			curPrompt = filetools.FormatResult(call.Tool, call.Path, fmt.Sprintf("created %s (%d bytes)", display, len(plan.NewContent)))
+			continue
+		case "delete_file":
+			plan := filetools.PlanDelete(workdir, call)
+			if plan.Result != "" {
+				curPrompt = filetools.FormatResult(call.Tool, call.Path, plan.Result)
+				continue
+			}
+			fmt.Fprintln(os.Stderr, plan.Preview)
+			if !confirmWrite(fmt.Sprintf("delete %s?", display)) {
+				curPrompt = filetools.FormatResult(call.Tool, call.Path, "ERROR: delete rejected by user; do not retry it")
+				continue
+			}
+			if err := filetools.ApplyDelete(workdir, call); err != nil {
+				curPrompt = filetools.FormatResult(call.Tool, call.Path, "ERROR: "+err.Error())
+				continue
+			}
+			curPrompt = filetools.FormatResult(call.Tool, call.Path, fmt.Sprintf("deleted %s (%d bytes)", display, plan.Bytes))
+			continue
 		}
-		curPrompt = call.Run(workdir)
+		curPrompt = filetools.FormatResult(call.Tool, call.Path, "ERROR: unknown tool")
 	}
 	return "", fmt.Errorf("file tool loop exceeded %d turns", filetools.MaxIterations)
 }
@@ -470,7 +509,7 @@ func printReplHelp(u ui) {
   /model <default|expert>     switch model (starts a fresh conversation)
   /thinking [on|off]          toggle DeepThink reasoning
   /search [on|off]            toggle web search
-  /files [on|off]             toggle file tools (list_directory/read_file/edit_file in the CWD; writes ask first)
+  /files [on|off]             toggle file tools (list/read/create/edit/delete in the CWD; writes ask first)
   /help                       this help`))
 }
 

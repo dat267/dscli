@@ -41,6 +41,18 @@ func TestExtract(t *testing.T) {
 			t.Errorf("got %+v ok=%v", c, ok)
 		}
 	})
+	t.Run("create_file", func(t *testing.T) {
+		c, ok := Extract(`{"tool":"create_file","path":"new.txt","content":"hi\nthere"}`)
+		if !ok || c.Tool != "create_file" || c.Content != "hi\nthere" {
+			t.Errorf("got %+v ok=%v", c, ok)
+		}
+	})
+	t.Run("delete_file", func(t *testing.T) {
+		c, ok := Extract(`{"tool":"delete_file","path":"old.txt"}`)
+		if !ok || c.Tool != "delete_file" || c.Path != "old.txt" {
+			t.Errorf("got %+v ok=%v", c, ok)
+		}
+	})
 	t.Run("prose is not a call", func(t *testing.T) {
 		for _, reply := range []string{
 			"Hello! How can I help?",
@@ -209,7 +221,7 @@ func TestPathEscapeRejected(t *testing.T) {
 
 func TestInstructionsMentionsTools(t *testing.T) {
 	ins := Instructions("/tmp/proj")
-	for _, want := range []string{"list_directory", "read_file", "edit_file", "/tmp/proj", "FILE TOOLS"} {
+	for _, want := range []string{"list_directory", "read_file", "edit_file", "create_file", "delete_file", "/tmp/proj", "FILE TOOLS"} {
 		if !strings.Contains(ins, want) {
 			t.Errorf("instructions missing %q", want)
 		}
@@ -280,5 +292,99 @@ func TestPlanEditMultiLinePreview(t *testing.T) {
 	got, _ := os.ReadFile(f)
 	if string(got) != "one\n2\n3\n4\nfour\n" {
 		t.Errorf("applied content = %q", got)
+	}
+}
+
+func TestPlanCreate(t *testing.T) {
+	dir := t.TempDir()
+	c := Call{Tool: "create_file", Path: "sub/new.txt", Content: "hello\nworld"}
+
+	p1 := PlanCreate(dir, c)
+	if p1.Result != "" {
+		t.Fatalf("plan failed: %q", p1.Result)
+	}
+	if !strings.Contains(p1.Preview, "sub/new.txt — creating (2 lines, 11 bytes)") {
+		t.Errorf("preview header wrong:\n%s", p1.Preview)
+	}
+	for _, want := range []string{"+  1 │ hello", "+  2 │ world"} {
+		if !strings.Contains(p1.Preview, want) {
+			t.Errorf("preview missing %q:\n%s", want, p1.Preview)
+		}
+	}
+	// Deterministic, and applying lands exactly the previewed content
+	// (including auto-created parent directories).
+	p2 := PlanCreate(dir, c)
+	if p1.NewContent != p2.NewContent || p1.Preview != p2.Preview {
+		t.Error("PlanCreate is not deterministic")
+	}
+	if err := ApplyCreate(dir, c, p1.NewContent); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "sub", "new.txt"))
+	if err != nil || string(got) != "hello\nworld" {
+		t.Errorf("created file = %q err=%v", got, err)
+	}
+
+	// Existing file: plan errors and nothing changes.
+	before, _ := os.ReadFile(filepath.Join(dir, "sub", "new.txt"))
+	if p := PlanCreate(dir, c); !strings.Contains(p.Result, "already exists") {
+		t.Errorf("expected already-exists error, got %q", p.Result)
+	}
+	after, _ := os.ReadFile(filepath.Join(dir, "sub", "new.txt"))
+	if string(before) != string(after) {
+		t.Errorf("existing file must not be touched by a failed create")
+	}
+}
+
+func TestPlanDelete(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "gone.txt")
+	if err := os.WriteFile(f, []byte("alpha\nbeta\ngamma\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	c := Call{Tool: "delete_file", Path: "gone.txt"}
+
+	p1 := PlanDelete(dir, c)
+	if p1.Result != "" {
+		t.Fatalf("plan failed: %q", p1.Result)
+	}
+	if !strings.Contains(p1.Preview, "gone.txt — deleting (4 lines, 17 bytes)") {
+		t.Errorf("preview header wrong:\n%s", p1.Preview)
+	}
+	if !strings.Contains(p1.Preview, "-  1 │ alpha") {
+		t.Errorf("preview missing head:\n%s", p1.Preview)
+	}
+	if err := ApplyDelete(dir, c); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(f); !os.IsNotExist(err) {
+		t.Errorf("file still exists after delete: %v", err)
+	}
+
+	// Missing file and directory targets error without deleting.
+	if p := PlanDelete(dir, c); !strings.Contains(p.Result, "no such file") {
+		t.Errorf("missing file should error, got %q", p.Result)
+	}
+	sub := filepath.Join(dir, "adirt")
+	if err := os.Mkdir(sub, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if p := PlanDelete(dir, Call{Tool: "delete_file", Path: "adirt"}); !strings.Contains(p.Result, "directory") {
+		t.Errorf("directory delete should error, got %q", p.Result)
+	}
+	if _, err := os.Stat(sub); err != nil {
+		t.Errorf("directory must not be deleted")
+	}
+}
+
+func TestCreateDeletePathEscapes(t *testing.T) {
+	dir := t.TempDir()
+	for _, p := range []string{"../x.txt", "/etc/passwd", ""} {
+		if r := PlanCreate(dir, Call{Tool: "create_file", Path: p, Content: "x"}); !strings.Contains(r.Result, "ERROR") {
+			t.Errorf("create path %q must be rejected, got %q", p, r.Result)
+		}
+		if r := PlanDelete(dir, Call{Tool: "delete_file", Path: p}); !strings.Contains(r.Result, "ERROR") {
+			t.Errorf("delete path %q must be rejected, got %q", p, r.Result)
+		}
 	}
 }

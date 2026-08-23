@@ -1,6 +1,6 @@
 module github.com/dat267/dscli
 
-go 1.26.5
+go 1.27.0
 
 require (
 	github.com/alecthomas/kong v1.16.0

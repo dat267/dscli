@@ -147,7 +147,9 @@ It calls a tool by replying with *only* a JSON object:
 ```json
 {"tool":"list_directory","path":"."}
 {"tool":"read_file","path":"Makefile"}
+{"tool":"create_file","path":"notes.txt","content":"hello"}
 {"tool":"edit_file","path":"src/cli.go","old":"func Foo(","new":"func Bar("}
+{"tool":"delete_file","path":"old.txt"}
 ```
 
 - **`list_directory` and `read_file` run without prompting** — reading and
@@ -156,13 +158,14 @@ It calls a tool by replying with *only* a JSON object:
   reads are capped at 48 KB and the text is fed back to the model). The model
   is instructed to start with `{"tool":"list_directory","path":"."}` to
   discover files.
-- **`edit_file` always asks first — after showing a deterministic preview.**
-  Before the `apply edit to ...? [y/N]` prompt, dscli plans the change on the
-  actual file bytes (reads the file once, finds the first occurrence) and
-  prints a line-numbered view of exactly what will change — context lines, the
-  removed lines marked `-`, the replacement marked `+` — and the write then
-  applies that same planned content, so what you approve is precisely what
-  lands on disk:
+- **`create_file`, `edit_file` and `delete_file` always ask first — after
+  showing a deterministic preview.** `create_file` makes a *new* file (it
+  errors if the path already exists, and creates parent directories within
+  the workdir); `edit_file` replaces the first exact occurrence; `delete_file`
+  removes a file and previews its head. Every write/delete is planned on the
+  actual file bytes, previewed line-by-line (`-` removed, `+` added), then
+  applied with exactly the planned content — so what you approve is precisely
+  what happens:
 
   ```
   a.txt — replacing first of 1 occurrence(s)
@@ -174,9 +177,10 @@ It calls a tool by replying with *only* a JSON object:
 
   The confirmation answer is read from the controlling terminal (`/dev/tty`),
   so it never collides with the REPL's input; if no terminal is available the
-  edit is denied and the model is told not to retry. If the pattern doesn't
-  match, that surfaces at the preview step (nothing is prompted) and the model
-  is told to re-read the file and copy the exact text.
+  write/delete is denied and the model is told not to retry. If an edit
+  pattern doesn't match, that surfaces at the preview step (nothing is
+  prompted) and the model is told to re-read the file and copy the exact
+  text.
 - Tool calls resolve within the same session (each `read_file`/`edit_file`
   turn feeds a `<tool_result>` back), capped at 12 iterations, and the final
   prose answer is what you see. The raw JSON never reaches your screen; a dim
