@@ -193,7 +193,11 @@ It calls a tool by replying with *only* a JSON object:
   turn feeds a `<tool_result>` back), capped at 12 iterations, and the final
   prose answer is what you see. The raw JSON never reaches your screen; a dim
   note shows each call (`read_file Makefile`). All paths are confined to the
-  workdir (no `..` escapes), and the session is still deleted on close.
+  workdir: lexical `..` escapes **and symlink chains leading outside** are
+  rejected via canonical resolution, writes preserve the target's file mode,
+  and every apply re-verifies the file still matches the preview (a file
+  changed in between — or a create target that appeared — refuses the
+  operation instead of clobbering). The session is still deleted on close.
 
 ## Scripting
 

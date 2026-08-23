@@ -1,8 +1,9 @@
 // Package filetools implements the file tools the chat model can call:
-// list_directory, read_file and edit_file. The contract is a single JSON
-// object per turn — see Instructions — so parsing is deterministic and safe:
-// extraction only accepts a well-formed object naming a known tool, and every
-// file access is confined to a working directory.
+// list_directory, read_file, create_file, edit_file and delete_file. The
+// contract is a single JSON object per turn — see Instructions — so parsing
+// is deterministic and safe: extraction only accepts a well-formed object
+// naming a known tool, and every file access is confined to a working
+// directory, including through symlink chains.
 package filetools
 
 import (
@@ -124,14 +125,19 @@ func valid(c Call) bool {
 	return false
 }
 
-// Display renders a path for the user: relative to the workdir when it lies
-// inside it, otherwise as given. Used for preview headers and confirmations.
+// Display renders a path for the user: relative to the canonical workdir when
+// it lies inside it, otherwise as given. Used for preview headers and
+// confirmations.
 func Display(workdir, p string) string {
 	path, err := workdirPath(workdir, p)
 	if err != nil {
 		return p
 	}
-	rel, err := filepath.Rel(workdir, path)
+	root, err := workdirPath(workdir, ".")
+	if err != nil {
+		return p
+	}
+	rel, err := filepath.Rel(root, path)
 	if err != nil {
 		return p
 	}
@@ -197,24 +203,72 @@ func braceObject(text string) (string, bool) {
 }
 
 // workdirPath resolves p inside workdir and rejects anything that escapes it.
-// The check is textual (Clean + Rel): it does not follow symlinks.
+// The check is twofold: lexically (Clean + Rel) and canonically — symlink
+// chains within the workdir are resolved via EvalSymlinks and must stay
+// inside the (also canonicalised) working directory. Non-existent tails (the
+// create_file case) are resolved through their deepest existing ancestor.
 func workdirPath(workdir, p string) (string, error) {
 	if p == "" {
 		return "", fmt.Errorf("empty path")
 	}
+	root, err := filepath.Abs(workdir)
+	if err != nil {
+		return "", fmt.Errorf("resolve working directory: %w", err)
+	}
 	full := p
 	if !filepath.IsAbs(full) {
-		full = filepath.Join(workdir, p)
+		full = filepath.Join(root, p)
 	}
 	full = filepath.Clean(full)
-	rel, err := filepath.Rel(workdir, full)
+
+	// Lexical containment (fast path, clear errors).
+	rel, err := filepath.Rel(root, full)
 	if err != nil {
 		return "", fmt.Errorf("resolve path: %w", err)
 	}
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("path %q escapes the working directory", p)
 	}
-	return full, nil
+
+	// Canonical containment: eval the deepest existing ancestor of full, then
+	// re-join the remainder, and require the result to live inside the
+	// resolved root.
+	rootEval, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve working directory: %w", err)
+	}
+
+	existing := full
+	var tail []string
+	for {
+		if _, err := os.Lstat(existing); err == nil {
+			break
+		}
+		parent := filepath.Dir(existing)
+		if parent == existing {
+			break
+		}
+		tail = append([]string{filepath.Base(existing)}, tail...)
+		existing = parent
+	}
+	evaluated, err := filepath.EvalSymlinks(existing)
+	if err != nil {
+		return "", fmt.Errorf("resolve path: %w", err)
+	}
+	final := evaluated
+	for _, part := range tail {
+		final = filepath.Join(final, part)
+	}
+	final = filepath.Clean(final)
+
+	rel2, err := filepath.Rel(rootEval, final)
+	if err != nil {
+		return "", fmt.Errorf("resolve path: %w", err)
+	}
+	if rel2 == ".." || strings.HasPrefix(rel2, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path %q escapes the working directory (symlink)", p)
+	}
+	return filepath.Join(rootEval, rel2), nil
 }
 
 // Run executes the call inside workdir and returns the <tool_result> text to
@@ -304,7 +358,7 @@ func (c Call) runEdit(workdir string) string {
 	if plan.Result != "" {
 		return FormatResult(c.Tool, c.Path, plan.Result)
 	}
-	if err := ApplyEdit(workdir, c, plan.NewContent); err != nil {
+	if err := ApplyEdit(workdir, c, plan); err != nil {
 		return FormatResult(c.Tool, c.Path, "ERROR: "+err.Error())
 	}
 	return FormatResult(c.Tool, c.Path, EditSummary(plan.Count, c.Old, c.New))
@@ -314,21 +368,31 @@ func (c Call) runEdit(workdir string) string {
 // exact content ApplyEdit will write, a line-numbered preview of the change,
 // and — when the edit cannot be applied — the ERROR line to feed the model.
 type EditPlan struct {
-	NewContent string // file content after the first-occurrence replacement
-	Preview    string // user-facing diff preview ("" when Result != "")
-	Count      int    // total occurrences of the pattern in the file
-	Result     string // non-empty means the plan failed; NewContent/Preview
+	OriginalContent string // file content at plan time; ApplyEdit verifies it is unchanged
+	NewContent      string // file content after the first-occurrence replacement
+	Preview         string // user-facing diff preview ("" when Result != "")
+	Count           int    // total occurrences of the pattern in the file
+	Mode            os.FileMode
+	Result          string // non-empty means the plan failed; the other fields
 	// are then empty and Result is a model-facing ERROR line
 }
 
 // PlanEdit resolves and reads the file, verifies the pattern exists, and
 // computes the EXACT new content that ApplyEdit will later write — the
 // preview and the write are derived from the same bytes, so what the user
-// approves is precisely what lands on disk. It performs no write.
+// approves is precisely what lands on disk (as long as the file is not
+// changed in between, which ApplyEdit detects). It performs no write.
 func PlanEdit(workdir string, c Call) EditPlan {
 	path, err := workdirPath(workdir, c.Path)
 	if err != nil {
 		return EditPlan{Result: "ERROR: " + err.Error()}
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return EditPlan{Result: "ERROR: " + err.Error()}
+	}
+	if info.IsDir() {
+		return EditPlan{Result: "ERROR: is a directory; edit_file edits a single file"}
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -340,20 +404,37 @@ func PlanEdit(workdir string, c Call) EditPlan {
 		return EditPlan{Result: "ERROR: pattern not found in file; re-read the file and copy the exact text"}
 	}
 	return EditPlan{
-		NewContent: strings.Replace(content, c.Old, c.New, 1),
-		Preview:    buildPreview(c.Path, content, c.Old, c.New, count),
-		Count:      count,
+		OriginalContent: content,
+		NewContent:      strings.Replace(content, c.Old, c.New, 1),
+		Preview:         buildPreview(c.Path, content, c.Old, c.New, count),
+		Count:           count,
+		Mode:            info.Mode().Perm(),
 	}
 }
 
-// ApplyEdit writes the new content produced by PlanEdit. It performs exactly
-// the first-occurrence replacement the preview described.
-func ApplyEdit(workdir string, c Call, newContent string) error {
+// ApplyEdit writes the content produced by PlanEdit — but only after
+// verifying the file still matches the plan's OriginalContent, so a file
+// changed after the preview is never clobbered. It preserves the file's mode.
+func ApplyEdit(workdir string, c Call, plan EditPlan) error {
 	path, err := workdirPath(workdir, c.Path)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, []byte(newContent), 0644)
+	if plan.Result != "" {
+		return fmt.Errorf("edit plan failed: %s", plan.Result)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if string(data) != plan.OriginalContent {
+		return fmt.Errorf("file changed since the preview; edit not applied — re-read the file")
+	}
+	perm := plan.Mode
+	if perm == 0 {
+		perm = 0644
+	}
+	return os.WriteFile(path, []byte(plan.NewContent), perm)
 }
 
 // EditSummary is the compact <tool_result> body fed back to the model after a
@@ -440,10 +521,17 @@ func PlanCreate(workdir string, c Call) CreatePlan {
 }
 
 // ApplyCreate writes the new file (creating parent directories within the
-// workdir), with the exact content the plan previewed.
+// workdir), with the exact content the plan previewed — provided the target
+// still does not exist, so a file that appeared after the plan is never
+// overwritten.
 func ApplyCreate(workdir string, c Call, content string) error {
 	path, err := workdirPath(workdir, c.Path)
 	if err != nil {
+		return err
+	}
+	if _, err := os.Lstat(path); err == nil {
+		return fmt.Errorf("file already exists (created after the preview); create not applied")
+	} else if !os.IsNotExist(err) {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -506,11 +594,20 @@ func PlanDelete(workdir string, c Call) DeletePlan {
 	return DeletePlan{Preview: b.String(), Bytes: info.Size()}
 }
 
-// ApplyDelete removes the file the plan previewed.
+// ApplyDelete removes the file the plan previewed, re-verifying it still
+// exists as a regular file (a file removed or replaced in the meantime is
+// never deleted blindly, and a directory is never removed).
 func ApplyDelete(workdir string, c Call) error {
 	path, err := workdirPath(workdir, c.Path)
 	if err != nil {
 		return err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return fmt.Errorf("is a directory; delete_file removes a single file")
 	}
 	return os.Remove(path)
 }

@@ -216,7 +216,7 @@ func (c *ChatCmd) turn(ctx context.Context, client *deepseek.Client, conversatio
 				curPrompt = filetools.FormatResult(call.Tool, call.Path, "ERROR: edit rejected by user; do not retry it")
 				continue
 			}
-			if err := filetools.ApplyEdit(workdir, call, plan.NewContent); err != nil {
+			if err := filetools.ApplyEdit(workdir, call, plan); err != nil {
 				curPrompt = filetools.FormatResult(call.Tool, call.Path, "ERROR: "+err.Error())
 				continue
 			}

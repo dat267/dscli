@@ -310,7 +310,7 @@ func TestPlanEditPreview(t *testing.T) {
 	}
 
 	// Applying the planned content lands exactly the previewed change.
-	if err := ApplyEdit(dir, c, p1.NewContent); err != nil {
+	if err := ApplyEdit(dir, c, p1); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := os.ReadFile(f)
@@ -336,7 +336,7 @@ func TestPlanEditMultiLinePreview(t *testing.T) {
 	if !strings.Contains(p.Preview, "+  2 │ 2") || !strings.Contains(p.Preview, "+  3 │ 3") || !strings.Contains(p.Preview, "+  4 │ 4") {
 		t.Errorf("multi-line new not shown in preview:\n%s", p.Preview)
 	}
-	if err := ApplyEdit(dir, c, p.NewContent); err != nil {
+	if err := ApplyEdit(dir, c, p); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := os.ReadFile(f)
@@ -436,5 +436,167 @@ func TestCreateDeletePathEscapes(t *testing.T) {
 		if r := PlanDelete(dir, Call{Tool: "delete_file", Path: p}); !strings.Contains(r.Result, "ERROR") {
 			t.Errorf("delete path %q must be rejected, got %q", p, r.Result)
 		}
+	}
+}
+
+// TestSymlinkEscape: symlinks inside the workdir pointing outside must not
+// let any tool escape the working directory.
+func TestSymlinkEscape(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("secret"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "sensitive.md"), []byte("top secret"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "escape")); err != nil {
+		t.Skipf("symlinks not supported: %v", err)
+	}
+
+	// All five tools must refuse paths that resolve through the symlink.
+	readRes := (Call{Tool: "read_file", Path: "escape/secret.txt"}).Run(dir)
+	if !strings.Contains(readRes, "escapes") {
+		t.Errorf("read through symlink must be rejected, got: %q", readRes)
+	}
+	listRes := (Call{Tool: "list_directory", Path: "escape"}).Run(dir)
+	if !strings.Contains(listRes, "escapes") {
+		t.Errorf("list through symlink must be rejected, got: %q", listRes)
+	}
+	if p := PlanEdit(dir, Call{Tool: "edit_file", Path: "escape/sensitive.md", Old: "x", New: "y"}); !strings.Contains(p.Result, "escapes") {
+		t.Errorf("edit through symlink must be rejected, got: %q", p.Result)
+	}
+	if p := PlanCreate(dir, Call{Tool: "create_file", Path: "escape/new.txt", Content: "x"}); !strings.Contains(p.Result, "escapes") {
+		t.Errorf("create through symlink must be rejected, got: %q", p.Result)
+	}
+	if p := PlanDelete(dir, Call{Tool: "delete_file", Path: "escape/secret.txt"}); !strings.Contains(p.Result, "escapes") {
+		t.Errorf("delete through symlink must be rejected, got: %q", p.Result)
+	}
+	// Prove the symlink really reaches outside: the outside file must not be
+	// readable or written.
+	if data, err := os.ReadFile(filepath.Join(outside, "secret.txt")); err != nil || string(data) != "secret" {
+		t.Errorf("outside state changed: %q %v", data, err)
+	}
+
+	// A symlink that stays INSIDE the workdir is fine.
+	sub := filepath.Join(dir, "sub")
+	if err := os.Mkdir(sub, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "inner.txt"), []byte("inside"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(sub, filepath.Join(dir, "linkin")); err != nil {
+		t.Fatal(err)
+	}
+	if res := (Call{Tool: "read_file", Path: "linkin/inner.txt"}).Run(dir); !strings.Contains(res, "inside") {
+		t.Errorf("in-workdir symlink read failed: %q", res)
+	}
+}
+
+// TestEditPreservesMode: applying an edit keeps the file's original mode
+// instead of resetting it to 0644.
+func TestEditPreservesMode(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "private.txt")
+	if err := os.WriteFile(f, []byte("old content"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c := Call{Tool: "edit_file", Path: "private.txt", Old: "old", New: "new"}
+	plan := PlanEdit(dir, c)
+	if plan.Result != "" {
+		t.Fatal(plan.Result)
+	}
+	if err := ApplyEdit(dir, c, plan); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Errorf("mode after edit = %o, want 600", info.Mode().Perm())
+	}
+	got, _ := os.ReadFile(f)
+	if string(got) != "new content" {
+		t.Errorf("content after edit = %q", got)
+	}
+}
+
+// TestApplyEditDetectsChange: a file modified between plan and apply must not
+// be clobbered by the stale plan.
+func TestApplyEditDetectsChange(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "a.txt")
+	if err := os.WriteFile(f, []byte("AAA\nBBB\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	c := Call{Tool: "edit_file", Path: "a.txt", Old: "AAA", New: "AXA"}
+	plan := PlanEdit(dir, c)
+	if plan.Result != "" {
+		t.Fatal(plan.Result)
+	}
+	// Someone edits the file after the preview.
+	if err := os.WriteFile(f, []byte("AAA\nCHANGED\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyEdit(dir, c, plan); err == nil {
+		t.Fatal("expected stale-plan edit to be refused")
+	}
+	got, _ := os.ReadFile(f)
+	if string(got) != "AAA\nCHANGED\n" {
+		t.Errorf("file was clobbered: %q", got)
+	}
+}
+
+// TestApplyCreateNoClobber: a file appearing after the plan must never be
+// overwritten by ApplyCreate.
+func TestApplyCreateNoClobber(t *testing.T) {
+	dir := t.TempDir()
+	c := Call{Tool: "create_file", Path: "new.txt", Content: "planned"}
+	if p := PlanCreate(dir, c); p.Result != "" {
+		t.Fatal(p.Result)
+	}
+	// A file appears after the preview.
+	if err := os.WriteFile(filepath.Join(dir, "new.txt"), []byte("someone else"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyCreate(dir, c, "planned"); err == nil {
+		t.Fatal("expected create to refuse overwriting a file that appeared")
+	}
+	got, _ := os.ReadFile(filepath.Join(dir, "new.txt"))
+	if string(got) != "someone else" {
+		t.Errorf("existing file was overwritten: %q", got)
+	}
+}
+
+// TestApplyDeleteVerifies: deleting never removes something that changed
+// (or disappeared) since the plan.
+func TestApplyDeleteVerifies(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "gone.txt")
+	if err := os.WriteFile(f, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	c := Call{Tool: "delete_file", Path: "gone.txt"}
+	if p := PlanDelete(dir, c); p.Result != "" {
+		t.Fatal(p.Result)
+	}
+	// Removed by someone else after the plan.
+	if err := os.Remove(f); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyDelete(dir, c); err == nil {
+		t.Fatal("expected delete to fail for a file that no longer exists")
+	}
+	// Replaced by a directory after the plan: must not delete the directory.
+	if err := os.Mkdir(f, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyDelete(dir, c); err == nil {
+		t.Fatal("expected delete to refuse removing a directory")
+	}
+	if _, err := os.Stat(f); err != nil {
+		t.Errorf("directory must not be removed: %v", err)
 	}
 }
