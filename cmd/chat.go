@@ -197,11 +197,14 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 		deleteOwned()
 	}()
 
-	if c.Conversation == "" {
-		fmt.Fprintln(os.Stderr, u.dim("DeepSeek · model "+model+" · ephemeral session (deleted on close)"))
-	} else {
-		fmt.Fprintln(os.Stderr, u.dim("DeepSeek · model "+model+" · continuing conversation"))
+	mode := "ephemeral (deleted on close)"
+	if c.Conversation != "" {
+		mode = "continuing conversation"
 	}
+	fmt.Fprintf(os.Stderr, "%s\n", u.dim(fmt.Sprintf(
+		"DeepSeek · model %s · thinking %s · search %s · %s",
+		model, onoff(thinking), onoff(search), mode,
+	)))
 	fmt.Fprintln(os.Stderr, u.dim("one question per line · /help for commands"))
 
 	scanner := bufio.NewScanner(os.Stdin)

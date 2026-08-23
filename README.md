@@ -78,7 +78,7 @@ Inside the REPL (status line is dimmed; the `you>` prompt is styled only when
 attached to a terminal):
 
 ```
-DeepSeek · model default · ephemeral session (deleted on close)
+DeepSeek · model default · thinking off · search off · ephemeral (deleted on close)
 one question per line · /help for commands
 you> What is 2+2?
 4
@@ -125,7 +125,9 @@ you> /model expert          # switches model; starts a fresh conversation
 
 A thread's model is fixed when it is created: `--model`/`/model` always start
 a new conversation, and `--model` cannot be combined with `--conversation`.
-DeepThink and search can be toggled freely at any point of a thread.
+DeepThink and search can be toggled freely at any point of a thread — and
+**both default to off** (the status line in the REPL shows the current state:
+`thinking off · search off`).
 
 ## Scripting
 

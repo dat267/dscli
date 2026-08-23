@@ -119,7 +119,7 @@ func TestReplUIStatelessEndToEnd(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		"DeepSeek · model default · ephemeral session (deleted on close)",
+		"DeepSeek · model default · thinking off · search off · ephemeral (deleted on close)",
 		"one question per line · /help for commands",
 		"conversation: sess-1:2",
 	} {
