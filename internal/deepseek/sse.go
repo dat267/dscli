@@ -34,13 +34,24 @@ type patchParser struct {
 // calls emit for each reply-text delta. Malformed payloads are skipped, like
 // the website's client does.
 func (p *patchParser) Feed(payload []byte, emit func(string) error) error {
+	// Upstream can batch several patch frames into one SSE event (multiple
+	// data: lines joined by readSSE); decode and apply EVERY JSON value so a
+	// frame riding along with the snapshot is not dropped.
 	dec := json.NewDecoder(bytes.NewReader(payload))
 	dec.UseNumber()
-	var obj map[string]any
-	if err := dec.Decode(&obj); err != nil {
-		return nil // not JSON: ignore
+	for {
+		var obj map[string]any
+		if err := dec.Decode(&obj); err != nil {
+			return nil // end of payload (or malformed tail): ignore
+		}
+		if err := p.feedOne(obj, emit); err != nil {
+			return err
+		}
 	}
+}
 
+// feedOne applies a single decoded patch frame.
+func (p *patchParser) feedOne(obj map[string]any, emit func(string) error) error {
 	v, hasV := obj["v"]
 
 	// Snapshot frame: v is the whole response object.
@@ -127,11 +138,13 @@ func (p *patchParser) applyPatch(path string, v any, op string, emit func(string
 	switch op {
 	case "APPEND":
 		if txt, ok := textOf(v); ok {
+			p.emittedAny = true
 			return emit(txt)
 		}
-	case "SET":
-		// SET replaces the whole content slot; only treat it as the initial
-		// text, before anything has been emitted, to avoid duplicates.
+	case "", "SET":
+		// SET (or an op-less frame) replaces the whole content slot; only
+		// treat it as the initial text, before anything has been emitted, to
+		// avoid duplicates.
 		if !p.emittedAny {
 			if txt, ok := textOf(v); ok {
 				if err := emit(txt); err != nil {
@@ -154,6 +167,7 @@ func (p *patchParser) applyPathless(v any, emit func(string) error) error {
 	if !ok {
 		return nil
 	}
+	p.emittedAny = true
 	return emit(txt)
 }
 

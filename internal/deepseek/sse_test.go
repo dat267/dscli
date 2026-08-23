@@ -244,3 +244,32 @@ func TestSSEBatchContentPatch(t *testing.T) {
 		t.Errorf("deltas = %q", all)
 	}
 }
+
+// TestSSEMultipleFramesPerEvent: upstream batches several patch frames into
+// one SSE event (joined data: lines). Every frame must be applied — the
+// second frame riding with the snapshot was previously dropped, eating the
+// reply's opening token ("As of..." -> " of...").
+func TestSSEMultipleFramesPerEvent(t *testing.T) {
+	p := &patchParser{}
+	payload := `{"v":{"response":{"fragments":[{"type":"response","content":""}],"message_id":1},"message_id":1}}` + "\n" +
+		`{"p":"response/fragments/-1/content","o":"APPEND","v":"As "}` + "\n" +
+		`{"p":"response/fragments/-1/content","o":"APPEND","v":"of Aug"}` + "\n" +
+		`{"v":"ust"}` + "\n" +
+		`{"p":"response/fragments/-1/content","o":"SET","v":"As of August"}` // full-slot SET after emission: skipped
+	all := feed(t, p, payload)
+	want := []string{"As ", "of Aug", "ust"}
+	if !reflect.DeepEqual(all, want) {
+		t.Errorf("deltas = %q, want %q", all, want)
+	}
+}
+
+// TestSSEOpLessFirstContentFrame: the first content update may carry no "o"
+// field at all; it must still be treated as the initial text.
+func TestSSEOpLessFirstContentFrame(t *testing.T) {
+	p := &patchParser{}
+	all := feed(t, p, `{"p":"response/fragments/-1/content","v":"As "}`)
+	all = append(all, feed(t, p, `{"p":"response/fragments/-1/content","o":"APPEND","v":"of"}`)...)
+	if !reflect.DeepEqual(all, []string{"As ", "of"}) {
+		t.Errorf("deltas = %q", all)
+	}
+}
