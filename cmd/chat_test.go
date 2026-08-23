@@ -70,21 +70,37 @@ func TestEffectiveModel(t *testing.T) {
 	}
 }
 
-func TestParseToggle(t *testing.T) {
-	if !parseToggle("/thinking on", "/thinking ", false) {
-		t.Error("on should enable")
+func TestToggleState(t *testing.T) {
+	// Bare command flips the current value.
+	if toggleState("/thinking", "/thinking", false) != true {
+		t.Error("bare /thinking from off should enable")
 	}
-	if parseToggle("/thinking off", "/thinking ", true) {
-		t.Error("off should disable")
+	if toggleState("/thinking", "/thinking", true) != false {
+		t.Error("bare /thinking from on should disable")
 	}
-	if !parseToggle("/thinking 1", "/thinking ", false) {
-		t.Error("1 should enable")
+	// Explicit values set, strings and numbers accepted.
+	if toggleState("/thinking on", "/thinking", false) != true {
+		t.Error("/thinking on should enable")
 	}
-	if parseToggle("/thinking wat", "/thinking ", true) != true {
+	if toggleState("/thinking off", "/thinking", true) != false {
+		t.Error("/thinking off should disable")
+	}
+	if toggleState("/search 1", "/search", false) != true {
+		t.Error("/search 1 should enable")
+	}
+	if toggleState("/search 0", "/search", true) != false {
+		t.Error("/search 0 should disable")
+	}
+	// Unknown values leave the state untouched.
+	if toggleState("/thinking wat", "/thinking", true) != true {
 		t.Error("unknown value should keep the current setting")
 	}
-	if parseToggle("/thinking wat", "/thinking ", false) != false {
+	if toggleState("/thinking wat", "/thinking", false) != false {
 		t.Error("unknown value should keep the current setting")
+	}
+	// Trailing whitespace still counts as a bare toggle.
+	if toggleState("/thinking  ", "/thinking", false) != true {
+		t.Error("bare /thinking with trailing spaces should toggle")
 	}
 }
 

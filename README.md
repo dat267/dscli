@@ -84,7 +84,7 @@ you> What is 2+2?
 4
 
 you> /model expert              # switch model (starts a fresh conversation)
-you> /thinking on
+you> /thinking on               # or bare /thinking to flip it
 you> /search off
 you> /new                       # start a fresh conversation
 you> /exit
@@ -115,7 +115,9 @@ dscli chat -s "latest Mars rover news"                  # web search
 dscli chat -t -s -m expert "both, on the strong model"
 ```
 
-Inside the REPL the same switches are slash commands (see `/help`):
+Inside the REPL the same switches are slash commands (see `/help`): a bare
+`/thinking` or `/search` flips the current state, or give an explicit value
+(`/thinking on`). The status line redraws after every change.
 
 ```
 you> /thinking on

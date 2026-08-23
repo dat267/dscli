@@ -201,10 +201,15 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 	if c.Conversation != "" {
 		mode = "continuing conversation"
 	}
-	fmt.Fprintf(os.Stderr, "%s\n", u.dim(fmt.Sprintf(
-		"DeepSeek · model %s · thinking %s · search %s · %s",
-		model, onoff(thinking), onoff(search), mode,
-	)))
+	// status redraws the live settings line; it is shown at launch and after
+	// every /thinking, /search or /model change.
+	status := func() {
+		fmt.Fprintf(os.Stderr, "%s\n", u.dim(fmt.Sprintf(
+			"DeepSeek · model %s · thinking %s · search %s · %s",
+			model, onoff(thinking), onoff(search), mode,
+		)))
+	}
+	status()
 	fmt.Fprintln(os.Stderr, u.dim("one question per line · /help for commands"))
 
 	scanner := bufio.NewScanner(os.Stdin)
@@ -233,23 +238,29 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 		case line == "/help":
 			printReplHelp(u)
 			continue
-		case strings.HasPrefix(line, "/model "):
-			m := strings.TrimSpace(strings.TrimPrefix(line, "/model "))
+		case line == "/model" || strings.HasPrefix(line, "/model "):
+			m := strings.TrimSpace(strings.TrimPrefix(line, "/model"))
+			if m == "" {
+				status()
+				fmt.Fprintln(os.Stderr, u.dim("model: "+model+" (fixed per thread; /model <default|expert> starts a new conversation)"))
+				continue
+			}
 			if m != "default" && m != "expert" {
 				fmt.Fprintf(os.Stderr, "unknown model %q (want default or expert)\n", m)
 				continue
 			}
 			model = m
 			conversation = ""
-			fmt.Fprintf(os.Stderr, "%s\n", u.dim("model: "+m+" · new conversation"))
+			status()
+			fmt.Fprintln(os.Stderr, u.dim("new conversation"))
 			continue
-		case strings.HasPrefix(line, "/thinking "):
-			thinking = parseToggle(line, "/thinking ", thinking)
-			fmt.Fprintf(os.Stderr, "%s\n", u.dim("thinking "+onoff(thinking)))
+		case line == "/thinking" || strings.HasPrefix(line, "/thinking "):
+			thinking = toggleState(line, "/thinking", thinking)
+			status()
 			continue
-		case strings.HasPrefix(line, "/search "):
-			search = parseToggle(line, "/search ", search)
-			fmt.Fprintf(os.Stderr, "%s\n", u.dim("search "+onoff(search)))
+		case line == "/search" || strings.HasPrefix(line, "/search "):
+			search = toggleState(line, "/search", search)
+			status()
 			continue
 		case strings.HasPrefix(line, "/"):
 			fmt.Fprintln(os.Stderr, "unknown command (/help for commands)")
@@ -316,17 +327,23 @@ func onoff(v bool) string {
 
 func printReplHelp(u ui) {
 	fmt.Fprintln(os.Stderr, u.dim(`commands:
-  /exit, /quit             leave the session
-  /new                     start a fresh conversation
-  /model <default|expert>  switch model (starts a fresh conversation)
-  /thinking <on|off>       toggle DeepThink reasoning
-  /search <on|off>         toggle web search
-  /help                    this help`))
+  /exit, /quit                leave the session
+  /new                        start a fresh conversation
+  /model <default|expert>     switch model (starts a fresh conversation)
+  /thinking [on|off]          toggle DeepThink reasoning
+  /search [on|off]            toggle web search
+  /help                       this help`))
 }
 
-func parseToggle(line, prefix string, current bool) bool {
-	v := strings.TrimSpace(strings.TrimPrefix(line, prefix))
-	switch v {
+// toggleState updates a boolean from a slash command: a bare "/cmd" flips the
+// current value, "/cmd on|off|true|false|1|0|yes|no" sets it explicitly, and
+// anything else leaves it unchanged.
+func toggleState(line, cmd string, current bool) bool {
+	arg := strings.TrimSpace(strings.TrimPrefix(line, cmd))
+	if arg == "" {
+		return !current
+	}
+	switch arg {
 	case "on", "1", "true", "yes":
 		return true
 	case "off", "0", "false", "no":

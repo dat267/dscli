@@ -101,7 +101,7 @@ func TestReplUIStatelessEndToEnd(t *testing.T) {
 
 	var stdout, stderr string
 	var runErr error
-	withStdin(t, "hello\n/quit\n", func() {
+	withStdin(t, "hello\n/thinking\n/quit\n", func() {
 		stdout = captureStdout(t, func() {
 			stderr = captureStderr(t, func() {
 				runErr = cmd.replLoop(context.Background(), client, "", nil)
@@ -120,6 +120,7 @@ func TestReplUIStatelessEndToEnd(t *testing.T) {
 
 	for _, want := range []string{
 		"DeepSeek · model default · thinking off · search off · ephemeral (deleted on close)",
+		"DeepSeek · model default · thinking on · search off · ephemeral (deleted on close)", // bare /thinking flipped it
 		"one question per line · /help for commands",
 		"conversation: sess-1:2",
 	} {
