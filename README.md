@@ -120,12 +120,14 @@ assistant's replies. `/new` starts a fresh conversation, `/clear` forgets the
 persisted default session and starts a fresh one (`/clear --delete` also
 removes the old thread server-side), and `/tools` toggles the file tools.
 
-**Chat style.** Every general-chat turn (`chat`, `ask`, `do`) is prefixed with
-an instruction block that sets the assistant's framing, so the model treats
-adult creative writing and roleplay as in-scope instead of refusing or
-watering it down. Override it by dropping a `chat/chat.md` (or
+**Chat style.** General-chat turns (`chat`, `ask`, `do`) are sent as-is
+first; only when the reply is cut off or content-filtered (a refusal) is the
+turn retried once with an instruction block prepended that sets a
+mature-audience framing, so adult creative writing and roleplay are treated
+as in-scope instead of refused or watered down. Normal conversations never
+carry the block. Override it by dropping a `chat/chat.md` (or
 `chat/default.md`) into `./chat/` or `~/.config/dscli/chat/`, or point
-`--chat-style` at any file; an empty file disables the prefix.
+`--chat-style` at any file; an empty file disables the retry.
 Translation keeps its own separate style (see below).
 
 When stdin or stdout is **not** a terminal (pipes, scripts, `--json-out`), the

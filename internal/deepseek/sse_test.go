@@ -52,6 +52,19 @@ func TestSSEStatusDetection(t *testing.T) {
 	if p2.truncated {
 		t.Error("FINISHED must not mark truncated")
 	}
+
+	// A transient WIP followed by a clean FINISHED is NOT truncated — a
+	// clean end overrides the earlier in-progress signal.
+	p3 := &patchParser{}
+	feed(t, p3, `{"v":{"response":{"fragments":[{"type":"response","content":"ok"}]}}}`)
+	feed(t, p3, `{"v":[{"p":"status","v":"WIP"},{"p":"quasi_status","v":"WIP"}]}`)
+	feed(t, p3, `{"p":"response/status","o":"SET","v":"FINISHED"}`)
+	if p3.truncated {
+		t.Error("WIP then FINISHED must not mark truncated")
+	}
+	if !p3.finished {
+		t.Error("FINISHED should mark the reply finished")
+	}
 }
 
 func TestSSESnapshotThenAppends(t *testing.T) {

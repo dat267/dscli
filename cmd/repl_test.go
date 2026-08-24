@@ -158,7 +158,7 @@ func TestReplMultiline(t *testing.T) {
 	})
 
 	prompt, _ := completionBody(t, rec, 0)
-	want := DefaultChatStyle() + "\n\nfirst \nsecond \n\nthird \\\\"
+	want := "first \nsecond \n\nthird \\\\"
 	if prompt != want {
 		t.Errorf("multiline prompt = %q, want %q", prompt, want)
 	}
@@ -179,7 +179,7 @@ func TestReplMultilinePipedEndsAtEOF(t *testing.T) {
 		})
 	})
 	prompt, _ := completionBody(t, rec, 0)
-	if want := DefaultChatStyle() + "\n\njust a continuation \nand its tail"; prompt != want {
+	if want := "just a continuation \nand its tail"; prompt != want {
 		t.Errorf("prompt = %q, want %q", prompt, want)
 	}
 }

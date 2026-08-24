@@ -83,9 +83,6 @@ func (c *AskCmd) Run(app *App, ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if style != "" {
-		prompt = style + "\n\n" + prompt
-	}
 
 	client := deepseek.NewClient(deepseek.Session{
 		Token:     c.Token,
@@ -126,10 +123,28 @@ func (c *AskCmd) Run(app *App, ctx context.Context) error {
 			ThinkingEnabled: c.Thinking,
 			SearchEnabled:   c.Search,
 		}, write)
-		if e == nil {
-			reply = r
+		if e != nil {
+			return e
 		}
-		return e
+		reply = r
+		// The style is a fallback: only when the reply is cut off /
+		// content-filtered is it retried once with the style prepended.
+		if reply.Truncated && style != "" {
+			next := reply.MessageID
+			r2, e2 := client.StreamCompletion(ctx, deepseek.CompletionRequest{
+				ChatSessionID:   sess,
+				ParentMessageID: &next,
+				Prompt:          style + "\n\n" + prompt,
+				ModelType:       effectiveModel(c.Model),
+				ThinkingEnabled: c.Thinking,
+				SearchEnabled:   c.Search,
+			}, write)
+			if e2 != nil {
+				return e2
+			}
+			reply = r2
+		}
+		return nil
 	})
 	if err != nil {
 		return err

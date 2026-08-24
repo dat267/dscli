@@ -143,6 +143,11 @@ func (c *ChatCmd) newClient() *deepseek.Client {
 // oneTurn asks one question in the given conversation, feeding every reply
 // delta to write, and returns the conversation id to use on the NEXT turn
 // ("<session_id>:<message_id>").
+//
+// The chat style is only used as a fallback: the prompt is sent as-is first,
+// and if the reply is cut off / content-filtered (a refusal), it is retried
+// once with the style prepended. Normal conversations never carry the style
+// block.
 func (c *ChatCmd) oneTurn(ctx context.Context, client *deepseek.Client, conversation, prompt, model string, write func(string) error, sources *[]deepseek.Source) (string, error) {
 	if !c.chatStyleResolved {
 		c.chatStyleResolved = true
@@ -153,16 +158,27 @@ func (c *ChatCmd) oneTurn(ctx context.Context, client *deepseek.Client, conversa
 		}
 		c.chatStyle = s
 	}
-	if c.chatStyle != "" {
-		prompt = c.chatStyle + "\n\n" + prompt
+	convID, rejected, err := c.completion(ctx, client, conversation, prompt, model, write, sources)
+	if err != nil {
+		return "", err
 	}
+	if rejected && c.chatStyle != "" {
+		c.showPreview("reply was filtered; retrying with the chat style")
+		convID, _, err = c.completion(ctx, client, convID, c.chatStyle+"\n\n"+prompt, model, write, sources)
+	}
+	return convID, err
+}
+
+// completion sends one completion request and returns the next conversation
+// id, whether the reply was cut off / content-filtered, and any error.
+func (c *ChatCmd) completion(ctx context.Context, client *deepseek.Client, conversation, prompt, model string, write func(string) error, sources *[]deepseek.Source) (string, bool, error) {
 	sessionID, parentID := splitConversation(conversation)
 	if sessionID == "" {
-		var err error
-		sessionID, err = client.CreateChatSession(ctx)
+		sid, err := client.CreateChatSession(ctx)
 		if err != nil {
-			return "", fmt.Errorf("create chat session: %w", err)
+			return "", false, fmt.Errorf("create chat session: %w", err)
 		}
+		sessionID = sid
 	}
 	// model_type is only sent (and only meaningful) on the first turn of a
 	// thread; resuming reuses the thread's fixed model.
@@ -180,12 +196,12 @@ func (c *ChatCmd) oneTurn(ctx context.Context, client *deepseek.Client, conversa
 		SearchEnabled:   c.Search,
 	}, write)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if sources != nil {
 		*sources = reply.Sources
 	}
-	return conversationID(sessionID, parentID, reply.MessageID), nil
+	return conversationID(sessionID, parentID, reply.MessageID), reply.Truncated, nil
 }
 
 // deltaWriter returns the writer that renders reply deltas to the user:

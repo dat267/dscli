@@ -46,10 +46,12 @@ func TestResolveChatStyle(t *testing.T) {
 	}
 }
 
-// TestChatStylePrepended: the resolved style is prepended to the prompt that
-// reaches the model in a general chat turn.
-func TestChatStylePrepended(t *testing.T) {
-	srv, rec := fakeDeepSeekServer(t)
+// TestChatStyleRetryOnRejection: the style is NOT sent on the first attempt;
+// only when the reply is content-filtered / cut off is it retried once with
+// the style prepended.
+func TestChatStyleRetryOnRejection(t *testing.T) {
+	rejected := completionSSE(t, 2, "") + "data: {\"v\":[{\"p\":\"status\",\"v\":\"CONTENT_FILTER\"},{\"p\":\"quasi_status\",\"v\":\"CONTENT_FILTER\"}]}\n\n"
+	srv, rec := fakeDeepSeekServerWith(t, []string{rejected, completionSSE(t, 3, "answer")})
 	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
 	cmd := &ChatCmd{}
 	withStdin(t, "hi\n/exit\n", func() {
@@ -59,24 +61,67 @@ func TestChatStylePrepended(t *testing.T) {
 			})
 		})
 	})
-	prompt, _ := completionBody(t, rec, 0)
-	if !strings.HasPrefix(prompt, DefaultChatStyle()+"\n\nhi") {
-		t.Errorf("prompt = %q, want the chat style prepended before the message", prompt)
+	// First attempt: no style.
+	first, _ := completionBody(t, rec, 0)
+	if first != "hi" {
+		t.Errorf("first prompt = %q, want %q (no style on the initial attempt)", first, "hi")
+	}
+	// Retry: style prepended, continuing from the filtered reply.
+	second, parent := completionBody(t, rec, 1)
+	if want := DefaultChatStyle() + "\n\nhi"; second != want {
+		t.Errorf("retry prompt = %q, want %q", second, want)
+	}
+	if parent != float64(2) {
+		t.Errorf("retry parent_message_id = %v, want 2 (the filtered reply)", parent)
 	}
 }
 
-// TestAskChatStylePrepended: `ask` prepends the style too.
-func TestAskChatStylePrepended(t *testing.T) {
-	srv, rec := fakeDeepSeekServer(t)
+// TestChatStyleNotRetriedWhenAccepted: a normal reply does not trigger a
+// styled retry.
+func TestChatStyleNotRetriedWhenAccepted(t *testing.T) {
+	srv, rec := fakeDeepSeekServerWith(t, []string{completionSSE(t, 2, "fine")})
+	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
+	cmd := &ChatCmd{}
+	withStdin(t, "hi\n/exit\n", func() {
+		captureStdout(t, func() {
+			captureStderr(t, func() {
+				_ = cmd.replLoop(context.Background(), client, "sess-1", nil, false)
+			})
+		})
+	})
+	if got := rec.remaining; len(got) != 0 {
+		t.Errorf("unused completions = %d, want 0 (no retry on an accepted reply)", len(got))
+	}
+	prompt, _ := completionBody(t, rec, 0)
+	if prompt != "hi" {
+		t.Errorf("prompt = %q, want %q (no style prepended)", prompt, "hi")
+	}
+}
+
+// TestAskChatStyleRetryOnRejection: `ask` retries once with the style when the
+// reply is content-filtered.
+func TestAskChatStyleRetryOnRejection(t *testing.T) {
+	rejected := completionSSE(t, 2, "") + "data: {\"v\":[{\"p\":\"status\",\"v\":\"CONTENT_FILTER\"},{\"p\":\"quasi_status\",\"v\":\"CONTENT_FILTER\"}]}\n\n"
+	srv, rec := fakeDeepSeekServerWith(t, []string{rejected, completionSSE(t, 3, "answer")})
 	defer srv.Close()
 	cmd := &AskCmd{Prompt: []string{"hello"}, Token: "tok", clientBase: srv.URL}
-	captureStdout(t, func() {
-		if err := cmd.Run(&App{cfgPath: filepath.Join(t.TempDir(), "dscli.json")}, context.Background()); err != nil {
-			t.Fatalf("ask: %v", err)
-		}
+	var stdout, stderr string
+	stdout = captureStdout(t, func() {
+		stderr = captureStderr(t, func() {
+			if err := cmd.Run(&App{cfgPath: filepath.Join(t.TempDir(), "dscli.json")}, context.Background()); err != nil {
+				t.Fatalf("ask: %v", err)
+			}
+		})
 	})
-	prompt, _ := completionBody(t, rec, 0)
-	if !strings.HasPrefix(prompt, DefaultChatStyle()+"\n\nhello") {
-		t.Errorf("prompt = %q, want the chat style prepended", prompt)
+	first, _ := completionBody(t, rec, 0)
+	if first != "hello" {
+		t.Errorf("first prompt = %q, want %q (no style)", first, "hello")
+	}
+	second, _ := completionBody(t, rec, 1)
+	if want := DefaultChatStyle() + "\n\nhello"; second != want {
+		t.Errorf("retry prompt = %q, want %q", second, want)
+	}
+	if !strings.Contains(stdout, "answer") {
+		t.Errorf("stdout = %q (stderr=%q), want the retried reply", stdout, stderr)
 	}
 }

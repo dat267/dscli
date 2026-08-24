@@ -55,7 +55,9 @@ func (p *patchParser) noteStatus(path string, v any) {
 	}
 	switch strings.ToUpper(strings.TrimSpace(s)) {
 	case "FINISHED":
+		// A clean end overrides any earlier transient WIP/INCOMPLETE signal.
 		p.finished = true
+		p.truncated = false
 	case "INCOMPLETE", "WIP", "AUTO_CONTINUE", "CONTENT_FILTER":
 		p.truncated = true
 	}
