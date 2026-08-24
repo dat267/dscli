@@ -129,6 +129,7 @@ func recoverStaleSession(ctx context.Context, client *deepseek.Client, cfgPath s
 	}
 	if serr := saveSession(cfgPath, sid); serr == nil {
 		if rerr := run(sid); rerr == nil {
+			fmt.Fprintln(os.Stderr, "note: the persisted conversation no longer exists server-side; started a fresh one")
 			return sid, nil
 		}
 	}

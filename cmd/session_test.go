@@ -129,6 +129,82 @@ func TestSessionStaleRecovered(t *testing.T) {
 	}
 }
 
+// TestSessionStaleRecoveredViaErrorFrame: the server reports the deleted
+// session with an SSE error frame (as chat.deepseek.com does) instead of an
+// HTTP error. The frame must be surfaced as a failure so recovery still kicks
+// in — a silent "successful" empty reply would keep the stale session forever.
+func TestSessionStaleRecoveredViaErrorFrame(t *testing.T) {
+	cfg := filepath.Join(t.TempDir(), "dscli.json")
+	if err := saveSession(cfg, "dead-sess"); err != nil {
+		t.Fatal(err)
+	}
+	srv, rec := fakeDeepSeekServerWith(t, []string{
+		"data: {\"type\":\"error\",\"content\":\"session not found\",\"finish_reason\":\"session_not_found\"}\n\n",
+		completionSSE(t, 2, "recovered"),
+	})
+	defer srv.Close()
+	app := &App{cfgPath: cfg}
+	cmd := &AskCmd{Prompt: []string{"hi"}, Token: "tok", clientBase: srv.URL}
+	stdout := captureStdout(t, func() {
+		if err := cmd.Run(app, context.Background()); err != nil {
+			t.Fatalf("ask: %v", err)
+		}
+	})
+	if stdout != "recovered\n" {
+		t.Errorf("stdout = %q", stdout)
+	}
+	if got := loadSavedSession(cfg); got != "sess-1:2" {
+		t.Errorf("saved session after recovery = %q, want sess-1:2", got)
+	}
+	rec.mu.Lock()
+	creates := rec.creates
+	rec.mu.Unlock()
+	if creates != 1 {
+		t.Errorf("creates = %d, want 1 (recovery created a fresh session)", creates)
+	}
+}
+
+// TestReplStaleRecovered: launching a chat with a persisted session that was
+// deleted server-side (reported via SSE error frame) recovers to a fresh
+// session: the first message is answered, the config points at the new
+// conversation, and the user is told the old one was abandoned.
+func TestReplStaleRecovered(t *testing.T) {
+	cfg := filepath.Join(t.TempDir(), "dscli.json")
+	if err := saveSession(cfg, "dead-sess"); err != nil {
+		t.Fatal(err)
+	}
+	srv, rec := fakeDeepSeekServerWith(t, []string{
+		"data: {\"type\":\"error\",\"content\":\"session not found\",\"finish_reason\":\"session_not_found\"}\n\n",
+		completionSSE(t, 2, "recovered"),
+	})
+	defer srv.Close()
+	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
+	cmd := &ChatCmd{cfgPath: cfg}
+	var stdout, stderr string
+	withStdin(t, "hello\n/exit\n", func() {
+		stdout = captureStdout(t, func() {
+			stderr = captureStderr(t, func() {
+				_ = cmd.replLoop(context.Background(), client, "dead-sess", nil, true)
+			})
+		})
+	})
+	if !strings.Contains(stdout, "recovered") {
+		t.Errorf("stdout = %q, want the recovered reply", stdout)
+	}
+	if !strings.Contains(stderr, "no longer exists server-side") {
+		t.Errorf("stderr = %q, want a stale-session note", stderr)
+	}
+	if got := loadSavedSession(cfg); got != "sess-1:2" {
+		t.Errorf("saved session after recovery = %q, want sess-1:2", got)
+	}
+	rec.mu.Lock()
+	creates := rec.creates
+	rec.mu.Unlock()
+	if creates != 1 {
+		t.Errorf("creates = %d, want 1 (recovery created a fresh session)", creates)
+	}
+}
+
 // TestReplPersistedStatusAndNoDelete: in persist mode the status line says so
 // and the resumed session is not deleted on close.
 func TestReplPersistedStatusAndNoDelete(t *testing.T) {
