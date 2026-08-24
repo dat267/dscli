@@ -695,10 +695,65 @@ func (m *tuiModel) scrollDown() {
 }
 
 func (m *tuiModel) scrollLines() int {
+	return len(m.wrappedRows())
+}
+
+// wrappedRows returns the scrollback split into rows that fit the pane width,
+// word-wrapping long lines (re-applying any leading ANSI style).
+func (m *tuiModel) wrappedRows() []string {
 	if m.scroll == "" {
-		return 0
+		return nil
 	}
-	return len(strings.Split(m.scroll, "\n"))
+	var rows []string
+	for _, line := range strings.Split(m.scroll, "\n") {
+		rows = append(rows, wrapScrollLine(line, m.width)...)
+	}
+	return rows
+}
+
+// wrapScrollLine word-wraps a scrollback line (which may carry a single ANSI
+// style wrapping its visible text, as produced by the ui helpers and
+// renderUserLine) to width columns, re-applying the style to each row.
+func wrapScrollLine(line string, width int) []string {
+	if width < 1 {
+		return []string{line}
+	}
+	prefix, text := splitStyled(line)
+	rows := wrapTextRows(text, width)
+	if prefix == "" {
+		return rows
+	}
+	out := make([]string, len(rows))
+	for i, r := range rows {
+		out[i] = prefix + r + ansiReset
+	}
+	return out
+}
+
+// splitStyled splits a line into a leading ANSI style (empty when plain) and
+// the visible text, stripping one trailing reset.
+func splitStyled(line string) (prefix, text string) {
+	if strings.HasPrefix(line, "\x1b[") {
+		if end := strings.IndexByte(line, 'm'); end > 0 {
+			prefix = line[:end+1]
+			text = strings.TrimSuffix(line[end+1:], ansiReset)
+			return prefix, text
+		}
+	}
+	return "", line
+}
+
+// wrapTextRows word-wraps plain text into rows of at most width columns.
+func wrapTextRows(text string, width int) []string {
+	if text == "" {
+		return []string{""}
+	}
+	rows := wrapWords([]rune(text), width)
+	out := make([]string, len(rows))
+	for i, r := range rows {
+		out[i] = string(r)
+	}
+	return out
 }
 
 // clampView recomputes the visible window: follow the bottom on new content
@@ -730,11 +785,11 @@ func (m *tuiModel) render() string {
 
 	// 1. Chat scrollback (top). Rendered to exactly `avail` rows — blank lines
 	// pad a short conversation so the input box is pinned to the bottom.
-	lines := strings.Split(m.scroll, "\n")
+	rows := m.wrappedRows()
 	avail := m.outputRows()
 	rendered := 0
-	for i := m.viewTop; i < len(lines) && rendered < avail; i++ {
-		b.WriteString(lines[i])
+	for i := m.viewTop; i < len(rows) && rendered < avail; i++ {
+		b.WriteString(rows[i])
 		b.WriteString("\n")
 		rendered++
 	}

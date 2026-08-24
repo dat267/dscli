@@ -332,6 +332,39 @@ func TestTUICursorUpDown(t *testing.T) {
 	}
 }
 
+// TestTUIScrollbackWraps: long scrollback lines are word-wrapped to the pane
+// width instead of relying on the terminal to wrap them.
+func TestTUIScrollbackWraps(t *testing.T) {
+	m, _ := tuiHarness(t, nil, "")
+	m.height, m.width = 12, 40
+	m.appendText(strings.Repeat("word ", 30)) // 150 chars, no newline
+	rows := m.wrappedRows()
+	if len(rows) <= 1 {
+		t.Fatalf("expected wrapped rows, got %d", len(rows))
+	}
+	for i, r := range rows {
+		if n := len([]rune(r)); n > 40 {
+			t.Errorf("row %d too long (%d cells): %q", i, n, r)
+		}
+	}
+	// A styled user line wraps and keeps its colour on every row.
+	m2, _ := tuiHarness(t, nil, "")
+	m2.height, m2.width = 12, 20
+	m2.appendLine(renderUserLine(strings.Repeat("styled ", 10)))
+	rows2 := m2.wrappedRows()
+	if len(rows2) <= 1 {
+		t.Fatalf("styled line not wrapped")
+	}
+	for _, r := range rows2 {
+		if r == "" {
+			continue // the blank separator row is unstyled by design
+		}
+		if !strings.Contains(r, "\x1b[38;5;81m") {
+			t.Errorf("styled row missing colour: %q", r)
+		}
+	}
+}
+
 // TestTUISubmitStreamsReply: submit a prompt, then stream the reply into the
 // scrollback.
 func TestTUISubmitStreamsReply(t *testing.T) {
