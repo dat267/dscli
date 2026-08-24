@@ -12,14 +12,18 @@ import (
 )
 
 func TestChunkText(t *testing.T) {
-	// Line boundaries preserved even when a single line exceeds the budget.
+	// A single line longer than the budget is hard-split so no chunk exceeds
+	// it (otherwise the whole line becomes one oversized request whose output
+	// gets cut off), and reassembly is lossless.
 	text := "aaaaa\n" + strings.Repeat("b", 100) + "\nccccc\n" + strings.Repeat("d", 100)
 	chunks := translate.ChunkText(text, 20)
-	if len(chunks) != 4 { // each oversized line becomes its own chunk
-		t.Fatalf("chunks = %d, want 4", len(chunks))
+	if len(chunks) < 4 {
+		t.Fatalf("chunks = %d, want the long lines split", len(chunks))
 	}
-	if strings.Contains(chunks[0], "ccccc") || strings.Contains(chunks[1], "aaaaa") {
-		t.Errorf("lines split across chunks:\n%q\n%q", chunks[0], chunks[1])
+	for _, c := range chunks {
+		if len(c) > 20 {
+			t.Errorf("chunk exceeds budget (%d): %q", len(c), c)
+		}
 	}
 	if strings.Join(chunks, "") != text {
 		t.Errorf("round trip lost data")

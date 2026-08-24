@@ -303,6 +303,10 @@ type Reply struct {
 	// Sources are the search citations the reply's inline [citation:N]
 	// markers refer to, in order (empty when search was off or no sources).
 	Sources []Source
+	// Truncated is true when the stream reported the reply was cut short
+	// (INCOMPLETE/WIP/AUTO_CONTINUE/CONTENT_FILTER) rather than FINISHED —
+	// i.e. the model stopped at its output limit. Callers may retry.
+	Truncated bool
 }
 
 // Source is one search citation.
@@ -369,7 +373,7 @@ func (c *Client) streamOnce(ctx context.Context, req CompletionRequest, pow stri
 	if parser.messageID != nil {
 		messageID = *parser.messageID
 	}
-	return Reply{MessageID: messageID, Sources: parser.sources}, nil
+	return Reply{MessageID: messageID, Sources: parser.sources, Truncated: parser.truncated}, nil
 }
 
 // readSSE reads an SSE stream, joining each event's "data:" lines and calling

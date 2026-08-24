@@ -21,7 +21,7 @@ type TranslateCmd struct {
 	To           string        `help:"Target language" default:"English"`
 	Output       string        `short:"o" help:"Output path (default: <input>.translated.<ext>, .txt for epub)"`
 	Force        bool          `short:"f" help:"Overwrite the output file if it exists"`
-	ChunkBytes   int           `help:"Approximate chunk size in bytes; 0 uses ~half the model's 1M-token context (~2 MiB) and auto-bisects on overflow" default:"0"`
+	ChunkBytes   int           `help:"Upper bound on chunk size in bytes; 0 uses a 1 MiB cap. Chunks are sized adaptively to fit the model's output limit, so this is a maximum, not a fixed size" default:"0"`
 	Instructions string        `help:"File with custom translation instructions for this run (default: translate/<from>-<to>.md, then a built-in general style)"`
 	Timeout      time.Duration `help:"Overall budget (0 = no limit)" default:"15m"`
 
@@ -30,6 +30,8 @@ type TranslateCmd struct {
 	UserAgent string `env:"DS_USER_AGENT" help:"Browser user-agent; some deployments reject non-browser UAs"`
 
 	Model string `short:"m" help:"Model: default (Instant) or expert" default:""`
+
+	Thinking bool `short:"t" help:"Enable DeepThink reasoning for each chunk (may improve quality on complex text)"`
 
 	NoPersist bool `help:"Do not persist or reuse the default session; the session is deleted when the run ends"`
 
@@ -86,9 +88,8 @@ func (c *TranslateCmd) Run(app *App, ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	chunks := translate.ChunkText(string(content), c.ChunkBytes)
-	fmt.Fprintf(os.Stderr, "translating %s → %s (%s, %d chunks from %s to %s)\n",
-		c.File, out, format, len(chunks), c.From, c.To)
+	fmt.Fprintf(os.Stderr, "translating %s → %s (%s from %s to %s)\n",
+		c.File, out, format, c.From, c.To)
 
 	var result, convID string
 	_, err = recoverStaleSession(ctx, client, c.cfgPath, sessionID, trusted, func(sid string) error {
@@ -98,6 +99,7 @@ func (c *TranslateCmd) Run(app *App, ctx context.Context) error {
 			Model:      effectiveModel(c.Model),
 			ChunkBytes: c.ChunkBytes,
 			Style:      style,
+			Thinking:   c.Thinking,
 			OnChunk: func(chunk, total int) {
 				fmt.Fprintf(os.Stderr, "  chunk %d/%d ok\n", chunk, total)
 			},

@@ -557,7 +557,7 @@ func (m *tuiModel) handleCommand(line string) (tea.Model, tea.Cmd) {
 	case "/help":
 		m.appendLine(m.u.dim("commands: /exit /quit /new /model /thinking /search /tools /files /clear /help"))
 		m.appendLine(m.u.dim("  /clear [--delete]  forget the persisted default session (--delete removes it server-side)"))
-		m.appendLine(m.u.dim("enter submits · ctrl+j / alt+enter newline · up/down history · tab completes /commands"))
+		m.appendLine(m.u.dim("enter submits · ctrl+j / alt+enter newline · up/down cursor (history at first/last line) · tab completes /commands"))
 		return m, nil
 	case "/model":
 		if arg == "" {

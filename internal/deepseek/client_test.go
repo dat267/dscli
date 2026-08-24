@@ -28,13 +28,16 @@ func TestSessionCookieHeader(t *testing.T) {
 }
 
 func TestCompletionRequestBody(t *testing.T) {
-	first := CompletionRequest{ChatSessionID: "s1", Prompt: "hi", ModelType: "default"}
+	first := CompletionRequest{ChatSessionID: "s1", Prompt: "hi", ModelType: "default", ThinkingEnabled: true}
 	body := first.body()
 	if body["chat_session_id"] != "s1" || body["prompt"] != "hi" {
 		t.Errorf("first-turn body wrong: %v", body)
 	}
 	if body["model_type"] != "default" {
 		t.Errorf("first-turn body missing model_type: %v", body)
+	}
+	if body["thinking_enabled"] != true {
+		t.Errorf("first-turn body must carry thinking_enabled true: %v", body)
 	}
 	if body["action"] != nil || body["preempt"] != false {
 		t.Errorf("action/preempt wrong: %v", body)

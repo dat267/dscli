@@ -960,7 +960,7 @@ func TestFileToolsTranslateLoop(t *testing.T) {
 	if stdout != "Translated.\n" {
 		t.Errorf("stdout = %q", stdout)
 	}
-	for _, want := range []string{"song.lrc → song.translated.fr.lrc", "(lrc, 1 chunks, to French)", "chunk 1/1 ok"} {
+	for _, want := range []string{"song.lrc → song.translated.fr.lrc", "(lrc, to French)", "chunk 1/1 ok"} {
 		if !strings.Contains(stderr, want) {
 			t.Errorf("stderr missing %q:\n%s", want, stderr)
 		}

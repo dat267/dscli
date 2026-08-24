@@ -777,9 +777,8 @@ func (c *ChatCmd) applyTranslateFile(ctx context.Context, client *deepseek.Clien
 	if err != nil {
 		return filetools.FormatResult(call.Tool, call.Path, "ERROR: "+err.Error())
 	}
-	chunks := translate.ChunkText(string(content), 0)
 	outDisplay := filetools.Display(workdir, out)
-	preview := fmt.Sprintf("%s → %s\n(%s, %d chunks, to %s)", display, outDisplay, format, len(chunks), call.To)
+	preview := fmt.Sprintf("%s → %s\n(%s, to %s)", display, outDisplay, format, call.To)
 	c.showPreview(preview)
 	if !c.confirmOp(fmt.Sprintf("translate %s → %s to %s?", display, outDisplay, call.To)) {
 		return filetools.FormatResult(call.Tool, call.Path, "ERROR: translate rejected by user; do not retry it")
@@ -819,7 +818,7 @@ func (c *ChatCmd) applyTranslateFile(ctx context.Context, client *deepseek.Clien
 		return filetools.FormatResult(call.Tool, call.Path, "ERROR: "+err.Error())
 	}
 	return filetools.FormatResult(call.Tool, call.Path,
-		fmt.Sprintf("translated %s → %s (%s, %d chunks, %d bytes)", display, outDisplay, format, len(chunks), len(result)))
+		fmt.Sprintf("translated %s → %s (%s, %d bytes)", display, outDisplay, format, len(result)))
 }
 
 func printReplHelp(u ui) {

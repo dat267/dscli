@@ -110,7 +110,8 @@ conversation: 0123456789:42
 ```
 
 Keys: **Enter** submits, **Ctrl+J / Alt+Enter** inserts a newline, **Up/Down**
-recalls history, **Tab** cycles the slash-command menu (Enter completes it),
+move the cursor through multiline input (at the first/last line they recall
+history), **Tab** cycles the slash-command menu (Enter completes it),
 **Esc** clears the input, **PgUp/PgDn / mouse wheel** scroll the chat pane,
 **Ctrl+C** quits. The layout is a scrollable chat pane on top, a bordered
 3-line input box (text wraps inside it) at the bottom, and the status line
@@ -205,7 +206,7 @@ translate several files, then rename/move the outputs:
 ```
 translate all .lrc files in Music/ into Chinese
 translate_file Music/one.lrc
-Music/one.lrc → Music/one.translated.lrc (lrc, 1 chunks, to Chinese)
+Music/one.lrc → Music/one.translated.lrc (lrc, to Chinese)
 translate Music/one.lrc → Music/one.translated.lrc to Chinese? [y/N] y
   chunk 1/1 ok
 …
@@ -301,7 +302,7 @@ It calls a tool by replying with *only* a JSON object:
 - **`translate_file`** bundles the whole translate pipeline into one tool
   call (handy for bulk translating a library in chat mode): `path`, `to`
   (target language), optional `output`. It previews (`song.lrc →
-  song.translated.lrc`, format + chunk count), asks, then translates in a
+  song.translated.lrc`, format + target), asks, then translates in a
   dedicated ephemeral session using the exact same engine as `dscli
   translate` — timestamps/XML/markup preserved and verified — writing the
   result and telling the model it succeeded. Input is capped at 1 MiB per
@@ -494,11 +495,17 @@ dscli translate book.epub -o book.txt          # EPUB text extraction → transl
 dscli translate -f lyrics.lrc -o lyrics.lrc    # overwrite the source in place
 ```
 
-- Chunks default to **~half the model's 1M-token context** (~2 MiB of source,
-  the other half reserved for the translation output), so typical files
-  translate in a single turn with the full window of context. Chunks that
-  still overflow are automatically bisected and retried as smaller pieces;
-  `--chunk-bytes N` forces an explicit size.
+- **Adaptive chunking — no cut-off, nothing wasted.** The binding limit on a
+  translation is the model's per-response *output* length (the site cuts
+  replies around 36 KiB and flags them `INCOMPLETE`). Instead of a fixed
+  chunk size, the CLI probes a small first chunk, learns the real
+  output/input byte ratio, and sizes the remaining chunks to fill the output
+  budget — every completed chunk is kept, and if a reply is ever still cut
+  off the chunk size shrinks and that chunk is retried, so an incomplete
+  result is never silently written. `--chunk-bytes N` is an upper bound on
+  chunk size, not a fixed size.
+- `--thinking`/`-t` enables DeepThink reasoning per chunk (optional; it does
+  not change the output cap, but some prefer it for complex prose).
 - **Structural awareness for every subtitle/lyric format:** after every
   chunk the CLI verifies that the structure survived byte-for-byte — LRC
   `[mm:ss.xx]` timecodes, SRT `HH:MM:SS,mmm --> ...` timing lines, WebVTT

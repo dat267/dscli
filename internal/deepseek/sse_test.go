@@ -19,6 +19,41 @@ func feed(t *testing.T, p *patchParser, payload string) []string {
 	return out
 }
 
+func TestSSEErrorFrameSurfaced(t *testing.T) {
+	p := &patchParser{}
+	err := p.Feed([]byte(`{"type":"error","content":"Messages too frequent. Try again later.","clear_response":true,"finish_reason":"rate_limit_reached"}`), func(string) error { return nil })
+	if err == nil {
+		t.Fatal("error frame must be surfaced as a stream error")
+	}
+	if !strings.Contains(err.Error(), "rate_limit_reached") {
+		t.Errorf("error should carry the finish_reason, got %q", err)
+	}
+}
+func TestSSEStatusDetection(t *testing.T) {
+	// A terminal status batch (pathless array of {p,v} patches) reporting a
+	// non-completion status marks the reply as truncated.
+	p := &patchParser{}
+	feed(t, p, `{"v":{"response":{"fragments":[{"type":"response","content":"partial"}]}}}`)
+	feed(t, p, `{"v":[{"p":"status","v":"CONTENT_FILTER"},{"p":"quasi_status","v":"CONTENT_FILTER"}]}`)
+	if !p.truncated {
+		t.Error("CONTENT_FILTER status should mark the reply truncated")
+	}
+	if p.finished {
+		t.Error("CONTENT_FILTER must not mark finished")
+	}
+
+	// A BATCH quasi_status of FINISHED marks a clean end.
+	p2 := &patchParser{}
+	feed(t, p2, `{"v":{"response":{"fragments":[{"type":"response","content":"ok"}]}}}`)
+	feed(t, p2, `{"p":"response","o":"BATCH","v":[{"p":"quasi_status","v":"FINISHED"}]}`)
+	if !p2.finished {
+		t.Error("FINISHED status should mark the reply finished")
+	}
+	if p2.truncated {
+		t.Error("FINISHED must not mark truncated")
+	}
+}
+
 func TestSSESnapshotThenAppends(t *testing.T) {
 	p := &patchParser{}
 	var all []string

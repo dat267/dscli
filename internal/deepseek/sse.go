@@ -3,6 +3,7 @@ package deepseek
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"strconv"
 	"strings"
 )
@@ -26,6 +27,11 @@ type patchParser struct {
 	activePath string
 	messageID  *int64
 	sources    []Source
+	// Completion state: whether the stream reported a normal FINISHED status
+	// or an abnormal (truncated/continued) one, used to detect replies the
+	// model cut off at its output limit.
+	finished  bool
+	truncated bool
 	// Fragments are tracked in container order so content updates can be
 	// attributed to their owning fragment: THINK/SEARCH/TIP fragments must
 	// never render as answer text, and SET (full-slot replace) only applies
@@ -33,6 +39,26 @@ type patchParser struct {
 	fragKinds   []string
 	fragEmitted []bool
 	sawSnapshot bool
+}
+
+// noteStatus inspects a status patch and records whether the response
+// completed normally or was truncated. Paths seen include "response/status",
+// "quasi_status" and "status"; values FINISHED mean a clean end, while
+// INCOMPLETE/WIP/AUTO_CONTINUE/CONTENT_FILTER mean the reply was cut short.
+func (p *patchParser) noteStatus(path string, v any) {
+	if !strings.HasSuffix(path, "status") && path != "quasi_status" {
+		return
+	}
+	s, ok := v.(string)
+	if !ok {
+		return
+	}
+	switch strings.ToUpper(strings.TrimSpace(s)) {
+	case "FINISHED":
+		p.finished = true
+	case "INCOMPLETE", "WIP", "AUTO_CONTINUE", "CONTENT_FILTER":
+		p.truncated = true
+	}
 }
 
 // Feed processes one SSE data payload (a single JSON patch operation) and
@@ -57,6 +83,19 @@ func (p *patchParser) Feed(payload []byte, emit func(string) error) error {
 
 // feedOne applies a single decoded patch frame.
 func (p *patchParser) feedOne(obj map[string]any, emit func(string) error) error {
+	// Upstream error frame (e.g. rate-limit or safety rejection). Without
+	// this the reply silently comes back empty and "successful" — the CLI
+	// would write a blank or cut-off file and claim it worked.
+	if t, _ := obj["type"].(string); strings.EqualFold(t, "error") {
+		msg, _ := obj["content"].(string)
+		if reason, _ := obj["finish_reason"].(string); reason != "" {
+			msg = strings.TrimSpace(msg + " (" + reason + ")")
+		}
+		if msg == "" {
+			msg = "upstream error frame"
+		}
+		return errors.New(msg)
+	}
 	v, hasV := obj["v"]
 
 	// Snapshot frame: v is the whole response object.
@@ -135,6 +174,7 @@ func (p *patchParser) feedOne(obj map[string]any, emit func(string) error) error
 
 // applyPatch handles one content/results patch operation.
 func (p *patchParser) applyPatch(path string, v any, op string, emit func(string) error) error {
+	p.noteStatus(path, v)
 	if strings.HasSuffix(path, "/results") || strings.HasSuffix(path, "/references") {
 		p.collectSources(v)
 	}
@@ -293,6 +333,20 @@ func (p *patchParser) applyFragments(v any, emit func(string) error) error {
 // a non-content frame interleaved between answer chunks must not swallow the
 // next chunk.
 func (p *patchParser) applyPathless(v any, emit func(string) error) error {
+	// A pathless terminal batch carries status/state patches as an array of
+	// {p, v} objects (e.g. {"v":[{"p":"status","v":"CONTENT_FILTER"},...]}).
+	// Extract any status signals so truncated replies are detected even though
+	// the array itself is not reply text.
+	if items, ok := v.([]any); ok {
+		for _, it := range items {
+			if m, ok := it.(map[string]any); ok {
+				if pp, ok := m["p"].(string); ok {
+					p.noteStatus(pp, m["v"])
+				}
+			}
+		}
+		return nil
+	}
 	idx := p.lastResponseIdx()
 	if idx < 0 && len(p.fragKinds) > 0 {
 		return nil

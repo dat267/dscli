@@ -15,6 +15,25 @@ import (
 	"github.com/dat267/dscli/internal/deepseek"
 )
 
+// TestChunkTextHardSplitsLongLines: a single line longer than the chunk size
+// is hard-split so a file with no newlines still chunks (the old behaviour
+// left it as one oversized request whose output got cut off).
+func TestChunkTextHardSplitsLongLines(t *testing.T) {
+	const budget = 16 * 1024
+	chunks := ChunkText(strings.Repeat("a", 90*1024), budget)
+	want := (90*1024 + budget - 1) / budget
+	if len(chunks) != want {
+		t.Fatalf("chunks = %d, want %d", len(chunks), want)
+	}
+	if len(chunks[0]) != budget {
+		t.Errorf("first chunk len = %d, want %d", len(chunks[0]), budget)
+	}
+	joined := strings.Join(chunks, "")
+	if len(joined) != 90*1024 {
+		t.Errorf("reassembled len = %d, want %d", len(joined), 90*1024)
+	}
+}
+
 func TestResolveStyle(t *testing.T) {
 	t.Run("default fallback", func(t *testing.T) {
 		style, err := ResolveStyle("", "ja", "en")
@@ -86,49 +105,52 @@ func TestPromptIncludesStyle(t *testing.T) {
 	}
 }
 
-func TestTranslateDefaultUsesMaxContext(t *testing.T) {
-	// A 300 KiB file (≈75K tokens) must translate in ONE request with the
-	// default context-sized chunk, not be sliced into tiny pieces.
+func TestTranslateDefaultChunks(t *testing.T) {
+	// With a tiny output (the fake always replies "ok"), the engine learns a
+	// near-zero output/input ratio and grows chunks to the 1 MiB max, so a
+	// file larger than the max is split into several requests: one probe
+	// chunk, then 1 MiB chunks.
 	srv, calls := fakeTranslateServer(t, func(n int) (int, string) {
 		return 200, sseReply(t, "ok\n")
 	})
 	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
-	content := strings.Repeat("a", 300*1024)
+	content := strings.Repeat("a", 3*1024*1024) // 3 MiB, no newlines
 	text, _, err := Translate(context.Background(), client, "sess-1", []byte(content), "text", Options{To: "English"})
 	if err != nil {
 		t.Fatalf("Translate: %v", err)
 	}
-	if text != "ok\n" {
-		t.Errorf("text = %q", text)
+	want := 1 + (len(content)+DefaultChunkBytes-initialChunkBytes-1)/DefaultChunkBytes // probe + 1 MiB chunks
+	if got := *calls; got != want {
+		t.Errorf("completions = %d, want %d", got, want)
 	}
-	if got := *calls; got != 1 {
-		t.Errorf("completions = %d, want 1 (whole file in one context-sized chunk)", got)
+	if got := strings.Count(text, "ok"); got != want {
+		t.Errorf("output chunks = %d, want %d", got, want)
+	}
+
+	// A small file stays a single chunk.
+	srv2, calls2 := fakeTranslateServer(t, func(int) (int, string) { return 200, sseReply(t, "ok\n") })
+	client2 := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv2.URL)
+	if _, _, err := Translate(context.Background(), client2, "sess-1", []byte("hello"), "text", Options{To: "English"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := *calls2; got != 1 {
+		t.Errorf("small file completions = %d, want 1", got)
 	}
 }
 
-func TestTranslateBisectsOnOverflow(t *testing.T) {
-	// The first request overflows the context; the engine must bisect the
-	// chunk and translate the halves instead of failing.
+func TestTranslateRealErrorPropagates(t *testing.T) {
+	// A genuine failure (here an HTTP 400 context-overflow) must fail loudly,
+	// never be masked by chunk retries or accepted as a partial translation.
 	srv, calls := fakeTranslateServer(t, func(n int) (int, string) {
-		if n == 1 {
-			return 400, `{"code":40004,"msg":"context length exceeded"}`
-		}
-		if n == 2 {
-			return 200, sseReply(t, "A\n")
-		}
-		return 200, sseReply(t, "B\n")
+		return 400, `{"code":40004,"msg":"context length exceeded"}`
 	})
 	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
-	content := strings.Repeat("a", 30*1024) // > minChunkBytes, bisectable
-	text, _, err := Translate(context.Background(), client, "sess-1", []byte(content), "text", Options{To: "English"})
-	if err != nil {
-		t.Fatalf("Translate: %v", err)
+	_, _, err := Translate(context.Background(), client, "sess-1", []byte(strings.Repeat("a", 12*1024)), "text", Options{To: "English"})
+	if err == nil {
+		t.Fatal("Translate succeeded, want an error")
 	}
-	if text != "A\nB\n" {
-		t.Errorf("text = %q, want %q", text, "A\nB\n")
-	}
-	if got := *calls; got != 3 {
-		t.Errorf("completions = %d, want 3 (overflow + two halves)", got)
+	if got := *calls; got != 1 {
+		t.Errorf("completions = %d, want 1 (no retry masking a real error)", got)
 	}
 }
 
@@ -185,4 +207,75 @@ func sseReply(t *testing.T, content string) string {
 		t.Fatal(err)
 	}
 	return "data: " + string(line) + "\n\n"
+}
+
+// sseTruncated is sseReply followed by a CONTENT_FILTER terminal batch,
+// simulating a reply the model cut off at its output limit.
+func sseTruncated(t *testing.T, content string) string {
+	t.Helper()
+	return sseReply(t, content) +
+		"data: {\"v\":[{\"p\":\"status\",\"v\":\"CONTENT_FILTER\"},{\"p\":\"quasi_status\",\"v\":\"CONTENT_FILTER\"}]}\n\n"
+}
+
+// TestTranslateGivesUpAtFloor: when even the minimum chunk size is cut off,
+// the engine fails loudly instead of looping forever on the same size.
+func TestTranslateGivesUpAtFloor(t *testing.T) {
+	srv, calls := fakeTranslateServer(t, func(n int) (int, string) {
+		return 200, sseTruncated(t, "partial\n")
+	})
+	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
+	content := strings.Repeat("a", 4*1024) // always cut off at every size
+	_, _, err := Translate(context.Background(), client, "sess-1", []byte(content), "text", Options{To: "English"})
+	if err == nil {
+		t.Fatal("Translate succeeded, want an error at the minimum chunk size")
+	}
+	if !strings.Contains(err.Error(), "minimum chunk size") {
+		t.Errorf("error = %v, want a minimum-chunk-size message", err)
+	}
+	if *calls > 20 {
+		t.Errorf("completions = %d, want a bounded number (no infinite loop)", *calls)
+	}
+}
+
+// TestTranslateThinkingFlag: the thinking option is carried into every
+// completion request. Use a per-call capture via the fake server's body.
+func TestTranslateThinkingFlag(t *testing.T) {
+	srv, _ := fakeTranslateServer(t, func(n int) (int, string) { return 200, sseReply(t, "ok\n") })
+	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
+	if _, _, err := Translate(context.Background(), client, "sess-1", []byte("hello"), "text", Options{To: "English", Thinking: true}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestTranslateShrinksOnTruncation: a reply cut off at the output limit is
+// never accepted; the engine shrinks the chunk size, re-splits the rest, and
+// retries, keeping every completed chunk.
+func TestTranslateShrinksOnTruncation(t *testing.T) {
+	srv, calls := fakeTranslateServer(t, func(n int) (int, string) {
+		if n == 1 {
+			return 200, sseTruncated(t, "partial\n")
+		}
+		if n == 2 {
+			return 200, sseReply(t, "A\n")
+		}
+		return 200, sseReply(t, "B\n")
+	})
+	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
+	// 16 KiB: the 8 KiB probe is truncated, then the rest is split at the
+	// shrunk size (4 KiB → 4 chunks).
+	content := strings.Repeat("a", 16*1024)
+	text, _, err := Translate(context.Background(), client, "sess-1", []byte(content), "text", Options{To: "English"})
+	if err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+	if strings.Contains(text, "partial") {
+		t.Errorf("truncated partial must never be accepted: %q", text)
+	}
+	if text != "A\nB\nB\nB\n" {
+		t.Errorf("text = %q, want %q", text, "A\nB\nB\nB\n")
+	}
+	// 1 truncated probe + 4 kept chunks of 4 KiB each.
+	if got := *calls; got != 5 {
+		t.Errorf("completions = %d, want 5 (1 truncated probe + 4 shrunk chunks)", got)
+	}
 }

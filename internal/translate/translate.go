@@ -30,15 +30,26 @@ const (
 	// tokens/char at ~3 bytes/char, so 4 bytes/token never underestimates
 	// the token count of typical text.
 	bytesPerToken = 4
-	// DefaultChunkBytes is roughly HALF the context window per turn — the
-	// other half is the translated output (≈1:1) — so a typical file
-	// translates in a single turn. Requests that still overflow are
-	// automatically bisected (see Translate).
-	DefaultChunkBytes = (MaxContextTokens * bytesPerToken) / 2 // ≈ 2 MiB
-	// minChunkBytes floors the bisection fallback.
-	minChunkBytes = 8 * 1024
-	// maxBisectDepth bounds recursive overflow splitting.
-	maxBisectDepth = 4
+	// DefaultChunkBytes is the UPPER BOUND on a single chunk (1 MiB). The
+	// binding constraint on translation is the model's per-response OUTPUT
+	// limit — the site cuts replies around 36 KiB (~9k tokens) and flags them
+	// INCOMPLETE — so the engine does not just slice the file at this size.
+	// Instead it probes a small first chunk, learns the real output/input byte
+	// ratio, and sizes the rest to fill the output budget (see Translate).
+	// Tune with --chunk-bytes.
+	DefaultChunkBytes = 1 << 20 // 1 MiB
+	// initialChunkBytes is the probe chunk: small enough to almost always fit
+	// within the output budget even for verbose models, so the engine can
+	// learn the output density before sizing chunks up.
+	initialChunkBytes = 8 * 1024
+	// minChunkBytes floors how small a chunk can get before giving up.
+	minChunkBytes = 1024
+	// defaultCapBytes is the model's per-reply output cap used until a real
+	// truncation is observed (the site cuts replies around 36 KiB).
+	defaultCapBytes = 36 * 1024
+	// outputCapMargin keeps a sized chunk's expected output safely short of
+	// the cap, so it stops generating before the cut-off point.
+	outputCapMargin = 0.85
 )
 
 // Options configures one translation run over an existing session.
@@ -50,7 +61,12 @@ type Options struct {
 	// Style is custom per-pair translation instructions appended to every
 	// chunk prompt (see ResolveStyle).
 	Style string
-	// OnChunk, when set, reports progress: 1-based chunk index and total.
+	// Thinking enables DeepThink reasoning for each chunk. It does not raise
+	// the per-reply output budget (the site still cuts replies around 36 KiB),
+	// but some prefer it for complex prose.
+	Thinking bool
+	// OnChunk, when set, reports progress: chunks done and a live estimate
+	// of the total (the total changes as the engine re-sizes chunks).
 	OnChunk func(chunk, total int)
 }
 
@@ -125,32 +141,65 @@ func LangCode(label string) string {
 	return key
 }
 
-// ChunkText splits text into chunks of roughly approxBytes, keeping lines
-// intact and preserving the source bytes exactly (the final newline, or its
-// absence, is reproduced).
-func ChunkText(text string, approxBytes int) []string {
+// FirstChunk splits off the first chunk of text (roughly approxBytes),
+// keeping lines intact and preserving the source bytes exactly (the final
+// newline, or its absence, is reproduced). A single line longer than
+// approxBytes is hard-split into pieces so files with few or no newlines
+// still chunk — otherwise the whole line becomes one oversized request whose
+// output gets cut off. Returns "" only when text is empty.
+func FirstChunk(text string, approxBytes int) string {
 	if approxBytes <= 0 {
 		approxBytes = DefaultChunkBytes
 	}
+	if approxBytes < 1 {
+		approxBytes = 1
+	}
 	endsWithNewline := strings.HasSuffix(text, "\n")
 	lines := strings.Split(text, "\n")
-	var chunks []string
-	var cur []string
+	var b strings.Builder
 	curBytes := 0
 	for i, line := range lines {
 		l := line
 		if i < len(lines)-1 || endsWithNewline {
 			l += "\n"
 		}
-		if curBytes > 0 && curBytes+len(l) > approxBytes {
-			chunks = append(chunks, strings.Join(cur, ""))
-			cur, curBytes = nil, 0
+		for len(l) > approxBytes {
+			if curBytes > 0 {
+				return b.String()
+			}
+			b.WriteString(l[:approxBytes])
+			return b.String()
 		}
-		cur = append(cur, l)
+		if curBytes > 0 && curBytes+len(l) > approxBytes {
+			return b.String()
+		}
+		b.WriteString(l)
 		curBytes += len(l)
+		if curBytes >= approxBytes {
+			return b.String()
+		}
 	}
-	if len(cur) > 0 {
-		chunks = append(chunks, strings.Join(cur, ""))
+	if curBytes > 0 {
+		return b.String()
+	}
+	return ""
+}
+
+// ChunkText splits text into chunks of roughly approxBytes, keeping lines
+// intact and preserving the source bytes exactly (the final newline, or its
+// absence, is reproduced). A single line longer than approxBytes is
+// hard-split into pieces so files with few or no newlines still chunk —
+// otherwise the whole line becomes one oversized request whose output gets cut
+// off.
+func ChunkText(text string, approxBytes int) []string {
+	var chunks []string
+	for {
+		c := FirstChunk(text, approxBytes)
+		if c == "" {
+			break
+		}
+		chunks = append(chunks, c)
+		text = text[len(c):]
 	}
 	if len(chunks) == 0 {
 		chunks = []string{""}
@@ -203,41 +252,56 @@ func Prompt(format, from, to string, reminder bool, style string) string {
 // verified per chunk and retried once when corrupted. Returns the assembled
 // translated text (always newline-terminated), the final conversation id
 // (session:message) for resuming the thread, and any error.
+//
+// Chunk sizes are adaptive: the binding limit is the model's per-response
+// OUTPUT budget (the site cuts replies around 36 KiB and flags them
+// INCOMPLETE), so a fixed chunk size either cuts off or wastes capacity. The
+// engine probes a small first chunk, learns the real output/input byte ratio,
+// then sizes the remaining chunks to fill the output budget — and shrinks the
+// size whenever a reply is still truncated. Every completed chunk is kept, so
+// nothing is discarded and re-translated.
 func Translate(ctx context.Context, client *deepseek.Client, sessionID string, content []byte, format string, opts Options) (string, string, error) {
-	chunkBytes := opts.ChunkBytes
-	if chunkBytes <= 0 {
-		chunkBytes = DefaultChunkBytes
+	maxChunk := opts.ChunkBytes
+	if maxChunk <= 0 {
+		maxChunk = DefaultChunkBytes
 	}
 	model := opts.Model
 	if model == "" {
 		model = "default"
 	}
-	chunks := ChunkText(string(content), chunkBytes)
+	src := string(content)
+	chunkBytes := initialChunkBytes
+	if chunkBytes > maxChunk {
+		chunkBytes = maxChunk
+	}
 
 	conversation := sessionID
 	var translated []string
-	// translateOne sends one chunk, bisecting it when the request overflows
-	// the context (each half retried as its own smaller chunk), so a chunk
-	// that is too large for the model still translates instead of failing.
-	var translateOne func(chunk string, depth int) error
-	translateOne = func(chunk string, depth int) error {
+	capBytes := defaultCapBytes
+	inOutRatio := 0.0 // output/input byte ratio, learned from the first complete chunk
+	growOK := true    // allow growing the chunk size only until the first truncation
+	offset := 0
+	for offset < len(src) {
+		chunk := FirstChunk(src[offset:], chunkBytes)
 		if chunk == "" {
-			return nil
+			break
 		}
-		prompt := Prompt(format, opts.From, opts.To, false, opts.Style) + chunk
-		text, convID, err := translateChunk(ctx, client, conversation, prompt, model)
-		if err != nil && depth < maxBisectDepth && len(chunk) > minChunkBytes {
-			a, b := splitTextAt(chunk, len(chunk)/2)
-			if err := translateOne(a, depth+1); err != nil {
-				return err
-			}
-			if err := translateOne(b, depth+1); err != nil {
-				return err
-			}
-			return nil
-		}
+		text, convID, truncated, err := translateChunk(ctx, client, conversation, Prompt(format, opts.From, opts.To, false, opts.Style)+chunk, model, opts.Thinking)
 		if err != nil {
-			return fmt.Errorf("chunk (%d bytes): %w", len(chunk), err)
+			if !truncated {
+				return "", conversation, fmt.Errorf("chunk (%d bytes): %w", len(chunk), err)
+			}
+			// Reply hit the output cap: learn the cap, stop growing, shrink
+			// the chunk size and re-split the remaining text from this offset.
+			growOK = false
+			if len(text) > capBytes {
+				capBytes = len(text)
+			}
+			if chunkBytes <= minChunkBytes {
+				return "", conversation, fmt.Errorf("chunk (%d bytes): the reply hits the output limit even at the minimum chunk size", len(chunk))
+			}
+			chunkBytes = shrinkChunk(chunkBytes, capBytes, inOutRatio)
+			continue
 		}
 		conversation = convID
 
@@ -248,45 +312,78 @@ func Translate(ctx context.Context, client *deepseek.Client, sessionID string, c
 			strict := Prompt(format, opts.From, opts.To, true, opts.Style) +
 				"The previous attempt changed a protected (timestamps/header) line.\n" +
 				"Keep every line with a timestamp or the WEBVTT/header syntax EXACTLY as in the original. Retry the chunk:\n\n" + chunk
-			text2, convID2, err2 := translateChunk(ctx, client, conversation, strict, model)
+			text2, convID2, _, err2 := translateChunk(ctx, client, conversation, strict, model, opts.Thinking)
 			if err2 != nil {
-				return fmt.Errorf("chunk (%d bytes): %w", len(chunk), err2)
+				return "", conversation, fmt.Errorf("chunk (%d bytes): %w", len(chunk), err2)
 			}
 			conversation = convID2
 			if err := filetools.VerifyProtected(format, chunk, text2); err != nil {
-				return fmt.Errorf("chunk (%d bytes): %w", len(chunk), err)
+				return "", conversation, fmt.Errorf("chunk (%d bytes): %w", len(chunk), err)
 			}
 			text = text2
 		}
-		translated = append(translated, text)
-		if opts.OnChunk != nil {
-			opts.OnChunk(len(translated), len(chunks))
+
+		if inOutRatio == 0 && len(chunk) > 0 && len(text) > 0 {
+			inOutRatio = float64(len(text)) / float64(len(chunk))
 		}
-		return nil
-	}
-	for _, chunk := range chunks {
-		if err := translateOne(chunk, 0); err != nil {
-			return "", conversation, err
+		if inOutRatio > 0 {
+			if n := idealChunk(capBytes, inOutRatio, maxChunk); growOK || n < chunkBytes {
+				chunkBytes = n
+			}
+		}
+		translated = append(translated, text)
+		offset += len(chunk)
+		if opts.OnChunk != nil {
+			remaining := len(src) - offset
+			total := len(translated)
+			if remaining > 0 {
+				total += (remaining + chunkBytes - 1) / chunkBytes
+			}
+			opts.OnChunk(len(translated), total)
 		}
 	}
 	return strings.TrimSpace(strings.Join(translated, "\n")) + "\n", conversation, nil
 }
 
-// splitTextAt splits s into two pieces around at, preferring a line
-// boundary, so bisected chunks stay line-coherent.
-func splitTextAt(s string, at int) (string, string) {
-	if at <= 0 || at >= len(s) {
-		return s, ""
+// idealChunk sizes a chunk so its expected output fills the per-reply output
+// budget (capBytes × outputCapMargin), bounded by [minChunkBytes, maxChunk].
+func idealChunk(capBytes int, ratio float64, maxChunk int) int {
+	if ratio <= 0 {
+		return maxChunk
 	}
-	if i := strings.LastIndexByte(s[:at], '\n'); i >= 0 {
-		at = i + 1
+	n := int(float64(capBytes) * outputCapMargin / ratio)
+	if n < minChunkBytes {
+		n = minChunkBytes
 	}
-	return s[:at], s[at:]
+	if n > maxChunk {
+		n = maxChunk
+	}
+	return n
+}
+
+// shrinkChunk reduces the chunk size after a truncation: halve it, but skip
+// straight to the ratio-based estimate when that is smaller, so a verbose
+// model converges quickly. Never returns below minChunkBytes.
+func shrinkChunk(current, capBytes int, ratio float64) int {
+	est := int(float64(capBytes) * outputCapMargin / 4) // assume verbose until learned
+	if ratio > 0 {
+		est = int(float64(capBytes) * outputCapMargin / ratio)
+	}
+	n := current / 2
+	if est < n {
+		n = est
+	}
+	if n < minChunkBytes {
+		n = minChunkBytes
+	}
+	return n
 }
 
 // translateChunk sends one chunk in the session thread and returns the
-// translated text plus the conversation id for the next chunk.
-func translateChunk(ctx context.Context, client *deepseek.Client, conversation, prompt, model string) (text, convID string, err error) {
+// translated text plus the conversation id for the next chunk. When the reply
+// was cut off at the output limit (truncated=true), text holds the partial
+// reply and err is non-nil so the caller retries with a smaller chunk.
+func translateChunk(ctx context.Context, client *deepseek.Client, conversation, prompt, model string, thinking bool) (text, convID string, truncated bool, err error) {
 	sessionID := conversation
 	parentID := int64(-1) // sentinel: no parent
 	if i := strings.IndexByte(conversation, ':'); i >= 0 {
@@ -314,14 +411,20 @@ func translateChunk(ctx context.Context, client *deepseek.Client, conversation, 
 		ParentMessageID: parent,
 		Prompt:          prompt,
 		ModelType:       modelType,
-		ThinkingEnabled: false,
+		ThinkingEnabled: thinking,
 		SearchEnabled:   false,
 	}, func(d string) error {
 		buf.WriteString(d)
 		return nil
 	})
 	if err != nil {
-		return "", "", err
+		return "", "", false, err
+	}
+	if reply.Truncated {
+		// The model stopped at its output limit: the reply is incomplete.
+		// Return the partial text and an error so the caller shrinks the chunk
+		// and retries, instead of writing a cut-off chunk.
+		return buf.String(), "", true, fmt.Errorf("translation truncated (reply hit the output limit)")
 	}
 	next := sessionID
 	if reply.MessageID != 0 {
@@ -329,7 +432,7 @@ func translateChunk(ctx context.Context, client *deepseek.Client, conversation, 
 	} else if parent != nil {
 		next = fmt.Sprintf("%s:%d", sessionID, *parent)
 	}
-	return strings.TrimSpace(buf.String()), next, nil
+	return strings.TrimSpace(buf.String()), next, false, nil
 }
 
 func formatName(format string) string {
