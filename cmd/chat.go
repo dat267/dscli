@@ -36,8 +36,14 @@ type ChatCmd struct {
 	FileTools    bool   `help:"Let the model inspect and edit files in the working directory and fetch URLs (writes always ask for confirmation first)"`
 	NoPersist    bool   `help:"Do not persist or reuse the default session; the session is deleted when the run ends"`
 	Instructions string `help:"Custom translation instructions file for translate_file (default: translate/<from>-<to>.md, then a built-in general style)"`
+	ChatStyle    string `help:"Instruction file prepended to every chat turn (default: chat/chat.md, then chat/default.md, then a built-in mature-audience style)"`
 	Workdir      string `help:"Working directory for file tools" default:"."`
 	MaxRead      int    `help:"Max bytes read_file and fetch_url will return; oversized or binary files/responses are rejected (default: 512 KiB)" default:"0"`
+
+	// chatStyle and chatStyleResolved hold the lazily-resolved general-chat
+	// instruction (see oneTurn).
+	chatStyle         string
+	chatStyleResolved bool
 
 	// confirm overrides the write-confirmation prompt (used by `do -y` to
 	// auto-approve every write, and the TUI to prompt in-app); nil falls back
@@ -138,6 +144,18 @@ func (c *ChatCmd) newClient() *deepseek.Client {
 // delta to write, and returns the conversation id to use on the NEXT turn
 // ("<session_id>:<message_id>").
 func (c *ChatCmd) oneTurn(ctx context.Context, client *deepseek.Client, conversation, prompt, model string, write func(string) error, sources *[]deepseek.Source) (string, error) {
+	if !c.chatStyleResolved {
+		c.chatStyleResolved = true
+		s, err := ResolveChatStyle(c.ChatStyle)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: %v; using the built-in chat style\n", err)
+			s = DefaultChatStyle()
+		}
+		c.chatStyle = s
+	}
+	if c.chatStyle != "" {
+		prompt = c.chatStyle + "\n\n" + prompt
+	}
 	sessionID, parentID := splitConversation(conversation)
 	if sessionID == "" {
 		var err error

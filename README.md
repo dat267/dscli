@@ -114,11 +114,19 @@ move the cursor through multiline input (at the first/last line they recall
 history), **Tab** cycles the slash-command menu (Enter completes it),
 **Esc** clears the input, **PgUp/PgDn / mouse wheel** scroll the chat pane,
 **Ctrl+C** quits. The layout is a scrollable chat pane on top, a bordered
-3-line input box (text wraps inside it) at the bottom, and the status line
+2-line input box (text wraps inside it) at the bottom, and the status line
 below it. User messages render in a foreground colour to stand apart from the
 assistant's replies. `/new` starts a fresh conversation, `/clear` forgets the
 persisted default session and starts a fresh one (`/clear --delete` also
 removes the old thread server-side), and `/tools` toggles the file tools.
+
+**Chat style.** Every general-chat turn (`chat`, `ask`, `do`) is prefixed with
+an instruction block that sets the assistant's framing, so the model treats
+adult creative writing and roleplay as in-scope instead of refusing or
+watering it down. Override it by dropping a `chat/chat.md` (or
+`chat/default.md`) into `./chat/` or `~/.config/dscli/chat/`, or point
+`--chat-style` at any file; an empty file disables the prefix.
+Translation keeps its own separate style (see below).
 
 When stdin or stdout is **not** a terminal (pipes, scripts, `--json-out`), the
 line-based loop is used instead: replies stream to stdout, no prompts or

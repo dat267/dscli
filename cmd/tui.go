@@ -827,7 +827,7 @@ func (m *tuiModel) inputHeight() int { return maxInputLines }
 
 // maxInputLines is the fixed height (in rows) of the input box; text wraps
 // within it.
-const maxInputLines = 3
+const maxInputLines = 2
 
 func (m *tuiModel) renderSuggestions() string {
 	var parts []string
