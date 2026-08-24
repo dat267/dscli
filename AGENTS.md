@@ -24,8 +24,6 @@ Therefore, before tagging a commit and pushing that tag, you MUST verify:
    of the freshly built binary.
 5. The version bump is committed and the tag points at the correct commit.
 
-`golangci-lint` is an optional local quality check and is not part of CI.
-
 Never tag or push a version you have not verified per the checklist above.
 
 ## PoW wasm

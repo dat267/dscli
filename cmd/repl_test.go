@@ -69,6 +69,9 @@ func fakeDeepSeekServerWith(t *testing.T, completions []string) (*httptest.Serve
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v0/chat_session/create":
+			rec.mu.Lock()
+			rec.creates++
+			rec.mu.Unlock()
 			_, _ = io.WriteString(w, `{"code":0,"data":{"biz_data":{"chat_session":{"id":"sess-1"}}}}`)
 		case "/api/v0/chat/create_pow_challenge":
 			_, _ = io.WriteString(w, testChallengeResponse)
@@ -106,6 +109,7 @@ func fakeDeepSeekServerWith(t *testing.T, completions []string) (*httptest.Serve
 
 type fakeRecorder struct {
 	mu               sync.Mutex
+	creates          int
 	deleted          []string
 	powHeader        string
 	completionBodies []string
@@ -132,6 +136,54 @@ func withStdin(t *testing.T, input string, fn func()) {
 	fn()
 }
 
+// TestReplMultiline: a line ending in a single backslash continues the
+// message onto the next line, joined with a newline; a lone "\" line inserts
+// a blank line and keeps going; "\\" at the end sends a literal backslash and
+// ends the message. Continuation lines are not treated as commands.
+func TestReplMultiline(t *testing.T) {
+	srv, rec := fakeDeepSeekServer(t)
+	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
+	cmd := &ChatCmd{}
+
+	// first " \  second  \  (blank)  third  \  literal-backslash  /quit
+	// Escapes: "\\" is one backslash, "\n" a newline. The trailing "\\"
+	// (two backslashes) does NOT continue — the line is sent literally.
+	input := "first \\\nsecond \\\n\\\nthird \\\\\n/quit\n"
+	withStdin(t, input, func() {
+		captureStdout(t, func() {
+			captureStderr(t, func() {
+				_ = cmd.replLoop(context.Background(), client, "sess-1", nil, false)
+			})
+		})
+	})
+
+	prompt, _ := completionBody(t, rec, 0)
+	want := "first \nsecond \n\nthird \\\\"
+	if prompt != want {
+		t.Errorf("multiline prompt = %q, want %q", prompt, want)
+	}
+}
+
+// TestReplMultilinePipedEndsAtEOF: when stdin ends mid-continuation, the
+// accumulated message is still sent rather than dropped.
+func TestReplMultilinePipedEndsAtEOF(t *testing.T) {
+	srv, rec := fakeDeepSeekServer(t)
+	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
+	cmd := &ChatCmd{}
+
+	withStdin(t, "just a continuation \\\nand its tail", func() {
+		captureStdout(t, func() {
+			captureStderr(t, func() {
+				_ = cmd.replLoop(context.Background(), client, "sess-1", nil, false)
+			})
+		})
+	})
+	prompt, _ := completionBody(t, rec, 0)
+	if want := "just a continuation \nand its tail"; prompt != want {
+		t.Errorf("prompt = %q, want %q", prompt, want)
+	}
+}
+
 // TestReplUIStatelessEndToEnd drives the REPL against a fake server with the
 // real wasm PoW solver and checks the output layout: a dim hint header, the
 // streamed reply on stdout, a guaranteed blank line before the next prompt,
@@ -143,10 +195,10 @@ func TestReplUIStatelessEndToEnd(t *testing.T) {
 
 	var stdout, stderr string
 	var runErr error
-	withStdin(t, "hello\n/thinking\n/files\n/quit\n", func() {
+	withStdin(t, "hello\n/thinking\n/tools\n/quit\n", func() {
 		stdout = captureStdout(t, func() {
 			stderr = captureStderr(t, func() {
-				runErr = cmd.replLoop(context.Background(), client, "", nil)
+				runErr = cmd.replLoop(context.Background(), client, "", nil, false)
 			})
 		})
 	})
@@ -161,9 +213,9 @@ func TestReplUIStatelessEndToEnd(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		"DeepSeek · model default · thinking off · search off · files off · ephemeral (deleted on close)",
-		"DeepSeek · model default · thinking on · search off · files off · ephemeral (deleted on close)", // bare /thinking flipped it
-		"DeepSeek · model default · thinking on · search off · files on · ephemeral (deleted on close)",  // bare /files flipped it
+		"DeepSeek · model default · thinking off · search off · tools off · ephemeral",
+		"DeepSeek · model default · thinking on · search off · tools off · ephemeral", // bare /thinking flipped it
+		"DeepSeek · model default · thinking on · search off · tools on · ephemeral",  // bare /files flipped it
 		"one question per line · /help for commands",
 		"conversation: sess-1:2",
 	} {
@@ -171,7 +223,7 @@ func TestReplUIStatelessEndToEnd(t *testing.T) {
 			t.Errorf("stderr missing %q:\n%s", want, stderr)
 		}
 	}
-	// Piped stdin is not a terminal, so no "you> " prompt is printed.
+	// Piped stdin is not a terminal, so no read prompt is ever printed.
 	if strings.Contains(stderr, "you>") {
 		t.Errorf("prompt printed for non-terminal stdin: %q", stderr)
 	}
@@ -199,13 +251,13 @@ func TestReplUIResumeSkipsDeletion(t *testing.T) {
 	var runErr error
 	withStdin(t, "hi\n/exit\n", func() {
 		stderr = captureStderr(t, func() {
-			runErr = cmd.replLoop(context.Background(), client, "sess-9:5", nil)
+			runErr = cmd.replLoop(context.Background(), client, "sess-9:5", nil, false)
 		})
 	})
 	if runErr != nil {
 		t.Fatalf("replLoop: %v", runErr)
 	}
-	if !strings.Contains(stderr, "continuing conversation") {
+	if !strings.Contains(stderr, "continuing") {
 		t.Errorf("stderr missing resume banner:\n%s", stderr)
 	}
 	if !strings.Contains(stderr, "conversation: sess-9:2") {
@@ -565,6 +617,157 @@ func TestFileToolsBinaryReadRejected(t *testing.T) {
 	prompt2, _ := completionBody(t, rec, 1)
 	if !strings.Contains(prompt2, "not a text file") {
 		t.Errorf("binary rejection not fed back:\n%s", prompt2)
+	}
+}
+
+// TestFileToolsGrepLoop: the model greps the workdir, gets the matches fed
+// back, then answers in prose.
+func TestFileToolsGrepLoop(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("alpha\nbeta\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	grepCall := `{"tool":"grep","pattern":"alpha"}`
+	srv, rec := fakeDeepSeekServerWith(t, []string{
+		completionSSE(t, 2, grepCall),
+		completionSSE(t, 3, "Found it."),
+	})
+	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
+	cmd := &ChatCmd{Workdir: dir}
+
+	var note strings.Builder
+	_, stdout, _, err := turnWith(t, cmd, client, "find alpha", &note)
+	if err != nil {
+		t.Fatalf("turn: %v", err)
+	}
+	if stdout != "Found it.\n" {
+		t.Errorf("stdout = %q", stdout)
+	}
+	if !strings.Contains(note.String(), "grep .") {
+		t.Errorf("missing grep note: %q", note.String())
+	}
+	prompt2, _ := completionBody(t, rec, 1)
+	if !strings.Contains(prompt2, "a.txt:1:alpha") {
+		t.Errorf("grep results not fed back:\n%s", prompt2)
+	}
+}
+
+// TestFileToolsFetchLoop: the model fetches a URL, gets the body fed back,
+// then answers in prose.
+func TestFileToolsFetchLoop(t *testing.T) {
+	content := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "THE PAGE BODY")
+	}))
+	defer content.Close()
+
+	dir := t.TempDir()
+	fetchCall := `{"tool":"fetch_url","url":"` + content.URL + `/page"}`
+	srv, rec := fakeDeepSeekServerWith(t, []string{
+		completionSSE(t, 2, fetchCall),
+		completionSSE(t, 3, "Got the page."),
+	})
+	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
+	cmd := &ChatCmd{Workdir: dir}
+
+	var note strings.Builder
+	_, stdout, _, err := turnWith(t, cmd, client, "fetch the page", &note)
+	if err != nil {
+		t.Fatalf("turn: %v", err)
+	}
+	if stdout != "Got the page.\n" {
+		t.Errorf("stdout = %q", stdout)
+	}
+	if !strings.Contains(note.String(), "fetch_url "+content.URL+"/page") {
+		t.Errorf("missing fetch note: %q", note.String())
+	}
+	prompt2, _ := completionBody(t, rec, 1)
+	if !strings.Contains(prompt2, "THE PAGE BODY") {
+		t.Errorf("fetch content not fed back:\n%s", prompt2)
+	}
+}
+
+// TestFileToolsDuplicateReadOnlySkipped: a model that repeats the exact same
+// deterministic read-only call (list_directory . twice in a row) has the
+// duplicate skipped and is told to reuse the result it already has, instead
+// of burning a tool-call budget slot.
+func TestFileToolsDuplicateReadOnlySkipped(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hi"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	listCall := `{"tool":"list_directory","path":"."}`
+	srv, rec := fakeDeepSeekServerWith(t, []string{
+		completionSSE(t, 2, listCall),
+		completionSSE(t, 3, listCall),
+		completionSSE(t, 4, "Done."),
+	})
+	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
+	cmd := &ChatCmd{Workdir: dir}
+
+	var note strings.Builder
+	_, stdout, _, err := turnWith(t, cmd, client, "what files?", &note)
+	if err != nil {
+		t.Fatalf("turn: %v", err)
+	}
+	if stdout != "Done.\n" {
+		t.Errorf("stdout = %q", stdout)
+	}
+	// The repeated call is flagged, not silently re-run.
+	if !strings.Contains(note.String(), "list_directory . (duplicate, skipped)") {
+		t.Errorf("missing duplicate note: %q", note.String())
+	}
+	// The model is pointed at the result it already has (a fresh listing was
+	// NOT executed a second time).
+	prompt2, _ := completionBody(t, rec, 2)
+	if !strings.Contains(prompt2, "already requested this exact tool call") {
+		t.Errorf("duplicate hint not fed back:\n%s", prompt2)
+	}
+	if strings.Contains(prompt2, "a.txt") {
+		t.Errorf("duplicate listing was re-executed:\n%s", prompt2)
+	}
+}
+
+// TestFileToolsDuplicateResetByOtherTool: the dedup only covers consecutive
+// identical calls — a list → edit → list sequence runs both listings.
+func TestFileToolsDuplicateResetByOtherTool(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "a.txt")
+	if err := os.WriteFile(f, []byte("x\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	listCall := `{"tool":"list_directory","path":"."}`
+	editCall := `{"tool":"edit_file","path":"a.txt","old":"x","new":"y"}`
+	srv, rec := fakeDeepSeekServerWith(t, []string{
+		completionSSE(t, 2, listCall),
+		completionSSE(t, 3, editCall),
+		completionSSE(t, 4, listCall),
+		completionSSE(t, 5, "Done."),
+	})
+	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
+	cmd := &ChatCmd{Workdir: dir}
+
+	orig := confirmWrite
+	t.Cleanup(func() { confirmWrite = orig })
+	confirmWrite = func(string) bool { return true }
+
+	var note strings.Builder
+	_, stdout, _, err := turnWith(t, cmd, client, "list then edit then list", &note)
+	if err != nil {
+		t.Fatalf("turn: %v", err)
+	}
+	if stdout != "Done.\n" {
+		t.Errorf("stdout = %q", stdout)
+	}
+	if strings.Contains(note.String(), "duplicate, skipped") {
+		t.Errorf("second list was wrongly deduplicated: %q", note.String())
+	}
+	if n := strings.Count(note.String(), "list_directory ."); n != 2 {
+		t.Errorf("expected 2 list notes, got %d: %q", n, note.String())
+	}
+	// The second listing really ran (its result was fed back).
+	prompt3, _ := completionBody(t, rec, 3)
+	if !strings.Contains(prompt3, "a.txt") {
+		t.Errorf("second listing result not fed back:\n%s", prompt3)
 	}
 }
 

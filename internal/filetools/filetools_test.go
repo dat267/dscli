@@ -4,6 +4,9 @@ import (
 	"archive/zip"
 	"bytes"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -73,6 +76,24 @@ func TestExtract(t *testing.T) {
 		}
 		if _, ok := Extract(`{"tool":"rename_file","path":"a.txt"}`); ok {
 			t.Error("rename without a destination must be rejected")
+		}
+	})
+	t.Run("grep", func(t *testing.T) {
+		c, ok := Extract(`{"tool":"grep","pattern":"func \\w+","path":"cmd"}`)
+		if !ok || c.Tool != "grep" || c.Pattern != `func \w+` || c.Path != "cmd" {
+			t.Errorf("got %+v ok=%v", c, ok)
+		}
+		if _, ok := Extract(`{"tool":"grep"}`); ok {
+			t.Error("grep without a pattern must be rejected")
+		}
+	})
+	t.Run("fetch_url", func(t *testing.T) {
+		c, ok := Extract(`{"tool":"fetch_url","url":"https://example.com/a"}`)
+		if !ok || c.Tool != "fetch_url" || c.URL != "https://example.com/a" {
+			t.Errorf("got %+v ok=%v", c, ok)
+		}
+		if _, ok := Extract(`{"tool":"fetch_url"}`); ok {
+			t.Error("fetch_url without a URL must be rejected")
 		}
 	})
 	t.Run("prose is not a call", func(t *testing.T) {
@@ -292,7 +313,7 @@ func TestPathEscapeRejected(t *testing.T) {
 
 func TestInstructionsMentionsTools(t *testing.T) {
 	ins := Instructions("/tmp/proj")
-	for _, want := range []string{"list_directory", "read_file", "edit_file", "create_file", "delete_file", "/tmp/proj", "FILE TOOLS"} {
+	for _, want := range []string{"list_directory", "read_file", "edit_file", "create_file", "delete_file", "grep", "fetch_url", "/tmp/proj", "TOOLS"} {
 		if !strings.Contains(ins, want) {
 			t.Errorf("instructions missing %q", want)
 		}
@@ -1046,5 +1067,188 @@ func TestRunMetaAdditionalDurations(t *testing.T) {
 	}
 	if res := (Call{Tool: "file_meta", Path: "m.ttml"}).Run(dir); !strings.Contains(res, "duration: 00:01:00") {
 		t.Errorf("ttml duration missing: %s", res)
+	}
+}
+
+func TestRunGrep(t *testing.T) {
+	dir := t.TempDir()
+	files := map[string]string{
+		"a.go":        "package main\n\nfunc main() {}\n",
+		"b.txt":       "hello world\nhello again\n",
+		"nested/c.go": "func helper() {}\n",
+	}
+	for name, content := range files {
+		p := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A bare pattern searches the whole workdir (path defaults to ".").
+	res := (Call{Tool: "grep", Pattern: "func"}).Run(dir)
+	for _, want := range []string{"a.go:3:func main() {}", "nested/c.go:1:func helper() {}"} {
+		if !strings.Contains(res, want) {
+			t.Errorf("grep missing %q:\n%s", want, res)
+		}
+	}
+	if strings.Contains(res, "hello") {
+		t.Errorf("grep matched prose unexpectedly:\n%s", res)
+	}
+	if strings.Contains(res, "ERROR") {
+		t.Errorf("unexpected error: %s", res)
+	}
+
+	// A single-file path narrows the search; grep is case-sensitive unless
+	// the pattern opts into (?i).
+	res = (Call{Tool: "grep", Pattern: "HELLO", Path: "b.txt"}).Run(dir)
+	if !strings.Contains(res, "(no matches)") {
+		t.Errorf("case-sensitive grep matched: %s", res)
+	}
+	res = (Call{Tool: "grep", Pattern: "(?i)HELLO", Path: "b.txt"}).Run(dir)
+	if !strings.Contains(res, "b.txt:1:hello world") {
+		t.Errorf("case-insensitive grep failed: %s", res)
+	}
+
+	// A missing path, a broken pattern and a path escape all error.
+	if r := (Call{Tool: "grep", Pattern: "x", Path: "nope"}).Run(dir); !strings.Contains(r, "ERROR") {
+		t.Errorf("missing path must error: %q", r)
+	}
+	if r := (Call{Tool: "grep", Pattern: "("}).Run(dir); !strings.Contains(r, "ERROR") {
+		t.Errorf("bad regex must error: %q", r)
+	}
+	if r := (Call{Tool: "grep", Pattern: "x", Path: "../escape"}).Run(dir); !strings.Contains(r, "ERROR") {
+		t.Errorf("escape must be rejected: %q", r)
+	}
+}
+
+func TestRunGrepSkipsNoise(t *testing.T) {
+	dir := t.TempDir()
+	// VCS metadata directories are never searched.
+	if err := os.MkdirAll(filepath.Join(dir, ".git", "objects"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".git", "config"), []byte("secret = x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Binary and oversized files are skipped, like read_file.
+	if err := os.WriteFile(filepath.Join(dir, "blob.bin"), []byte{0x00, 0x01, 0x02, 'x'}, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "big.txt"), []byte(strings.Repeat("needle\n", MaxReadBytes/5)), 0644); err != nil {
+		t.Fatal(err)
+	}
+	res := (Call{Tool: "grep", Pattern: "secret|needle"}).Run(dir)
+	if strings.Contains(res, "secret") {
+		t.Errorf(".git was searched:\n%s", res)
+	}
+	if strings.Contains(res, "needle") {
+		t.Errorf("oversized file was searched:\n%s", res)
+	}
+	if !strings.Contains(res, "(no matches)") {
+		t.Errorf("expected no matches, got:\n%s", res)
+	}
+}
+
+func TestRunGrepTruncates(t *testing.T) {
+	dir := t.TempDir()
+	var b strings.Builder
+	for i := 0; i < maxGrepMatches+50; i++ {
+		fmt.Fprintf(&b, "match line %d\n", i)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "many.txt"), []byte(b.String()), 0644); err != nil {
+		t.Fatal(err)
+	}
+	res := (Call{Tool: "grep", Pattern: "match"}).Run(dir)
+	if !strings.Contains(res, "truncated at") {
+		t.Errorf("expected truncation warning:\n%s", res)
+	}
+	if n := strings.Count(res, "many.txt:"); n > maxGrepMatches+1 {
+		t.Errorf("grep returned %d lines, want ≤ %d", n, maxGrepMatches)
+	}
+}
+
+func TestRunGrepSymlinkNotFollowed(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("secret"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "escape")); err != nil {
+		t.Skipf("symlinks not supported: %v", err)
+	}
+	res := (Call{Tool: "grep", Pattern: "secret"}).Run(dir)
+	if strings.Contains(res, "secret") {
+		t.Errorf("grep escaped through a symlink:\n%s", res)
+	}
+}
+
+func TestRunFetch(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/page":
+			_, _ = io.WriteString(w, "Hello from the web page")
+		case "/redirect":
+			http.Redirect(w, r, "/page", http.StatusFound)
+		case "/binary":
+			_, _ = w.Write([]byte{0x00, 0x01, 0x02, 'x'})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	res := (Call{Tool: "fetch_url", URL: srv.URL + "/page"}).Run("")
+	if !strings.Contains(res, "Hello from the web page") {
+		t.Errorf("fetch missing content: %q", res)
+	}
+	if !strings.Contains(res, "HTTP 200 OK") {
+		t.Errorf("fetch missing status header: %q", res)
+	}
+	if strings.Contains(res, "ERROR") {
+		t.Errorf("unexpected error: %q", res)
+	}
+
+	// Redirects are followed and the body lands.
+	res = (Call{Tool: "fetch_url", URL: srv.URL + "/redirect"}).Run("")
+	if !strings.Contains(res, "Hello from the web page") {
+		t.Errorf("redirect not followed: %q", res)
+	}
+
+	// Non-2xx responses and binary bodies are rejected.
+	res = (Call{Tool: "fetch_url", URL: srv.URL + "/missing"}).Run("")
+	if !strings.Contains(res, "ERROR") || !strings.Contains(res, "404") {
+		t.Errorf("404 must error: %q", res)
+	}
+	res = (Call{Tool: "fetch_url", URL: srv.URL + "/binary"}).Run("")
+	if !strings.Contains(res, "not text") {
+		t.Errorf("binary body must be rejected: %q", res)
+	}
+
+	// Non-http(s) schemes and empty hosts are rejected without any request.
+	for _, u := range []string{"file:///etc/passwd", "ftp://example.com/x", "not-a-url"} {
+		res = (Call{Tool: "fetch_url", URL: u}).Run("")
+		if !strings.Contains(res, "ERROR") {
+			t.Errorf("URL %q must be rejected: %q", u, res)
+		}
+	}
+}
+
+func TestRunFetchSizeCap(t *testing.T) {
+	orig := MaxReadBytes
+	t.Cleanup(func() { MaxReadBytes = orig })
+	MaxReadBytes = 64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(strings.Repeat("q", 128)))
+	}))
+	defer srv.Close()
+	res := (Call{Tool: "fetch_url", URL: srv.URL}).Run("")
+	if !strings.Contains(res, "truncated at 64 bytes") {
+		t.Errorf("expected truncation note: %q", res)
+	}
+	if n := strings.Count(res, "q"); n > 64 {
+		t.Errorf("body not capped at MaxReadBytes: %d q's", n)
 	}
 }

@@ -12,7 +12,8 @@ import (
 func TestAskPlain(t *testing.T) {
 	srv, rec := fakeDeepSeekServerWith(t, []string{completionSSE(t, 2, "Hello back")})
 	defer srv.Close()
-	cmd := &AskCmd{Prompt: []string{"hi"}, Token: "tok", clientBase: srv.URL}
+	cmd := &AskCmd{
+		NoPersist: true, Prompt: []string{"hi"}, Token: "tok", clientBase: srv.URL}
 
 	stdout := captureStdout(t, func() {
 		if err := cmd.Run(nil, context.Background()); err != nil {
@@ -43,7 +44,8 @@ func TestAskPlain(t *testing.T) {
 func TestAskFromStdin(t *testing.T) {
 	srv, _ := fakeDeepSeekServerWith(t, []string{completionSSE(t, 2, "sum is 3")})
 	defer srv.Close()
-	cmd := &AskCmd{Token: "tok", clientBase: srv.URL}
+	cmd := &AskCmd{
+		NoPersist: true, Token: "tok", clientBase: srv.URL}
 
 	stdout := captureStdout(t, func() {
 		withStdin(t, "1 + 2\n", func() {
@@ -60,7 +62,8 @@ func TestAskFromStdin(t *testing.T) {
 func TestAskJSONOut(t *testing.T) {
 	srv, _ := fakeDeepSeekServerWith(t, []string{completionSSE(t, 2, "Hi")})
 	defer srv.Close()
-	cmd := &AskCmd{Prompt: []string{"hi"}, JSONOut: true, Token: "tok", clientBase: srv.URL}
+	cmd := &AskCmd{
+		NoPersist: true, Prompt: []string{"hi"}, JSONOut: true, Token: "tok", clientBase: srv.URL}
 
 	stdout := captureStdout(t, func() {
 		if err := cmd.Run(nil, context.Background()); err != nil {
@@ -77,7 +80,8 @@ func TestAskJSONOut(t *testing.T) {
 }
 
 func TestAskRequiresInput(t *testing.T) {
-	cmd := &AskCmd{Token: "tok"}
+	cmd := &AskCmd{
+		NoPersist: true, Token: "tok"}
 	err := cmd.Run(nil, context.Background())
 	if err == nil || !strings.Contains(err.Error(), "nothing to ask") {
 		t.Errorf("empty input must error, got %v", err)
@@ -121,7 +125,8 @@ func TestAskSearchSources(t *testing.T) {
 		}),
 	})
 	defer srv.Close()
-	cmd := &AskCmd{Prompt: []string{"gold price"}, Search: true, Token: "tok", clientBase: srv.URL}
+	cmd := &AskCmd{
+		NoPersist: true, Prompt: []string{"gold price"}, Search: true, Token: "tok", clientBase: srv.URL}
 
 	var stdout, stderr string
 	stdout = captureStdout(t, func() {
@@ -146,7 +151,8 @@ func TestAskSearchSourcesJSON(t *testing.T) {
 		searchSSE(t, 2, "hi [citation:1]", []map[string]string{{"url": "https://ex.com/a", "title": "A"}}),
 	})
 	defer srv.Close()
-	cmd := &AskCmd{Prompt: []string{"x"}, Search: true, JSONOut: true, Token: "tok", clientBase: srv.URL}
+	cmd := &AskCmd{
+		NoPersist: true, Prompt: []string{"x"}, Search: true, JSONOut: true, Token: "tok", clientBase: srv.URL}
 
 	stdout := captureStdout(t, func() {
 		if err := cmd.Run(nil, context.Background()); err != nil {

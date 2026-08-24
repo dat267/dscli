@@ -1,9 +1,11 @@
-// Package filetools implements the file tools the chat model can call:
-// list_directory, read_file, create_file, edit_file and delete_file. The
-// contract is a single JSON object per turn — see Instructions — so parsing
-// is deterministic and safe: extraction only accepts a well-formed object
-// naming a known tool, and every file access is confined to a working
-// directory, including through symlink chains.
+// Package filetools implements the tools the chat model can call:
+// list_directory, read_file, file_meta, grep, create_file, edit_file,
+// rename_file, delete_file, translate_file and fetch_url. The contract is a
+// single JSON object per turn — see Instructions — so parsing is
+// deterministic and safe: extraction only accepts a well-formed object
+// naming a known tool. File access is confined to a working directory,
+// including through symlink chains; fetch_url is the one networked tool and
+// only ever retrieves bounded http(s) responses.
 package filetools
 
 import (
@@ -13,15 +15,18 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
-// DefaultMaxReadBytes is the read_file size ceiling when --file-max-read is
+// DefaultMaxReadBytes is the read_file size ceiling when --max-read is
 // not given: 512 KiB — about a tenth of the model's ~1M-token context at
 // typical code density, and the classic single-file "large file" cutoff.
 // Files larger than the effective ceiling are rejected outright (never
@@ -29,7 +34,7 @@ import (
 const DefaultMaxReadBytes = 512 * 1024
 
 // MaxReadBytes is the runtime read_file ceiling. It is initialised to
-// DefaultMaxReadBytes and may be tuned (the chat command's --file-max-read
+// DefaultMaxReadBytes and may be tuned (the chat command's --max-read
 // flag sets it before any turn runs); concurrent mutable access is not
 // expected.
 var MaxReadBytes = DefaultMaxReadBytes
@@ -57,6 +62,14 @@ const MaxListDepth = 6
 // indefinitely.
 const MaxIterations = 12
 
+// maxGrepMatches caps how many matching lines one grep call reports; when the
+// cap is hit the result ends with a truncation warning so the model narrows
+// the pattern instead of scanning forever.
+const maxGrepMatches = 200
+
+// fetchTimeout bounds a single fetch_url HTTP request (redirects included).
+const fetchTimeout = 30 * time.Second
+
 // CapPrompt is appended as the final turn when the model exhausts
 // MaxIterations tool calls without giving a prose answer.
 const CapPrompt = "You have used all your file tool calls for this request. Do not call any more tools. Give your final answer now, based only on what you have already learned."
@@ -71,10 +84,12 @@ func IsText(data []byte) bool {
 	return !bytes.Contains(probe, []byte{0})
 }
 
-// Call is the JSON object the model emits to request a file operation.
+// Call is the JSON object the model emits to request a tool call.
 type Call struct {
-	Tool      string `json:"tool"` // "list_directory" | "read_file" | "create_file" | "edit_file" | "rename_file" | "delete_file"
+	Tool      string `json:"tool"` // "list_directory" | "read_file" | "file_meta" | "grep" | "create_file" | "edit_file" | "rename_file" | "delete_file" | "translate_file" | "fetch_url"
 	Path      string `json:"path"`
+	Pattern   string `json:"pattern"`   // grep: Go regular expression to search for
+	URL       string `json:"url"`       // fetch_url: http(s) URL to retrieve
 	Old       string `json:"old"`       // edit_file: exact existing text (first occurrence replaced)
 	New       string `json:"new"`       // edit_file: replacement text; rename_file: destination name/path
 	Content   string `json:"content"`   // create_file: full content of the new file
@@ -87,10 +102,13 @@ type Call struct {
 // Instructions returns the prompt fragment that defines the tools for the
 // model. It is prepended to the user's prompt.
 func Instructions(workdir string) string {
-	return fmt.Sprintf(`[FILE TOOLS]
-You can inspect and change files inside %s. To use a tool, reply with ONLY a JSON object (no other text, no markdown):
+	return fmt.Sprintf(`[TOOLS]
+You can inspect and change files inside %s, search them, and fetch http(s) URLs. To use a tool, reply with ONLY a JSON object (no other text, no markdown):
   {"tool":"list_directory","path":"<dir>"}
   {"tool":"read_file","path":"<file>"}
+  {"tool":"file_meta","path":"<file>"}
+  {"tool":"grep","pattern":"<go regex>","path":"<optional file or dir>"}
+  {"tool":"fetch_url","url":"<http(s) URL>"}
   {"tool":"create_file","path":"<file>","content":"<full content>"}
   {"tool":"edit_file","path":"<file>","old":"<exact existing text>","new":"<replacement text>"}
   {"tool":"rename_file","path":"<source>","new":"<new name or path>"}
@@ -101,14 +119,16 @@ Rules:
 - Budget: at most %d tool calls per user message; spend them on what matters, then give your final answer in prose.
 - Every turn is exactly ONE of two things: a single tool-call JSON object, or — only when your task is fully complete — your final answer in plain text.
 - To explore: start with {"tool":"list_directory","path":"."}, which lists ONE directory, non-recursive, directories marked with a trailing /, files with sizes. Add "recursive":true to get the whole subtree in one bounded call ({\"tool\":\"list_directory\",\"path\":\".\",\"recursive\":true}) instead of listing directory by directory — prefer it for exploring a tree.
-- read_file only reads TEXT files up to %d bytes: larger or binary files are rejected — do not retry them, tell the user instead.
+- grep searches for a Go regular expression and returns up to %d matching lines as "path:line:text"; "path" is optional (default: the whole workdir) and may name one file or directory. VCS directories (.git/.hg/.svn) are skipped; prefix the pattern with (?i) for case-insensitive search.
+- read_file only reads TEXT files up to %d bytes, and grep only searches TEXT files up to %d bytes: larger or binary files are rejected — do not retry them, tell the user instead.
+- fetch_url retrieves an http(s) URL and returns its text, capped at %d bytes; only http/https are allowed and binary or oversized responses are rejected. Use it when you need the exact contents of a specific page.
 - translate_file translates a subtitle/lyric/document file (txt/md/lrc/srt/vtt/ass/ttml/epub) into another language in ONE call — timestamps, XML structure and markup are preserved and verified automatically; the user confirms first. Use it instead of read+create translation.
 - To change: create_file makes a NEW file (it errors if the file already exists — then use edit_file or delete_file first); edit_file replaces the first exact occurrence of "old" (whitespace, quotes and indentation count — read the file first and copy from it); rename_file renames or moves a file/directory (the destination must not exist); delete_file removes a file permanently. Creating, renaming or deleting files asks the user for confirmation; if the user rejects, do not retry.
 - After every tool call you receive a <tool_result> block. React to it with the next tool call, or your final answer. If an edit reports the pattern was not found, re-read the file and retry with the correct "old" text.
 - Paths may be relative to %s or absolute inside it.
-[END FILE TOOLS]
+[END TOOLS]
 
-User: `, workdir, MaxIterations, MaxReadBytes, workdir)
+User: `, workdir, MaxIterations, maxGrepMatches, MaxReadBytes, MaxReadBytes, MaxReadBytes, workdir)
 }
 
 // FormatResult wraps a tool outcome for feeding back to the model.
@@ -148,6 +168,10 @@ func valid(c Call) bool {
 	switch c.Tool {
 	case "read_file", "list_directory", "file_meta", "create_file", "delete_file":
 		return c.Path != ""
+	case "grep":
+		return c.Pattern != ""
+	case "fetch_url":
+		return c.URL != ""
 	case "edit_file":
 		return c.Path != "" && c.Old != ""
 	case "rename_file":
@@ -324,6 +348,10 @@ func (c Call) Run(workdir string) string {
 		return c.runMeta(workdir)
 	case "read_file":
 		return c.runRead(workdir)
+	case "grep":
+		return c.runGrep(workdir)
+	case "fetch_url":
+		return c.runFetch()
 	case "edit_file":
 		return c.runEdit(workdir)
 	case "rename_file":
@@ -1141,6 +1169,151 @@ func (c Call) runMeta(workdir string) string {
 		}
 	}
 	return FormatResult(c.Tool, c.Path, strings.TrimSuffix(b.String(), "\n"))
+}
+
+// runGrep searches a file or the whole workdir for a Go regular expression
+// and returns matching lines as "path:line:text", capped at maxGrepMatches.
+// Binary and oversized files are skipped (mirroring read_file's ceiling), as
+// are VCS metadata directories; symlinked directories are not descended into.
+func (c Call) runGrep(workdir string) string {
+	root := c.Path
+	if root == "" {
+		root = "."
+	}
+	path, err := workdirPath(workdir, root)
+	if err != nil {
+		return FormatResult(c.Tool, c.Path, "ERROR: "+err.Error())
+	}
+	re, err := regexp.Compile(c.Pattern)
+	if err != nil {
+		return FormatResult(c.Tool, c.Path, "ERROR: invalid pattern: "+err.Error())
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return FormatResult(c.Tool, c.Path, "ERROR: "+err.Error())
+	}
+
+	var lines []string
+	truncated := false
+	collect := func(p string) { c.grepFile(re, p, workdir, &lines, &truncated) }
+	if info.IsDir() {
+		_ = filepath.WalkDir(path, func(p string, d os.DirEntry, werr error) error {
+			if werr != nil {
+				return nil // unreadable entries are skipped, like grep
+			}
+			if d.IsDir() {
+				if p != path && skipVCSDir(d.Name()) {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if d.Type().IsRegular() {
+				collect(p)
+			}
+			return nil
+		})
+	} else {
+		collect(path)
+	}
+
+	body := strings.Join(lines, "\n")
+	if truncated {
+		body += fmt.Sprintf("\nWARNING: grep truncated at %d matching lines; narrow the pattern or path", maxGrepMatches)
+	}
+	if body == "" {
+		body = "(no matches)"
+	}
+	return FormatResult(c.Tool, c.Path, body)
+}
+
+// grepFile appends the matching lines of one file (displayed relative to
+// workdir) as "path:line:text", stopping at maxGrepMatches (truncated is set
+// when the cap stops the scan). Binary and oversized files are skipped.
+func (c Call) grepFile(re *regexp.Regexp, p, workdir string, out *[]string, truncated *bool) {
+	if *truncated {
+		return
+	}
+	info, err := os.Stat(p)
+	if err != nil || info.IsDir() {
+		return
+	}
+	if info.Size() > int64(MaxReadBytes) {
+		return
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		return
+	}
+	if !IsText(data) {
+		return
+	}
+	display := Display(workdir, p)
+	for i, line := range strings.Split(string(data), "\n") {
+		if *truncated {
+			return
+		}
+		if re.MatchString(line) {
+			*out = append(*out, fmt.Sprintf("%s:%d:%s", display, i+1, line))
+			if len(*out) >= maxGrepMatches {
+				*truncated = true
+				return
+			}
+		}
+	}
+}
+
+// skipVCSDir reports whether a directory is a VCS metadata dir that grep must
+// not descend into (their packed and binary stores produce noise and cost).
+func skipVCSDir(name string) bool {
+	switch name {
+	case ".git", ".hg", ".svn":
+		return true
+	}
+	return false
+}
+
+// runFetch retrieves an http(s) URL and returns its text, capped at
+// MaxReadBytes. Non-http(s) schemes, binary bodies, and non-2xx responses are
+// rejected. Redirects are followed and reported by their final URL; the
+// filesystem is never touched.
+func (c Call) runFetch() string {
+	u, err := url.Parse(c.URL)
+	if err != nil {
+		return FormatResult(c.Tool, c.Path, "ERROR: invalid URL: "+err.Error())
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return FormatResult(c.Tool, c.Path, fmt.Sprintf("ERROR: unsupported URL scheme %q (only http/https)", u.Scheme))
+	}
+	if u.Host == "" {
+		return FormatResult(c.Tool, c.Path, "ERROR: URL has no host")
+	}
+	client := &http.Client{Timeout: fetchTimeout}
+	resp, err := client.Get(c.URL)
+	if err != nil {
+		return FormatResult(c.Tool, c.Path, "ERROR: "+err.Error())
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return FormatResult(c.Tool, c.Path, fmt.Sprintf("ERROR: HTTP %d %s", resp.StatusCode, http.StatusText(resp.StatusCode)))
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, int64(MaxReadBytes+1)))
+	if err != nil {
+		return FormatResult(c.Tool, c.Path, "ERROR: read response: "+err.Error())
+	}
+	truncated := len(data) > MaxReadBytes
+	if truncated {
+		data = data[:MaxReadBytes]
+	}
+	if !IsText(data) {
+		return FormatResult(c.Tool, c.Path, "ERROR: response is not text (binary content); fetch_url only returns text")
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "HTTP %d %s · %s\n\n", resp.StatusCode, http.StatusText(resp.StatusCode), resp.Request.URL.String())
+	b.Write(data)
+	if truncated {
+		fmt.Fprintf(&b, "\nWARNING: response truncated at %d bytes (the max read size)", MaxReadBytes)
+	}
+	return FormatResult(c.Tool, c.Path, b.String())
 }
 
 // dirStats counts entries and sums file sizes under root, with bounded batched

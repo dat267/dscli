@@ -38,14 +38,33 @@ func TestSSESnapshotThenAppends(t *testing.T) {
 	all = append(all, feed(t, p, `{"p":"response/fragments/-1/content","o":"APPEND","v":" world"}`)...)
 	// Bare appends continue the active path.
 	all = append(all, feed(t, p, `{"v":"!"}`)...)
-	// A frame for a non-content path (e.g. a status field) must not leak text.
+	// A frame for a non-content path (e.g. a status field) must not leak the
+	// status VALUE itself ("done" is dropped), but a subsequent pathless chunk
+	// is still visible text — a status frame interleaved between answer chunks
+	// must not swallow the next chunk.
 	all = append(all, feed(t, p, `{"p":"response/status","o":"SET","v":"done"}`)...)
-	// Bare append after path switched away must be ignored.
 	all = append(all, feed(t, p, `{"v":"ignored"}`)...)
 
-	want := []string{"Hello", " world", "!"}
+	want := []string{"Hello", " world", "!", "ignored"}
 	if !reflect.DeepEqual(all, want) {
 		t.Errorf("deltas = %q, want %q", all, want)
+	}
+}
+
+// TestSSEStatusFrameBetweenChunks: the exact tool-call regression — the
+// reply's `{"tool":...}` was reconstructed as `{"":...}` because a status
+// frame landed between the `{"` and `tool` pathless chunks, and the old gate
+// dropped the chunk after a non-content path. It must now be kept.
+func TestSSEStatusFrameBetweenChunks(t *testing.T) {
+	p := &patchParser{}
+	var all []string
+	all = append(all, feed(t, p, `{"v":{"response":{"fragments":[{"type":"response","content":""}]}}}`)...)
+	all = append(all, feed(t, p, `{"v":"{\"tool"}`)...)
+	all = append(all, feed(t, p, `{"p":"response/status","o":"SET","v":"WIP"}`)...)
+	all = append(all, feed(t, p, `{"v":"\":\"fetch_url\",\"url\":\"https://httpbin.org/get\"}"}`)...)
+	got := strings.Join(all, "")
+	if want := `{"tool":"fetch_url","url":"https://httpbin.org/get"}`; got != want {
+		t.Errorf("reconstructed reply = %q, want %q (deltas=%q)", got, want, all)
 	}
 }
 
@@ -265,8 +284,27 @@ func TestSSEMultipleFramesPerEvent(t *testing.T) {
 	}
 }
 
+// TestSSEOpLessContentFrameContinues reproduces the live tool-call stream:
+// the RESPONSE fragment is container-appended with its first token, and the
+// next chunk arrives as an OP-LESS {"p":"response/fragments/-1/content","v":...}
+// frame (no "o" field). That frame continues the content — it must not be
+// treated as a full-slot SET, which is skipped after emission and corrupts
+// {"tool":...} into {"":...}.
+func TestSSEOpLessContentFrameContinues(t *testing.T) {
+	p := &patchParser{}
+	var all []string
+	all = append(all, feed(t, p, `{"v":{"response":{"fragments":[{"type":"THINK","content":"We"}]}}}`)...)
+	all = append(all, feed(t, p, `{"p":"response/fragments","o":"APPEND","v":[{"type":"RESPONSE","content":"{\""}]}`)...)
+	all = append(all, feed(t, p, `{"p":"response/fragments/-1/content","v":"tool"}`)...) // op-less: continuation
+	all = append(all, feed(t, p, `{"v":"\":\"fetch_url\",\"url\":\"https://httpbin.org/get\"}"}`)...)
+	got := strings.Join(all, "")
+	if want := `{"tool":"fetch_url","url":"https://httpbin.org/get"}`; got != want {
+		t.Errorf("reconstructed reply = %q, want %q (deltas=%q)", got, want, all)
+	}
+}
+
 // TestSSEOpLessFirstContentFrame: the first content update may carry no "o"
-// field at all; it must still be treated as the initial text.
+// field at all; it must still be treated as a continuation.
 func TestSSEOpLessFirstContentFrame(t *testing.T) {
 	p := &patchParser{}
 	all := feed(t, p, `{"v":{"response":{"fragments":[{"type":"response","content":""}],"message_id":1},"message_id":1}}`)
@@ -321,6 +359,26 @@ func TestSSEThinkingNeverLeaks(t *testing.T) {
 	want := []string{"**Yes", ", I can", " read!"}
 	if !reflect.DeepEqual(all, want) {
 		t.Errorf("deltas = %q, want %q", all, want)
+	}
+}
+
+// TestSSEInterleavedThinkingDoesNotEatAnswerText reproduces the tool-call
+// regression: the answer's chunks arrived as `{"` (container-appended
+// RESPONSE), then a THINK fragment landed in the middle, and the rest of the
+// JSON came through -1/content and pathless chunks. The THINK fragment must
+// not hijack the routing — otherwise {"tool":"fetch_url",...} renders as
+// {"":"fetch_url",...} and the tool call is never executed.
+func TestSSEInterleavedThinkingDoesNotEatAnswerText(t *testing.T) {
+	p := &patchParser{}
+	var all []string
+	all = append(all, feed(t, p, `{"v":{"response":{"fragments":[{"type":"THINK","content":"thinking"}]}}}`)...)
+	all = append(all, feed(t, p, `{"p":"response/fragments","o":"APPEND","v":[{"type":"RESPONSE","content":"{"}]}`)...)
+	all = append(all, feed(t, p, `{"p":"response/fragments","o":"APPEND","v":[{"type":"THINK","content":"(more reasoning)"}]}`)...)
+	all = append(all, feed(t, p, `{"p":"response/fragments/-1/content","o":"APPEND","v":"\"tool"}`)...)
+	all = append(all, feed(t, p, `{"v":"\":\"fetch_url\",\"url\":\"https://httpbin.org/get\"}"}`)...)
+	got := strings.Join(all, "")
+	if want := `{"tool":"fetch_url","url":"https://httpbin.org/get"}`; got != want {
+		t.Errorf("reconstructed reply = %q, want %q (deltas=%q)", got, want, all)
 	}
 }
 

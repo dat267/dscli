@@ -19,21 +19,24 @@ Flags:
       --config-file=STRING    Config file path
 
 Commands:
-  chat            Chat with DeepSeek (omit the prompt for an interactive
-                  session)
-  ask             Ask the model once and print the answer (input from args or
-                  stdin)
-  translate       Translate a file (txt, md, lrc, srt, vtt, ass, ttml, epub) via
-                  the model
-  pairs           List original/translation file pairs in a directory (TSV:
-                  base, lang, path)
-  login           Show how to capture your DeepSeek login (token + cookie)
-  version         Show version
-  config init     Generate a default configuration file
-  config path     Show configuration file path
-  config show     Print current configuration values
-  config set      Set a config value
-  config unset    Unset a config value
+  chat              Chat with DeepSeek (omit the prompt for an interactive
+                    session)
+  do                Do a one-shot task with file tools (DeepThink on by default)
+  ask               Ask the model once and print the answer (input from args or
+                    stdin)
+  translate         Translate a file (txt, md, lrc, srt, vtt, ass, ttml,
+                    epub) via the model
+  session delete    Delete the persisted default session server-side and forget
+                    it
+  session forget    Forget the persisted default session (the thread is kept
+                    server-side)
+  login             Show how to capture your DeepSeek login (token + cookie)
+  version           Show version
+  config init       Generate a default configuration file
+  config path       Show configuration file path
+  config show       Print current configuration values
+  config set        Set a config value
+  config unset      Unset a config value
 
 Run "dscli <command> --help" for more information on a command.
 ```
@@ -86,34 +89,64 @@ dscli chat -m expert             # REPL on the stronger model
 dscli chat --thinking --search   # DeepThink + web search
 ```
 
-Inside the REPL (status line is dimmed; the `you>` prompt is styled only when
-attached to a terminal):
+When stdin and stdout are terminals, `dscli chat` runs a terminal-agent TUI
+(open-code/Claude Code style): the conversation scrolls in a pane above a
+bottom-pinned, multi-line input. Slash commands get a suggestion menu as you
+type; replies, tool notes and file-write previews render inside the pane
+instead of stdout:
 
 ```
-DeepSeek · model default · thinking off · search off · ephemeral (deleted on close)
-one question per line · /help for commands
-you> What is 2+2?
+DeepSeek · model default · thinking off · search off · tools off · persisted
+
+What is 2+2?
 4
 
-you> /model expert              # switch model (starts a fresh conversation)
-you> /thinking on               # or bare /thinking to flip it
-you> /search off
-you> /new                       # start a fresh conversation
-you> /exit
+/model expert              # switch model (starts a fresh conversation)
+/thinking on               # or bare /thinking to flip it
+/search off
+/tools                    # toggle file tools (list/read/meta/grep/fetch_url/…)
+/exit
 conversation: 0123456789:42
 ```
 
-Replies stream to stdout as they are generated; a blank line separates turns
-(even when the model text ends without a newline). Piped input produces no
-prompts, and colours are disabled when stderr is not a terminal.
+Keys: **Enter** submits, **Ctrl+J / Alt+Enter** inserts a newline, **Up/Down**
+recalls history, **Tab** cycles the slash-command menu (Enter completes it),
+**Esc** clears the input, **PgUp/PgDn / mouse wheel** scroll the chat pane,
+**Ctrl+C** quits. The layout is a scrollable chat pane on top, a bordered
+3-line input box (text wraps inside it) at the bottom, and the status line
+below it. User messages render in a foreground colour to stand apart from the
+assistant's replies. `/new` starts a fresh conversation, `/clear` forgets the
+persisted default session and starts a fresh one (`/clear --delete` also
+removes the old thread server-side), and `/tools` toggles the file tools.
 
-**No persistence.** Launching `dscli chat` without `-c` creates a *fresh*
-session, keeps every turn in that one session, and deletes it when the REPL
-closes — `/exit`, `/quit`, Ctrl-D, or Ctrl-C (a delete failure only prints a
-warning). `/new` and `/model` spawn additional sessions inside the same run;
-those are cleaned up on close too. So the conversation id shown is the live
-thread's id — useful while the session lasts, but the session is gone once
-you leave. One line per question; multi-line input is not supported.
+When stdin or stdout is **not** a terminal (pipes, scripts, `--json-out`), the
+line-based loop is used instead: replies stream to stdout, no prompts or
+colours are drawn, and a line ending in a single `\` continues the message on
+the next line (`...> `); a lone `\` line inserts a blank line and keeps going,
+and a trailing `\\` sends the line literally.
+
+**Persistence by default.** Launching `dscli chat` without `-c` resumes the
+*persisted default conversation* — the same thread every command uses, saved
+under `session` in the config file as a `session:message` position. On first
+use a session is created and saved; every later run resumes from the last
+message and re-saves its position, so the conversation carries across
+invocations. `/new` and `/model` start a fresh session that replaces the saved
+default (the old thread stays server-side, just no longer the default). The
+conversation id shown is the live thread's position, and the config's
+`session` value is the default to resume next time. Manage it with:
+
+```bash
+dscli session                 # show the persisted conversation
+dscli session forget          # forget it (thread stays server-side)
+dscli session delete          # delete it server-side and forget it
+dscli config unset session    # equivalent to `session forget`
+```
+
+Run with `--no-persist` for the old stateless behaviour: a *fresh* session is
+created per run, kept for its turns, and deleted on close (`/exit`, `/quit`,
+Ctrl-D, or Ctrl-C). If the saved default session no longer exists server-side
+(e.g. deleted in the web UI), the CLI creates a fresh one, saves it, and
+retries once automatically.
 
 ## File naming & grouping
 
@@ -131,16 +164,7 @@ chapter-012.translated.zh.md    ← a second target, same dir
 - An existing `.translated[.<lang>]` suffix is stripped before re-naming, so
   translating a translation never stacks suffixes.
 - **Any tool can group a pair** by regex: `^(.*)\.translated(?:\.([a-z0-9]{1,8}))?\.([^.]+)$`
-  → base + optional language. The `pairs` command emits exactly that as TSV:
-
-  ```bash
-  dscli pairs my-library/chapters
-  # base           lang  path
-  # chapter-012    -     chapter-012.md
-  # chapter-012    en    chapter-012.translated.en.md
-  ```
-
-  Feed it to your serve tool (`dscli pairs | while IFS=$'\t' read base lang path; do …`) or just grep it.
+  → base + optional language.
 
 > Tip: paths containing spaces must be quoted in the shell, e.g.
 > `dscli translate "my documents/notes.md"`. The output path mirrors the
@@ -175,17 +199,17 @@ dscli translate --instructions my-style.md chapter.md  # explicit file for any p
 
 ## Batch translation in chat
 
-With `/files` on you can drive translation as part of an organising session —
+With `/tools` on you can drive translation as part of an organising session —
 translate several files, then rename/move the outputs:
 
 ```
-you> translate all .lrc files in Music/ into Chinese
+translate all .lrc files in Music/ into Chinese
 translate_file Music/one.lrc
 Music/one.lrc → Music/one.translated.lrc (lrc, 1 chunks, to Chinese)
 translate Music/one.lrc → Music/one.translated.lrc to Chinese? [y/N] y
   chunk 1/1 ok
 …
-you> /help
+/help
 ```
 
 ## Models, DeepThink & web search
@@ -205,9 +229,9 @@ Inside the REPL the same switches are slash commands (see `/help`): a bare
 (`/thinking on`). The status line redraws after every change.
 
 ```
-you> /thinking on
-you> /search off
-you> /model expert          # switches model; starts a fresh conversation
+/thinking on
+/search off
+/model expert          # switches model; starts a fresh conversation
 ```
 
 A thread's model is fixed when it is created: `--model`/`/model` always start
@@ -220,7 +244,7 @@ DeepThink and search can be toggled freely at any point of a thread — and
 
 The model can read and edit files in a working directory — enabled per run
 with `--file-tools` (and `--workdir` to scope it, defaulting to the current
-directory), or mid-session with `/files`:
+directory), or mid-session with `/tools`:
 
 ```bash
 dscli chat --file-tools "what does this repo's Makefile do?"
@@ -233,6 +257,8 @@ It calls a tool by replying with *only* a JSON object:
 {"tool":"list_directory","path":".","recursive":true}
 {"tool":"file_meta","path":"song.lrc"}
 {"tool":"read_file","path":"book.epub"}
+{"tool":"grep","pattern":"func main","path":"."}
+{"tool":"fetch_url","url":"https://example.com/page"}
 {"tool":"translate_file","path":"song.lrc","to":"Chinese"}
 {"tool":"create_file","path":"notes.txt","content":"hello"}
 {"tool":"edit_file","path":"src/cli.go","old":"func Foo(","new":"func Bar("}
@@ -255,12 +281,23 @@ It calls a tool by replying with *only* a JSON object:
   retry. The ceiling defaults to 512 KiB and is tunable per run:
 
   ```bash
-  dscli chat --file-tools --file-max-read 100000 "summarize client.go"
+  dscli chat --file-tools --max-read 100000 "summarize client.go"
   ```
 
   `list_directory` lists ONE directory, non-recursive, directories marked
   with a trailing `/`. The model is instructed to start with
   `{"tool":"list_directory","path":"."}` to discover files.
+- **`grep` and `fetch_url` also run without prompting.** `grep` searches a
+  Go regular expression over the workdir (or a single file/dir via `path`,
+  defaulting to `.`) and returns up to 200 matches as `path:line:text`; VCS
+  directories (`.git`/`.hg`/`.svn`), binary files and files over the read
+  ceiling are skipped, and case-insensitive search is `"(?i)pattern"`.
+  `fetch_url` retrieves an http(s) URL (redirects followed) and returns the
+  body — capped at the same 512 KiB read ceiling, binary or non-2xx
+  responses rejected, only `http`/`https` schemes allowed — as
+  `HTTP <status> · <final URL>` plus the text. Both are bounded and
+  read-only, so no confirmation is needed; the network call runs from your
+  machine.
 - **`translate_file`** bundles the whole translate pipeline into one tool
   call (handy for bulk translating a library in chat mode): `path`, `to`
   (target language), optional `output`. It previews (`song.lrc →
@@ -295,25 +332,60 @@ It calls a tool by replying with *only* a JSON object:
 - Tool calls resolve within the same session (each `read_file`/`edit_file`
   turn feeds a `<tool_result>` back), hard-capped at 12 tool calls per
   user message — after the budget the model is forced to give a final prose
-  answer, so exploring a very large tree can never loop indefinitely. Listings
+  answer, so exploring a very large tree can never loop indefinitely. A
+  consecutive duplicate of the same deterministic read-only call
+  (`read_file`/`list_directory`/`file_meta`/`grep` with identical arguments —
+  a DeepThink model sometimes re-lists what it was just shown) is skipped and
+  the model is told to reuse the result it already has instead of burning a
+  budget slot. Listings
   are read in bounded batches, so a directory with hundreds of thousands of
   entries costs ~200 entries of work, not a full scan. The raw JSON never reaches your screen; a dim
   note shows each call (`read_file Makefile`). All paths are confined to the
-  workdir: lexical `..` escapes **and symlink chains leading outside** are
+  workdir (fetch_url is the one networked tool and never touches the
+  filesystem): lexical `..` escapes **and symlink chains leading outside** are
   rejected via canonical resolution, writes preserve the target's file mode,
   and every apply re-verifies the file still matches the preview (a file
-  changed in between — or a create target that appeared — refuses the
-  operation instead of clobbering). The session is still deleted on close.
+   changed in between — or a create target that appeared — refuses the
+   operation instead of clobbering). The session is the persisted default
+   (deleted on close only with `--no-persist`).
 
 `ask` is the minimal one-shot: positional args or piped stdin, the answer
-streams to stdout (or NDJSON with `--json-out`), and the session is created
-per call and deleted afterwards — nothing persists, no conversation id is
-printed. Two shell gotchas:
+streams to stdout (or NDJSON with `--json-out`), and by default it resumes the
+same persisted default session as everything else (so consecutive `ask`s
+continue one thread; `--no-persist` runs in a fresh session deleted
+afterwards). Two shell gotchas:
 
 - **A prompt starting with `-`** is parsed as a flag; terminate flags with
   `--`: `dscli ask -- "what is --help about?"`.
 - **`?` and `*` are shell globs** (zsh: `no matches found`); quote the prompt:
   `dscli ask "What is the current gold price?"`.
+
+## One-shot tasks: `do`
+
+`do` is `ask` plus the file tools: a single task, run with DeepThink reasoning
+on by default, where the model can list/read/grep files and fetch URLs to get
+the job done — then gives one final prose answer. Like `ask`, the input is
+positional args or piped stdin, and by default it resumes the persisted default
+session (`--no-persist` runs in a fresh session deleted when the task ends):
+
+```bash
+dscli do "which functions in cmd/ are unused? check imports too"
+dscli do --workdir /path/to/project "refactor Foo to Bar and run the diff"
+echo "summarize this log" | dscli do
+```
+
+- File tools are always on; the same 12-call budget, workdir confinement and
+  confirm-before-write rules apply as in `chat --file-tools`. Writes still ask
+  first on the terminal.
+- **DeepThink is on by default** (`-t` flips it; disable with
+  `--thinking=false`), and `--search` enables web search.
+- **`-y` auto-approves every file write** (create/edit/rename/delete/translate
+  run without prompts) — combine it with a scoped `--workdir` to run a task
+  fully unattended.
+- `--json-out` emits the final answer as `{"delta":...}`, then a
+  `{"done":true}` line.
+- A task starting with `-` needs `--`: `dscli do -- "-delete that file"`.
+  The `?`/`*` glob gotcha above applies to `do` too.
 
 **Search citations:** with `-s` the reply carries `[citation:N]` markers; the
 CLI extracts the search sources from the stream (TOOL_SEARCH fragments /
@@ -376,6 +448,10 @@ dscli config unset token
 dscli --config-file /path/to/dscli.json config set token <token>
 ```
 
+The `session` key holds the persisted default conversation position
+(`<session_id>:<message_id>`, set automatically on every turn; `dscli session
+forget` clears it and the next run starts a fresh thread).
+
 A `dscli.json` in the current directory takes precedence over the per-user
 config file (a warning is printed when that happens implicitly), and
 `DSCLI_CONFIG_FILE` overrides both.
@@ -435,5 +511,6 @@ dscli translate -f lyrics.lrc -o lyrics.lrc    # overwrite the source in place
   first and defaults to a `.translated.txt` output.
 - `file_meta` reports duration for lrc/srt/vtt/ass/ssa/ttml files.
 - The output path defaults to `<input>.translated.<ext>` and is never
-  overwritten without `-f`. The session is ephemeral, like chat (created per
-  run, deleted when the run ends).
+  overwritten without `-f`. Translation runs by default in the persisted
+  default session (`--no-persist` for a fresh session deleted when the run
+  ends).

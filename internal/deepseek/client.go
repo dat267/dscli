@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -32,6 +33,19 @@ const (
 
 // ErrCredentials reports that no usable session was configured.
 var ErrCredentials = errors.New("no DeepSeek session configured")
+
+// sseDebugDump, when set via DSCLI_DEBUG_SSE=<file>, receives every raw SSE
+// data payload as it arrives (one per line), for diagnosing stream
+// reconstruction issues against the live site. Optional; nil by default.
+var sseDebugDump io.Writer
+
+func init() {
+	if path := os.Getenv("DSCLI_DEBUG_SSE"); path != "" {
+		if f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600); err == nil {
+			sseDebugDump = f
+		}
+	}
+}
 
 // Session carries the signed-in credentials captured from the website
 // (token from localStorage.userToken, ds_session_id from the cookies).
@@ -345,6 +359,9 @@ func (c *Client) streamOnce(ctx context.Context, req CompletionRequest, pow stri
 	parser := &patchParser{}
 	var messageID int64
 	if err := readSSE(resp.Body, func(payload []byte) error {
+		if sseDebugDump != nil {
+			_, _ = fmt.Fprintf(sseDebugDump, "%s\n", payload)
+		}
 		return parser.Feed(payload, emit)
 	}); err != nil {
 		return Reply{}, err

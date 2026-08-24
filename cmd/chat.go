@@ -33,10 +33,35 @@ type ChatCmd struct {
 	Cookie    string `env:"DS_COOKIE" help:"DeepSeek ds_session_id cookie value. Alternatively: config set cookie"`
 	UserAgent string `env:"DS_USER_AGENT" help:"Browser user-agent; some deployments reject non-browser UAs"`
 
-	FileTools    bool   `help:"Let the model read and edit files in the working directory (writes always ask for confirmation first)"`
+	FileTools    bool   `help:"Let the model inspect and edit files in the working directory and fetch URLs (writes always ask for confirmation first)"`
+	NoPersist    bool   `help:"Do not persist or reuse the default session; the session is deleted when the run ends"`
 	Instructions string `help:"Custom translation instructions file for translate_file (default: translate/<from>-<to>.md, then a built-in general style)"`
 	Workdir      string `help:"Working directory for file tools" default:"."`
-	MaxRead      int    `help:"Max bytes read_file will return; oversized or binary files are rejected (default: 512 KiB)" default:"0"`
+	MaxRead      int    `help:"Max bytes read_file and fetch_url will return; oversized or binary files/responses are rejected (default: 512 KiB)" default:"0"`
+
+	// confirm overrides the write-confirmation prompt (used by `do -y` to
+	// auto-approve every write, and the TUI to prompt in-app); nil falls back
+	// to the global confirmWrite.
+	confirm func(string) bool
+	// answer overrides the reply-text writer (the TUI renders it into its
+	// scrollback); nil falls back to deltaWriter (stdout / NDJSON).
+	answer func(string) error
+	// preview overrides where plan previews and progress lines go (the TUI
+	// renders them into its scrollback); nil falls back to stderr.
+	preview func(string)
+
+	// cfgPath is the config file path used for session persistence; set from
+	// app in Run.
+	cfgPath string
+}
+
+// confirmOp asks the user to approve a file write, honouring a per-command
+// override (e.g. `do -y`) before the global terminal prompt.
+func (c *ChatCmd) confirmOp(msg string) bool {
+	if c != nil && c.confirm != nil {
+		return c.confirm(msg)
+	}
+	return confirmWrite(msg)
 }
 
 // confirmWrite asks the user to approve a file write. It reads from the
@@ -72,6 +97,9 @@ func yes(s string) bool {
 }
 
 func (c *ChatCmd) Run(app *App, ctx context.Context) error {
+	if app != nil {
+		c.cfgPath = app.CfgPath()
+	}
 	if c.Token == "" {
 		return errors.New("no DeepSeek session configured: pass --token/--cookie (or DS_TOKEN/DS_COOKIE) or run 'dscli login' and save the values with 'dscli config set'")
 	}
@@ -85,7 +113,7 @@ func (c *ChatCmd) Run(app *App, ctx context.Context) error {
 		return fmt.Errorf("unknown model %q (want default or expert)", c.Model)
 	}
 	if c.MaxRead < 0 {
-		return errors.New("--file-max-read cannot be negative")
+		return errors.New("--max-read cannot be negative")
 	}
 	if c.MaxRead > 0 {
 		filetools.MaxReadBytes = c.MaxRead
@@ -154,6 +182,25 @@ func (c *ChatCmd) deltaWriter() func(string) error {
 	}
 }
 
+// answerWriter returns the reply-text writer: the TUI override when set, else
+// the NDJSON/plain deltaWriter.
+func (c *ChatCmd) answerWriter() func(string) error {
+	if c.answer != nil {
+		return c.answer
+	}
+	return c.deltaWriter()
+}
+
+// showPreview renders a plan preview or progress line, honouring the TUI
+// override (nil falls back to stderr).
+func (c *ChatCmd) showPreview(text string) {
+	if c.preview != nil {
+		c.preview(text)
+		return
+	}
+	fmt.Fprintln(os.Stderr, text)
+}
+
 // turn answers one user message and returns the conversation id for the next
 // turn. With fileTools enabled it runs the model↔file loop: a reply that is a
 // single file-tool JSON object is executed (writes always confirm first) and
@@ -162,20 +209,18 @@ func (c *ChatCmd) deltaWriter() func(string) error {
 // is rendered when it arrives.
 func (c *ChatCmd) turn(ctx context.Context, client *deepseek.Client, conversation, prompt, model string, fileTools bool, note func(string), sources *[]deepseek.Source) (string, error) {
 	if !fileTools {
-		return c.oneTurn(ctx, client, conversation, prompt, model, c.deltaWriter(), sources)
+		return c.oneTurn(ctx, client, conversation, prompt, model, c.answerWriter(), sources)
 	}
 
 	workdir, err := filepath.Abs(c.Workdir)
 	if err != nil {
 		return "", fmt.Errorf("resolve working directory: %w", err)
 	}
-	write := func(delta string) error {
-		_, err := os.Stdout.WriteString(delta)
-		return err
-	}
+	write := c.answerWriter()
 
 	cur := conversation
 	curPrompt := filetools.Instructions(workdir) + prompt
+	var prevCall string // identity of the last executed read-only tool call
 	for i := 0; i < filetools.MaxIterations; i++ {
 		var buf strings.Builder
 		convID, err := c.oneTurn(ctx, client, cur, curPrompt, model, func(d string) error {
@@ -204,10 +249,31 @@ func (c *ChatCmd) turn(ctx context.Context, client *deepseek.Client, conversatio
 		// Tool turn: never prints the raw JSON. Writes and deletions are planned,
 		// previewed, confirmed, then applied — the preview and the write derive
 		// from the same read, so what the user approves is exactly what happens.
-		display := filetools.Display(workdir, call.Path)
+		display := ""
+		switch {
+		case call.Tool == "fetch_url":
+			display = call.URL
+		case call.Path == "":
+			display = "."
+		default:
+			display = filetools.Display(workdir, call.Path)
+		}
+
+		// A DeepThink model occasionally re-issues the exact deterministic
+		// read-only call it was just shown (e.g. list_directory . twice). Skip
+		// the duplicate and point the model at the result it already has,
+		// instead of burning a tool-call budget slot on a re-run.
+		if key := callKey(call); key != "" && key == prevCall {
+			note(fmt.Sprintf("%s %s (duplicate, skipped)", call.Tool, display))
+			curPrompt = filetools.FormatResult(call.Tool, call.Path,
+				"WARNING: you already requested this exact tool call in the previous turn and its <tool_result> is in the conversation above. Do not repeat it: re-read that result and continue, or give your final answer.")
+			continue
+		}
+		prevCall = callKey(call)
+
 		note(fmt.Sprintf("%s %s", call.Tool, display))
 		switch call.Tool {
-		case "read_file", "list_directory", "file_meta":
+		case "read_file", "list_directory", "file_meta", "grep", "fetch_url":
 			curPrompt = call.Run(workdir)
 			continue
 		case "edit_file":
@@ -216,8 +282,8 @@ func (c *ChatCmd) turn(ctx context.Context, client *deepseek.Client, conversatio
 				curPrompt = filetools.FormatResult(call.Tool, call.Path, plan.Result)
 				continue
 			}
-			fmt.Fprintln(os.Stderr, plan.Preview)
-			if !confirmWrite(fmt.Sprintf("apply edit to %s?", display)) {
+			c.showPreview(plan.Preview)
+			if !c.confirmOp(fmt.Sprintf("apply edit to %s?", display)) {
 				curPrompt = filetools.FormatResult(call.Tool, call.Path, "ERROR: edit rejected by user; do not retry it")
 				continue
 			}
@@ -233,8 +299,8 @@ func (c *ChatCmd) turn(ctx context.Context, client *deepseek.Client, conversatio
 				curPrompt = filetools.FormatResult(call.Tool, call.Path, plan.Result)
 				continue
 			}
-			fmt.Fprintln(os.Stderr, plan.Preview)
-			if !confirmWrite(fmt.Sprintf("create %s?", display)) {
+			c.showPreview(plan.Preview)
+			if !c.confirmOp(fmt.Sprintf("create %s?", display)) {
 				curPrompt = filetools.FormatResult(call.Tool, call.Path, "ERROR: create rejected by user; do not retry it")
 				continue
 			}
@@ -250,8 +316,8 @@ func (c *ChatCmd) turn(ctx context.Context, client *deepseek.Client, conversatio
 				curPrompt = filetools.FormatResult(call.Tool, call.Path, plan.Result)
 				continue
 			}
-			fmt.Fprintln(os.Stderr, plan.Preview)
-			if !confirmWrite(fmt.Sprintf("rename %s → %s?", plan.OldName, plan.NewName)) {
+			c.showPreview(plan.Preview)
+			if !c.confirmOp(fmt.Sprintf("rename %s → %s?", plan.OldName, plan.NewName)) {
 				curPrompt = filetools.FormatResult(call.Tool, call.Path, "ERROR: rename rejected by user; do not retry it")
 				continue
 			}
@@ -267,8 +333,8 @@ func (c *ChatCmd) turn(ctx context.Context, client *deepseek.Client, conversatio
 				curPrompt = filetools.FormatResult(call.Tool, call.Path, plan.Result)
 				continue
 			}
-			fmt.Fprintln(os.Stderr, plan.Preview)
-			if !confirmWrite(fmt.Sprintf("delete %s?", display)) {
+			c.showPreview(plan.Preview)
+			if !c.confirmOp(fmt.Sprintf("delete %s?", display)) {
 				curPrompt = filetools.FormatResult(call.Tool, call.Path, "ERROR: delete rejected by user; do not retry it")
 				continue
 			}
@@ -305,16 +371,40 @@ func (c *ChatCmd) turn(ctx context.Context, client *deepseek.Client, conversatio
 	return convID, nil
 }
 
-// ask answers a single question and exits.
+// ask answers a single question and exits. By default it resumes the
+// persisted default session (creating and saving one on first use); with
+// --no-persist it runs in a fresh session that is deleted afterwards.
 func (c *ChatCmd) ask(ctx context.Context, prompt string) error {
 	client := c.newClient()
 	var sources []deepseek.Source
-	convID, err := c.turn(ctx, client, c.Conversation, prompt, effectiveModel(c.Model), c.FileTools, func(s string) {
-		fmt.Fprintln(os.Stderr, s)
-	}, &sources)
+	conversation := c.Conversation
+	trusted := false
+	var cleanup func()
+	if conversation == "" {
+		var err error
+		conversation, trusted, cleanup, err = resolveDefaultSession(ctx, client, c.cfgPath, c.NoPersist)
+		if err != nil {
+			return err
+		}
+		if cleanup != nil {
+			defer cleanup()
+		}
+	}
+
+	var convID string
+	_, err := recoverStaleSession(ctx, client, c.cfgPath, conversation, trusted, func(sid string) error {
+		cid, e := c.turn(ctx, client, sid, prompt, effectiveModel(c.Model), c.FileTools, func(s string) {
+			fmt.Fprintln(os.Stderr, s)
+		}, &sources)
+		if e == nil {
+			convID = cid
+		}
+		return e
+	})
 	if err != nil {
 		return err
 	}
+	persistConversation(c.cfgPath, c.NoPersist, convID)
 	if c.JSONOut {
 		out := map[string]any{"done": true, "conversation_id": convID}
 		if len(sources) > 0 {
@@ -329,24 +419,39 @@ func (c *ChatCmd) ask(ctx context.Context, prompt string) error {
 
 // repl runs an interactive multi-turn session.
 //
-// Stateless by default: with no --conversation it creates a fresh session at
-// launch, keeps every turn in it, and deletes it (plus any sessions spawned
-// by /new or /model) when the session ends — however it ends, including
-// Ctrl-C.
+// By default it resumes the persisted default session (creating and saving one
+// on first use), so the thread carries across launches. With --no-persist it
+// creates a fresh session at launch, keeps every turn in it, and deletes it
+// (plus any sessions spawned by /new or /model) when the session ends — however
+// it ends, including Ctrl-C.
 func (c *ChatCmd) repl(ctx context.Context) error {
 	client := c.newClient()
 
-	// Track the sessions this launch created so none of them outlive it.
 	var owned []string
-	if c.Conversation == "" {
-		sid, err := client.CreateChatSession(ctx)
-		if err != nil {
-			return fmt.Errorf("create chat session: %w", err)
-		}
-		owned = append(owned, sid)
-		return c.replLoop(ctx, client, sid, owned)
+	if c.Conversation != "" {
+		return c.replLoop(ctx, client, c.Conversation, owned, false)
 	}
-	return c.replLoop(ctx, client, c.Conversation, owned)
+	sessionID, trusted, cleanup, err := resolveDefaultSession(ctx, client, c.cfgPath, c.NoPersist)
+	if err != nil {
+		return fmt.Errorf("create chat session: %w", err)
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+	// When both stdin and stdout are terminals, run the bubbletea TUI (the
+	// opencode/Claude Code-style prompt); otherwise fall back to the plain
+	// line-based loop (pipes, scripts, tests).
+	if isTerminal(os.Stdin) && isTerminal(os.Stdout) {
+		m := newTUIModel(c, client, sessionID, trusted)
+		if err := runTUI(m); err != nil {
+			return err
+		}
+		if m.turns > 0 {
+			fmt.Fprintf(os.Stderr, "\nconversation: %s\n", m.conversation)
+		}
+		return nil
+	}
+	return c.replLoop(ctx, client, sessionID, owned, trusted)
 }
 
 // ui wraps the terminal styling used by the REPL. Colours are only emitted
@@ -382,13 +487,19 @@ func isTerminal(f *os.File) bool {
 	return info.Mode()&os.ModeCharDevice != 0
 }
 
-func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, conversation string, owned []string) error {
+func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, conversation string, owned []string, trusted bool) error {
 	model := effectiveModel(c.Model)
 	thinking := c.Thinking
 	search := c.Search
 	fileTools := c.FileTools
 	u := ui{color: isTerminal(os.Stderr)}
 	interactive := isTerminal(os.Stdin)
+
+	// The persisted default session is recovered once if its first turn fails
+	// (the saved id may no longer exist server-side); fresh and ephemeral
+	// sessions never are.
+	firstTurn := trusted
+	persist := !c.NoPersist && c.cfgPath != ""
 
 	deleteOwned := func() {
 		if len(owned) == 0 {
@@ -411,15 +522,17 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 		deleteOwned()
 	}()
 
-	mode := "ephemeral (deleted on close)"
+	mode := "ephemeral"
 	if c.Conversation != "" {
-		mode = "continuing conversation"
+		mode = "continuing"
+	} else if persist {
+		mode = "persisted"
 	}
 	// status redraws the live settings line; it is shown at launch and after
-	// every /thinking, /search, /files or /model change.
+	// every /thinking, /search, /tools or /model change.
 	status := func() {
 		fmt.Fprintf(os.Stderr, "%s\n", u.dim(fmt.Sprintf(
-			"DeepSeek · model %s · thinking %s · search %s · files %s · %s",
+			"DeepSeek · model %s · thinking %s · search %s · tools %s · %s",
 			model, onoff(thinking), onoff(search), onoff(fileTools), mode,
 		)))
 	}
@@ -430,9 +543,6 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	var turns int
 	for {
-		if interactive {
-			fmt.Fprint(os.Stderr, u.bold(u.cyan("you> ")))
-		}
 		if !scanner.Scan() {
 			break
 		}
@@ -476,8 +586,12 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 			search = toggleState(line, "/search", search)
 			status()
 			continue
-		case line == "/files" || strings.HasPrefix(line, "/files "):
-			fileTools = toggleState(line, "/files", fileTools)
+		case line == "/tools" || strings.HasPrefix(line, "/tools ") || line == "/files" || strings.HasPrefix(line, "/files "):
+			cmd := "/tools"
+			if strings.HasPrefix(line, "/files") {
+				cmd = "/files"
+			}
+			fileTools = toggleState(line, cmd, fileTools)
 			status()
 			continue
 		case strings.HasPrefix(line, "/"):
@@ -485,8 +599,24 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 			continue
 		}
 
+		// Multi-line prompt: a line ending in a single backslash continues
+		// onto the next line (a lone "\" line inserts a blank line and keeps
+		// going; "\\" at the end sends a literal backslash and ends the
+		// message). Continuation lines are never treated as commands.
+		for hasContinuation(line) {
+			line = line[:len(line)-1] // drop the trailing backslash
+			if interactive {
+				fmt.Fprint(os.Stderr, u.bold(u.cyan("...> ")))
+			}
+			if !scanner.Scan() {
+				break
+			}
+			line += "\n" + strings.TrimSpace(scanner.Text())
+		}
+
 		// A reset (/new, /model) leaves conversation empty; the next turn
-		// spawns a fresh session that is also deleted at close.
+		// spawns a fresh session. In persist mode it becomes the new default
+		// (saved to the config); otherwise it is tracked for deletion at close.
 		if conversation == "" {
 			sid, err := client.CreateChatSession(ctx)
 			if err != nil {
@@ -494,7 +624,13 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 				continue
 			}
 			conversation = sid
-			owned = append(owned, sid)
+			if persist {
+				if err := saveSession(c.cfgPath, sid); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: could not save session: %v\n", err)
+				}
+			} else {
+				owned = append(owned, sid)
+			}
 		}
 
 		// With file tools off the reply streams live and the final character is
@@ -502,15 +638,24 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 		// turn() buffers and sieves tool calls, so last-char tracking is moot.
 		if fileTools {
 			var sources []deepseek.Source
-			convID, err := c.turn(ctx, client, conversation, line, model, true, func(s string) {
-				fmt.Fprintln(os.Stderr, u.dim(s))
-			}, &sources)
+			var convID string
+			_, err := recoverStaleSession(ctx, client, c.cfgPath, conversation, firstTurn, func(sid string) error {
+				cid, e := c.turn(ctx, client, sid, line, model, true, func(s string) {
+					fmt.Fprintln(os.Stderr, u.dim(s))
+				}, &sources)
+				if e == nil {
+					convID = cid
+				}
+				return e
+			})
+			firstTurn = false
 			if err != nil {
 				fmt.Fprintln(os.Stderr, u.red("error: "+err.Error()))
 				fmt.Fprintln(os.Stdout)
 				continue
 			}
 			conversation = convID
+			persistConversation(c.cfgPath, c.NoPersist, conversation)
 			renderSources(os.Stderr, sources)
 			fmt.Fprintln(os.Stdout) // blank line before the next prompt
 			turns++
@@ -519,6 +664,7 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 
 		var last byte
 		var sources []deepseek.Source
+		var convID string
 		write := func(delta string) error {
 			if len(delta) > 0 {
 				last = delta[len(delta)-1]
@@ -526,7 +672,14 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 			_, err := os.Stdout.WriteString(delta)
 			return err
 		}
-		convID, err := c.oneTurn(ctx, client, conversation, line, model, write, &sources)
+		_, err := recoverStaleSession(ctx, client, c.cfgPath, conversation, firstTurn, func(sid string) error {
+			cid, e := c.oneTurn(ctx, client, sid, line, model, write, &sources)
+			if e == nil {
+				convID = cid
+			}
+			return e
+		})
+		firstTurn = false
 		if err != nil {
 			if last != '\n' && last != 0 {
 				fmt.Fprintln(os.Stdout)
@@ -543,6 +696,7 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 		fmt.Fprintln(os.Stdout) // blank line before the next prompt
 		renderSources(os.Stderr, sources)
 		conversation = convID
+		persistConversation(c.cfgPath, c.NoPersist, conversation)
 		turns++
 	}
 	if err := scanner.Err(); err != nil {
@@ -552,6 +706,36 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 		fmt.Fprintf(os.Stderr, "conversation: %s\n", conversation)
 	}
 	return nil
+}
+
+// callKey returns a deterministic identity for a read-only tool call, used to
+// skip consecutive duplicates in the tool loop. It returns "" for calls that
+// must never be deduplicated: writes/renames/deletes/translations (a repeat
+// may be a legitimate retry after a rejection) and fetch_url (a network
+// response can legitimately change between calls).
+func callKey(c filetools.Call) string {
+	switch c.Tool {
+	case "read_file":
+		return "read:" + c.Path
+	case "file_meta":
+		return "meta:" + c.Path
+	case "list_directory":
+		rec := 0
+		if c.Recursive {
+			rec = 1
+		}
+		return fmt.Sprintf("list:%s:%d", c.Path, rec)
+	case "grep":
+		return "grep:" + c.Path + ":" + c.Pattern
+	}
+	return ""
+}
+
+// hasContinuation reports whether a (possibly multi-line) prompt ends in a
+// single, unescaped backslash — the marker that the message continues on the
+// next line. "\\" at the end is an escaped backslash, not a continuation.
+func hasContinuation(s string) bool {
+	return strings.HasSuffix(s, "\\") && !strings.HasSuffix(s, "\\\\")
 }
 
 // onoff renders a boolean as "on"/"off".
@@ -596,8 +780,8 @@ func (c *ChatCmd) applyTranslateFile(ctx context.Context, client *deepseek.Clien
 	chunks := translate.ChunkText(string(content), 0)
 	outDisplay := filetools.Display(workdir, out)
 	preview := fmt.Sprintf("%s → %s\n(%s, %d chunks, to %s)", display, outDisplay, format, len(chunks), call.To)
-	fmt.Fprintln(os.Stderr, preview)
-	if !confirmWrite(fmt.Sprintf("translate %s → %s to %s?", display, outDisplay, call.To)) {
+	c.showPreview(preview)
+	if !c.confirmOp(fmt.Sprintf("translate %s → %s to %s?", display, outDisplay, call.To)) {
 		return filetools.FormatResult(call.Tool, call.Path, "ERROR: translate rejected by user; do not retry it")
 	}
 
@@ -618,12 +802,12 @@ func (c *ChatCmd) applyTranslateFile(ctx context.Context, client *deepseek.Clien
 		cleanup()
 	}()
 
-	result, err := translate.Translate(ctx, client, sessionID, content, format, translate.Options{
+	result, _, err := translate.Translate(ctx, client, sessionID, content, format, translate.Options{
 		To:    call.To,
 		Model: model,
 		Style: style,
 		OnChunk: func(chunk, total int) {
-			fmt.Fprintf(os.Stderr, "  chunk %d/%d ok\n", chunk, total)
+			c.showPreview(fmt.Sprintf("  chunk %d/%d ok", chunk, total))
 		},
 	})
 	if err != nil {
@@ -645,8 +829,12 @@ func printReplHelp(u ui) {
   /model <default|expert>     switch model (starts a fresh conversation)
   /thinking [on|off]          toggle DeepThink reasoning
   /search [on|off]            toggle web search
-  /files [on|off]             toggle file tools (list/read/meta/create/edit/rename/delete/translate in the CWD; writes ask first)
-  /help                       this help`))
+  /tools [on|off]            toggle file tools (/files still works) (list/read/meta/grep/fetch_url/create/edit/rename/delete/translate; writes ask first)
+  /help                       this help
+
+multiline: end a line with \ to continue it on the next line; a lone \ line
+inserts a blank line and keeps going. A trailing \\ (two backslashes) does not
+continue — the line is sent literally.`))
 }
 
 // toggleState updates a boolean from a slash command: a bare "/cmd" flips the

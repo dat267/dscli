@@ -89,7 +89,8 @@ func TestTranslatePlainMD(t *testing.T) {
 		completionSSE(t, 2, "Bonjour le monde\n"),
 	})
 	defer srv.Close()
-	cmd := &TranslateCmd{File: in, From: "English", To: "French", Token: "tok", clientBase: srv.URL, Instructions: style}
+	cmd := &TranslateCmd{
+		NoPersist: true, File: in, From: "English", To: "French", Token: "tok", clientBase: srv.URL, Instructions: style}
 	if err := cmd.Run(nil, context.Background()); err != nil {
 		t.Fatalf("translate: %v", err)
 	}
@@ -125,14 +126,16 @@ func TestTranslateOutputExistsRefused(t *testing.T) {
 	if err := os.WriteFile(out, []byte("y"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	cmd := &TranslateCmd{File: in, Output: out, Token: "tok"}
+	cmd := &TranslateCmd{
+		NoPersist: true, File: in, Output: out, Token: "tok"}
 	if err := cmd.Run(nil, context.Background()); err == nil || !strings.Contains(err.Error(), "exists") {
 		t.Errorf("overwriting existing output without -f must fail, got %v", err)
 	}
 	// With -f the write proceeds.
 	srv, _ := fakeDeepSeekServerWith(t, []string{completionSSE(t, 2, "z\n")})
 	defer srv.Close()
-	cmd = &TranslateCmd{File: in, Output: out, Force: true, Token: "tok", clientBase: srv.URL}
+	cmd = &TranslateCmd{
+		NoPersist: true, File: in, Output: out, Force: true, Token: "tok", clientBase: srv.URL}
 	if err := cmd.Run(nil, context.Background()); err != nil {
 		t.Fatalf("translate with -f: %v", err)
 	}
@@ -157,7 +160,8 @@ func TestTranslateLRCVerificationRetry(t *testing.T) {
 		completionSSE(t, 3, good),
 	})
 	defer srv.Close()
-	cmd := &TranslateCmd{File: in, To: "French", Token: "tok", clientBase: srv.URL}
+	cmd := &TranslateCmd{
+		NoPersist: true, File: in, To: "French", Token: "tok", clientBase: srv.URL}
 	if err := cmd.Run(nil, context.Background()); err != nil {
 		t.Fatalf("translate: %v", err)
 	}
@@ -189,7 +193,8 @@ func TestTranslateLRCVerificationGivesUp(t *testing.T) {
 		completionSSE(t, 3, bad),
 	})
 	defer srv.Close()
-	cmd := &TranslateCmd{File: in, To: "French", Token: "tok", clientBase: srv.URL}
+	cmd := &TranslateCmd{
+		NoPersist: true, File: in, To: "French", Token: "tok", clientBase: srv.URL}
 	err := cmd.Run(nil, context.Background())
 	if err == nil || !strings.Contains(err.Error(), "protected line") {
 		t.Errorf("persistent corruption must fail loudly, got %v", err)
@@ -215,7 +220,8 @@ func TestTranslateASSVerificationRetry(t *testing.T) {
 		completionSSE(t, 3, good),
 	})
 	defer srv.Close()
-	cmd := &TranslateCmd{File: in, To: "French", Token: "tok", clientBase: srv.URL}
+	cmd := &TranslateCmd{
+		NoPersist: true, File: in, To: "French", Token: "tok", clientBase: srv.URL}
 	if err := cmd.Run(nil, context.Background()); err != nil {
 		t.Fatalf("translate: %v", err)
 	}

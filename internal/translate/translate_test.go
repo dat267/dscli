@@ -94,7 +94,7 @@ func TestTranslateDefaultUsesMaxContext(t *testing.T) {
 	})
 	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
 	content := strings.Repeat("a", 300*1024)
-	text, err := Translate(context.Background(), client, "sess-1", []byte(content), "text", Options{To: "English"})
+	text, _, err := Translate(context.Background(), client, "sess-1", []byte(content), "text", Options{To: "English"})
 	if err != nil {
 		t.Fatalf("Translate: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestTranslateBisectsOnOverflow(t *testing.T) {
 	})
 	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
 	content := strings.Repeat("a", 30*1024) // > minChunkBytes, bisectable
-	text, err := Translate(context.Background(), client, "sess-1", []byte(content), "text", Options{To: "English"})
+	text, _, err := Translate(context.Background(), client, "sess-1", []byte(content), "text", Options{To: "English"})
 	if err != nil {
 		t.Fatalf("Translate: %v", err)
 	}

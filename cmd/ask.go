@@ -18,12 +18,13 @@ import (
 // afterwards, so nothing persists and no conversation-id noise is printed.
 // The input may be positional args or piped stdin.
 type AskCmd struct {
-	Prompt   []string      `arg:"" optional:"" help:"Input to send (omit to read from stdin; use -- before a prompt that starts with -)"`
-	Model    string        `short:"m" help:"Model: default (Instant) or expert" default:""`
-	Thinking bool          `short:"t" help:"Enable DeepThink reasoning"`
-	Search   bool          `short:"s" help:"Enable web search"`
-	JSONOut  bool          `help:"Emit NDJSON: one {\"delta\":...} line per chunk, then a {\"sources\":[...]} line when search returned citations"`
-	Timeout  time.Duration `help:"Overall budget (0 = no limit)" default:"15m"`
+	Prompt    []string      `arg:"" optional:"" help:"Input to send (omit to read from stdin; use -- before a prompt that starts with -)"`
+	Model     string        `short:"m" help:"Model: default (Instant) or expert" default:""`
+	Thinking  bool          `short:"t" help:"Enable DeepThink reasoning"`
+	Search    bool          `short:"s" help:"Enable web search"`
+	NoPersist bool          `help:"Do not persist or reuse the default session; the session is deleted when the run ends"`
+	JSONOut   bool          `help:"Emit NDJSON: one {\"delta\":...} line per chunk, then a {\"sources\":[...]} line when search returned citations"`
+	Timeout   time.Duration `help:"Overall budget (0 = no limit)" default:"15m"`
 
 	Token     string `env:"DS_TOKEN" help:"DeepSeek user token (localStorage.userToken). Alternatively: config set token"`
 	Cookie    string `env:"DS_COOKIE" help:"DeepSeek ds_session_id cookie value. Alternatively: config set cookie"`
@@ -31,6 +32,10 @@ type AskCmd struct {
 
 	// clientBase overrides the API base URL for tests.
 	clientBase string
+
+	// cfgPath is the config file path used for session persistence; set from
+	// app in Run.
+	cfgPath string
 }
 
 // renderSources prints citation footnotes (matching the inline [citation:N]
@@ -51,6 +56,9 @@ func renderSources(w io.Writer, sources []deepseek.Source) {
 }
 
 func (c *AskCmd) Run(app *App, ctx context.Context) error {
+	if app != nil {
+		c.cfgPath = app.CfgPath()
+	}
 	if c.Token == "" {
 		return errors.New("no DeepSeek session configured: pass --token/--cookie (or DS_TOKEN/DS_COOKIE) or run 'dscli login' and save the values with 'dscli config set'")
 	}
@@ -76,16 +84,15 @@ func (c *AskCmd) Run(app *App, ctx context.Context) error {
 		UserAgent: c.UserAgent,
 	}, c.Timeout, c.clientBase)
 
-	// Stateless: one fresh session per call, deleted when done.
-	sessionID, err := client.CreateChatSession(ctx)
+	// By default the persisted default session is resumed (created + saved on
+	// first use); --no-persist runs in a fresh session deleted afterwards.
+	sessionID, trusted, cleanup, err := resolveDefaultSession(ctx, client, c.cfgPath, c.NoPersist)
 	if err != nil {
 		return fmt.Errorf("create chat session: %w", err)
 	}
-	defer func() {
-		if err := client.DeleteSessions(context.Background(), []string{sessionID}); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to delete session: %v\n", err)
-		}
-	}()
+	if cleanup != nil {
+		defer cleanup()
+	}
 
 	var last byte
 	write := func(delta string) error {
@@ -98,16 +105,27 @@ func (c *AskCmd) Run(app *App, ctx context.Context) error {
 		_, err := os.Stdout.WriteString(delta)
 		return err
 	}
-	reply, err := client.StreamCompletion(ctx, deepseek.CompletionRequest{
-		ChatSessionID:   sessionID,
-		Prompt:          prompt,
-		ModelType:       effectiveModel(c.Model),
-		ThinkingEnabled: c.Thinking,
-		SearchEnabled:   c.Search,
-	}, write)
+	var reply deepseek.Reply
+	var usedSession string
+	usedSession, err = recoverStaleSession(ctx, client, c.cfgPath, sessionID, trusted, func(sid string) error {
+		sess, parent := splitConversation(sid)
+		r, e := client.StreamCompletion(ctx, deepseek.CompletionRequest{
+			ChatSessionID:   sess,
+			ParentMessageID: parent,
+			Prompt:          prompt,
+			ModelType:       effectiveModel(c.Model),
+			ThinkingEnabled: c.Thinking,
+			SearchEnabled:   c.Search,
+		}, write)
+		if e == nil {
+			reply = r
+		}
+		return e
+	})
 	if err != nil {
 		return err
 	}
+	persistConversation(c.cfgPath, c.NoPersist, advanceConversation(usedSession, reply.MessageID))
 	if c.JSONOut {
 		if len(reply.Sources) > 0 {
 			return json.NewEncoder(os.Stdout).Encode(map[string]any{"sources": reply.Sources})

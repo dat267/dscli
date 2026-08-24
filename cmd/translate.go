@@ -31,11 +31,20 @@ type TranslateCmd struct {
 
 	Model string `short:"m" help:"Model: default (Instant) or expert" default:""`
 
+	NoPersist bool `help:"Do not persist or reuse the default session; the session is deleted when the run ends"`
+
 	// clientBase overrides the API base URL for tests.
 	clientBase string
+
+	// cfgPath is the config file path used for session persistence; set from
+	// app in Run.
+	cfgPath string
 }
 
 func (c *TranslateCmd) Run(app *App, ctx context.Context) error {
+	if app != nil {
+		c.cfgPath = app.CfgPath()
+	}
 	if c.Token == "" {
 		return errors.New("no DeepSeek session configured: pass --token/--cookie (or DS_TOKEN/DS_COOKIE) or run 'dscli login' and save the values with 'dscli config set'")
 	}
@@ -63,15 +72,15 @@ func (c *TranslateCmd) Run(app *App, ctx context.Context) error {
 		UserAgent: c.UserAgent,
 	}, c.Timeout, c.clientBase)
 
-	sessionID, err := client.CreateChatSession(ctx)
+	// By default the persisted default session is resumed (created + saved on
+	// first use); --no-persist runs in a fresh session deleted afterwards.
+	sessionID, trusted, cleanup, err := resolveDefaultSession(ctx, client, c.cfgPath, c.NoPersist)
 	if err != nil {
 		return fmt.Errorf("create chat session: %w", err)
 	}
-	defer func() {
-		if err := client.DeleteSessions(context.Background(), []string{sessionID}); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to delete session: %v\n", err)
-		}
-	}()
+	if cleanup != nil {
+		defer cleanup()
+	}
 
 	style, err := translate.ResolveStyle(c.Instructions, c.From, c.To)
 	if err != nil {
@@ -81,19 +90,28 @@ func (c *TranslateCmd) Run(app *App, ctx context.Context) error {
 	fmt.Fprintf(os.Stderr, "translating %s → %s (%s, %d chunks from %s to %s)\n",
 		c.File, out, format, len(chunks), c.From, c.To)
 
-	result, err := translate.Translate(ctx, client, sessionID, content, format, translate.Options{
-		From:       c.From,
-		To:         c.To,
-		Model:      effectiveModel(c.Model),
-		ChunkBytes: c.ChunkBytes,
-		Style:      style,
-		OnChunk: func(chunk, total int) {
-			fmt.Fprintf(os.Stderr, "  chunk %d/%d ok\n", chunk, total)
-		},
+	var result, convID string
+	_, err = recoverStaleSession(ctx, client, c.cfgPath, sessionID, trusted, func(sid string) error {
+		r, cid, e := translate.Translate(ctx, client, sid, content, format, translate.Options{
+			From:       c.From,
+			To:         c.To,
+			Model:      effectiveModel(c.Model),
+			ChunkBytes: c.ChunkBytes,
+			Style:      style,
+			OnChunk: func(chunk, total int) {
+				fmt.Fprintf(os.Stderr, "  chunk %d/%d ok\n", chunk, total)
+			},
+		})
+		if e == nil {
+			result = r
+			convID = cid
+		}
+		return e
 	})
 	if err != nil {
 		return err
 	}
+	persistConversation(c.cfgPath, c.NoPersist, convID)
 	if err := os.WriteFile(out, []byte(result), 0644); err != nil {
 		return fmt.Errorf("write output: %w", err)
 	}

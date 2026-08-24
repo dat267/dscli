@@ -201,8 +201,9 @@ func Prompt(format, from, to string, reminder bool, style string) string {
 // Translate runs the chunked translation over sessionID (which must already
 // exist), carrying the conversation id turn by turn. Structural formats are
 // verified per chunk and retried once when corrupted. Returns the assembled
-// translated text, always newline-terminated.
-func Translate(ctx context.Context, client *deepseek.Client, sessionID string, content []byte, format string, opts Options) (string, error) {
+// translated text (always newline-terminated), the final conversation id
+// (session:message) for resuming the thread, and any error.
+func Translate(ctx context.Context, client *deepseek.Client, sessionID string, content []byte, format string, opts Options) (string, string, error) {
 	chunkBytes := opts.ChunkBytes
 	if chunkBytes <= 0 {
 		chunkBytes = DefaultChunkBytes
@@ -265,10 +266,10 @@ func Translate(ctx context.Context, client *deepseek.Client, sessionID string, c
 	}
 	for _, chunk := range chunks {
 		if err := translateOne(chunk, 0); err != nil {
-			return "", err
+			return "", conversation, err
 		}
 	}
-	return strings.TrimSpace(strings.Join(translated, "\n")) + "\n", nil
+	return strings.TrimSpace(strings.Join(translated, "\n")) + "\n", conversation, nil
 }
 
 // splitTextAt splits s into two pieces around at, preferring a line

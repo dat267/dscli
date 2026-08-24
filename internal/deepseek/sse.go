@@ -157,15 +157,20 @@ func (p *patchParser) applyPatch(path string, v any, op string, emit func(string
 		return nil
 	}
 	switch op {
-	case "APPEND":
+	case "APPEND", "":
+		// APPEND continues the content slot. An op-less frame (no "o") is
+		// ALSO a continuation: the real stream continues the RESPONSE
+		// fragment's content with {"p":"response/fragments/-1/content","v":...}
+		// after the container-append emitted the first token — treating it as
+		// a full-slot SET drops that chunk and corrupts the reply.
 		if txt, ok := textOf(v); ok {
 			p.markEmitted(idx)
 			return emit(txt)
 		}
-	case "", "SET":
-		// SET (or an op-less frame) replaces the whole content slot of a
-		// fragment; it is the initial text when we have not emitted that
-		// fragment's content yet, and a no-op afterwards (no duplicates).
+	case "SET":
+		// SET replaces the whole content slot of a fragment; it is the
+		// initial text when we have not emitted that fragment's content yet,
+		// and a no-op afterwards (no duplicates).
 		if !p.fragWasEmitted(idx) {
 			if txt, ok := textOf(v); ok {
 				if err := emit(txt); err != nil {
@@ -187,7 +192,8 @@ func (p *patchParser) registerFragment(fm map[string]any) {
 }
 
 // fragIndexAt resolves the container index a content path targets
-// ("response/fragments/-1/content" -> last); -1 when unresolvable.
+// ("response/fragments/-1/content" -> the last RESPONSE fragment, else the
+// literal last); -1 when unresolvable.
 func (p *patchParser) fragIndexAt(path string) int {
 	i := strings.Index(path, "fragments/")
 	if i < 0 {
@@ -196,6 +202,12 @@ func (p *patchParser) fragIndexAt(path string) int {
 	rest := path[i+len("fragments/"):]
 	idxStr, _, _ := strings.Cut(rest, "/")
 	if idxStr == "-1" {
+		// "-1" means "the fragment whose content is streaming": always the
+		// most recent RESPONSE fragment. A THINK fragment appended afterwards
+		// (interleaved reasoning) must not hijack the content routing.
+		if r := p.lastResponseIdx(); r >= 0 {
+			return r
+		}
 		return len(p.fragKinds) - 1
 	}
 	n, err := strconv.Atoi(idxStr)
@@ -203,6 +215,18 @@ func (p *patchParser) fragIndexAt(path string) int {
 		return -1
 	}
 	return n
+}
+
+// lastResponseIdx returns the index of the most recent RESPONSE fragment, or
+// -1 when none has been registered. Content and pathless chunks continue the
+// RESPONSE fragment, never a THINK/SEARCH fragment.
+func (p *patchParser) lastResponseIdx() int {
+	for i := len(p.fragKinds) - 1; i >= 0; i-- {
+		if strings.EqualFold(p.fragKinds[i], "response") {
+			return i
+		}
+	}
+	return -1
 }
 
 func (p *patchParser) fragType(i int) string {
@@ -259,23 +283,25 @@ func (p *patchParser) applyFragments(v any, emit func(string) error) error {
 	return nil
 }
 
-// applyPathless emits a pathless chunk. Pathless chunks continue the most
-// recent fragment's content, so they are answer text only when the last
-// fragment is a RESPONSE fragment (or none is known yet); thinking/search
-// content arriving pathless is skipped.
+// applyPathless emits a pathless chunk. Pathless string chunks are visible
+// answer text (per the upstream reconstruction rules). Before the first
+// RESPONSE fragment they belong to the still-streaming THINK/SEARCH fragments
+// and must never render as answer text; once a RESPONSE fragment exists they
+// continue it — even when a THINK fragment was appended in between
+// (interleaved reasoning) or a status/results frame landed between two chunks
+// (DeepThink streams do this). The active path is deliberately NOT consulted:
+// a non-content frame interleaved between answer chunks must not swallow the
+// next chunk.
 func (p *patchParser) applyPathless(v any, emit func(string) error) error {
-	if p.activePath != "" && !strings.HasSuffix(p.activePath, "content") {
-		return nil
-	}
-	last := len(p.fragKinds) - 1
-	if last >= 0 && !strings.EqualFold(p.fragKinds[last], "response") {
+	idx := p.lastResponseIdx()
+	if idx < 0 && len(p.fragKinds) > 0 {
 		return nil
 	}
 	txt, ok := textOf(v)
 	if !ok {
 		return nil
 	}
-	p.markEmitted(last)
+	p.markEmitted(idx)
 	return emit(txt)
 }
 
