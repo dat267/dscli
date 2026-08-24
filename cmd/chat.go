@@ -36,14 +36,8 @@ type ChatCmd struct {
 	FileTools    bool   `help:"Let the model inspect and edit files in the working directory and fetch URLs (writes always ask for confirmation first)"`
 	NoPersist    bool   `help:"Do not persist or reuse the default session; the session is deleted when the run ends"`
 	Instructions string `help:"Custom translation instructions file for translate_file (default: translate/<from>-<to>.md, then a built-in general style)"`
-	ChatStyle    string `help:"Instruction file used to retry a filtered or cut-off reply (default: chat/chat.md, then chat/default.md, then a built-in style)"`
 	Workdir      string `help:"Working directory for file tools" default:"."`
 	MaxRead      int    `help:"Max bytes read_file and fetch_url will return; oversized or binary files/responses are rejected (default: 512 KiB)" default:"0"`
-
-	// chatStyle and chatStyleResolved hold the lazily-resolved general-chat
-	// instruction (see oneTurn).
-	chatStyle         string
-	chatStyleResolved bool
 
 	// confirm overrides the write-confirmation prompt (used by `do -y` to
 	// auto-approve every write, and the TUI to prompt in-app); nil falls back
@@ -143,40 +137,12 @@ func (c *ChatCmd) newClient() *deepseek.Client {
 // oneTurn asks one question in the given conversation, feeding every reply
 // delta to write, and returns the conversation id to use on the NEXT turn
 // ("<session_id>:<message_id>").
-//
-// The chat style is only used as a fallback: the prompt is sent as-is first,
-// and if the reply is cut off / content-filtered (a refusal), it is retried
-// once with the style prepended. Normal conversations never carry the style
-// block.
 func (c *ChatCmd) oneTurn(ctx context.Context, client *deepseek.Client, conversation, prompt, model string, write func(string) error, sources *[]deepseek.Source) (string, error) {
-	if !c.chatStyleResolved {
-		c.chatStyleResolved = true
-		s, err := ResolveChatStyle(c.ChatStyle)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: %v; using the built-in chat style\n", err)
-			s = DefaultChatStyle()
-		}
-		c.chatStyle = s
-	}
-	convID, rejected, err := c.completion(ctx, client, conversation, prompt, model, write, sources)
-	if err != nil {
-		return "", err
-	}
-	if rejected && c.chatStyle != "" {
-		c.showPreview("reply was filtered; retrying with the chat style")
-		convID, _, err = c.completion(ctx, client, convID, c.chatStyle+"\n\n"+prompt, model, write, sources)
-	}
-	return convID, err
-}
-
-// completion sends one completion request and returns the next conversation
-// id, whether the reply was cut off / content-filtered, and any error.
-func (c *ChatCmd) completion(ctx context.Context, client *deepseek.Client, conversation, prompt, model string, write func(string) error, sources *[]deepseek.Source) (string, bool, error) {
 	sessionID, parentID := splitConversation(conversation)
 	if sessionID == "" {
 		sid, err := client.CreateChatSession(ctx)
 		if err != nil {
-			return "", false, fmt.Errorf("create chat session: %w", err)
+			return "", fmt.Errorf("create chat session: %w", err)
 		}
 		sessionID = sid
 	}
@@ -196,12 +162,15 @@ func (c *ChatCmd) completion(ctx context.Context, client *deepseek.Client, conve
 		SearchEnabled:   c.Search,
 	}, write)
 	if err != nil {
-		return "", false, err
+		return "", err
 	}
 	if sources != nil {
 		*sources = reply.Sources
 	}
-	return conversationID(sessionID, parentID, reply.MessageID), reply.Truncated, nil
+	if reply.Filtered {
+		c.showPreview("reply was filtered by DeepSeek (content policy)")
+	}
+	return conversationID(sessionID, parentID, reply.MessageID), nil
 }
 
 // deltaWriter returns the writer that renders reply deltas to the user:

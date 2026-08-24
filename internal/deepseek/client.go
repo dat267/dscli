@@ -307,6 +307,10 @@ type Reply struct {
 	// (INCOMPLETE/WIP/AUTO_CONTINUE/CONTENT_FILTER) rather than FINISHED —
 	// i.e. the model stopped at its output limit. Callers may retry.
 	Truncated bool
+	// Filtered is true when the stream ended with CONTENT_FILTER: the reply
+	// was rejected by the content-safety filter (a censor), distinct from a
+	// plain output-length cut-off.
+	Filtered bool
 }
 
 // Source is one search citation.
@@ -373,7 +377,7 @@ func (c *Client) streamOnce(ctx context.Context, req CompletionRequest, pow stri
 	if parser.messageID != nil {
 		messageID = *parser.messageID
 	}
-	return Reply{MessageID: messageID, Sources: parser.sources, Truncated: parser.truncated}, nil
+	return Reply{MessageID: messageID, Sources: parser.sources, Truncated: parser.truncated, Filtered: parser.filtered}, nil
 }
 
 // readSSE reads an SSE stream, joining each event's "data:" lines and calling

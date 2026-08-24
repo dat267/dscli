@@ -38,6 +38,9 @@ func TestSSEStatusDetection(t *testing.T) {
 	if !p.truncated {
 		t.Error("CONTENT_FILTER status should mark the reply truncated")
 	}
+	if !p.filtered {
+		t.Error("CONTENT_FILTER status should mark the reply filtered")
+	}
 	if p.finished {
 		t.Error("CONTENT_FILTER must not mark finished")
 	}
@@ -51,6 +54,20 @@ func TestSSEStatusDetection(t *testing.T) {
 	}
 	if p2.truncated {
 		t.Error("FINISHED must not mark truncated")
+	}
+	if p2.filtered {
+		t.Error("FINISHED must not mark filtered")
+	}
+
+	// INCOMPLETE means a cut-off reply, but NOT a content-filter rejection.
+	p4 := &patchParser{}
+	feed(t, p4, `{"v":{"response":{"fragments":[{"type":"response","content":"partial"}]}}}`)
+	feed(t, p4, `{"p":"response/status","o":"SET","v":"INCOMPLETE"}`)
+	if !p4.truncated {
+		t.Error("INCOMPLETE should mark the reply truncated")
+	}
+	if p4.filtered {
+		t.Error("INCOMPLETE must not mark filtered")
 	}
 
 	// A transient WIP followed by a clean FINISHED is NOT truncated — a

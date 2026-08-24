@@ -26,8 +26,6 @@ type AskCmd struct {
 	JSONOut   bool          `help:"Emit NDJSON: one {\"delta\":...} line per chunk, then a {\"sources\":[...]} line when search returned citations"`
 	Timeout   time.Duration `help:"Overall budget (0 = no limit)" default:"15m"`
 
-	ChatStyle string `help:"Instruction file used to retry a filtered or cut-off reply (default: chat/chat.md, then chat/default.md, then a built-in style)"`
-
 	Token     string `env:"DS_TOKEN" help:"DeepSeek user token (localStorage.userToken). Alternatively: config set token"`
 	Cookie    string `env:"DS_COOKIE" help:"DeepSeek ds_session_id cookie value. Alternatively: config set cookie"`
 	UserAgent string `env:"DS_USER_AGENT" help:"Browser user-agent; some deployments reject non-browser UAs"`
@@ -79,10 +77,6 @@ func (c *AskCmd) Run(app *App, ctx context.Context) error {
 	if prompt == "" {
 		return errors.New("nothing to ask: pass a prompt or pipe input on stdin")
 	}
-	style, err := ResolveChatStyle(c.ChatStyle)
-	if err != nil {
-		return err
-	}
 
 	client := deepseek.NewClient(deepseek.Session{
 		Token:     c.Token,
@@ -127,22 +121,8 @@ func (c *AskCmd) Run(app *App, ctx context.Context) error {
 			return e
 		}
 		reply = r
-		// The style is a fallback: only when the reply is cut off /
-		// content-filtered is it retried once with the style prepended.
-		if reply.Truncated && style != "" {
-			next := reply.MessageID
-			r2, e2 := client.StreamCompletion(ctx, deepseek.CompletionRequest{
-				ChatSessionID:   sess,
-				ParentMessageID: &next,
-				Prompt:          style + "\n\n" + prompt,
-				ModelType:       effectiveModel(c.Model),
-				ThinkingEnabled: c.Thinking,
-				SearchEnabled:   c.Search,
-			}, write)
-			if e2 != nil {
-				return e2
-			}
-			reply = r2
+		if reply.Filtered {
+			fmt.Fprintln(os.Stderr, "reply was filtered by DeepSeek (content policy)")
 		}
 		return nil
 	})

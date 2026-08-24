@@ -32,6 +32,10 @@ type patchParser struct {
 	// model cut off at its output limit.
 	finished  bool
 	truncated bool
+	// filtered is true when the stream ended with a CONTENT_FILTER status:
+	// the reply was rejected by the content-safety filter rather than cut off
+	// at the output limit.
+	filtered bool
 	// Fragments are tracked in container order so content updates can be
 	// attributed to their owning fragment: THINK/SEARCH/TIP fragments must
 	// never render as answer text, and SET (full-slot replace) only applies
@@ -58,7 +62,11 @@ func (p *patchParser) noteStatus(path string, v any) {
 		// A clean end overrides any earlier transient WIP/INCOMPLETE signal.
 		p.finished = true
 		p.truncated = false
-	case "INCOMPLETE", "WIP", "AUTO_CONTINUE", "CONTENT_FILTER":
+		p.filtered = false
+	case "CONTENT_FILTER":
+		p.truncated = true
+		p.filtered = true
+	case "INCOMPLETE", "WIP", "AUTO_CONTINUE":
 		p.truncated = true
 	}
 }

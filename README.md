@@ -120,15 +120,10 @@ assistant's replies. `/new` starts a fresh conversation, `/clear` forgets the
 persisted default session and starts a fresh one (`/clear --delete` also
 removes the old thread server-side), and `/tools` toggles the file tools.
 
-**Chat style.** General-chat turns (`chat`, `ask`, `do`) are sent as-is
-first; only when the reply is cut off or content-filtered (a refusal) is the
-turn retried once with a short instruction block prepended that frames the
-assistant as a general creative-writing partner, so mature and explicit
-content is handled directly instead of refused or watered down. Normal
-conversations never carry the block. Override it by dropping a
-`chat/chat.md` (or `chat/default.md`) into `./chat/` or
-`~/.config/dscli/chat/`, or point `--chat-style` at any file; an empty file
-disables the retry. Translation keeps its own separate style (see below).
+**Censorship.** Prompts are sent exactly as written — no hidden instructions.
+If DeepSeek's content filter rejects a reply, the CLI just prints a short
+note ("reply was filtered by DeepSeek") instead of silently returning an
+empty answer. Translation keeps its own separate style (see below).
 
 When stdin or stdout is **not** a terminal (pipes, scripts, `--json-out`), the
 line-based loop is used instead: replies stream to stdout, no prompts or
