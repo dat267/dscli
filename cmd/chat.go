@@ -36,7 +36,7 @@ type ChatCmd struct {
 	FileTools    bool   `help:"Let the model inspect and edit files in the working directory and fetch URLs (writes always ask for confirmation first)"`
 	NoPersist    bool   `help:"Do not persist or reuse the default session; the session is deleted when the run ends"`
 	Instructions string `help:"Custom translation instructions file for translate_file (default: translate/<from>-<to>.md, then a built-in general style)"`
-	ChatStyle    string `help:"Instruction file prepended to every chat turn (default: chat/chat.md, then chat/default.md, then a built-in mature-audience style)"`
+	ChatStyle    string `help:"Instruction file used to retry a filtered or cut-off reply (default: chat/chat.md, then chat/default.md, then a built-in style)"`
 	Workdir      string `help:"Working directory for file tools" default:"."`
 	MaxRead      int    `help:"Max bytes read_file and fetch_url will return; oversized or binary files/responses are rejected (default: 512 KiB)" default:"0"`
 

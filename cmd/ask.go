@@ -26,7 +26,7 @@ type AskCmd struct {
 	JSONOut   bool          `help:"Emit NDJSON: one {\"delta\":...} line per chunk, then a {\"sources\":[...]} line when search returned citations"`
 	Timeout   time.Duration `help:"Overall budget (0 = no limit)" default:"15m"`
 
-	ChatStyle string `help:"Instruction file prepended to the prompt (default: chat/chat.md, then chat/default.md, then a built-in mature-audience style)"`
+	ChatStyle string `help:"Instruction file used to retry a filtered or cut-off reply (default: chat/chat.md, then chat/default.md, then a built-in style)"`
 
 	Token     string `env:"DS_TOKEN" help:"DeepSeek user token (localStorage.userToken). Alternatively: config set token"`
 	Cookie    string `env:"DS_COOKIE" help:"DeepSeek ds_session_id cookie value. Alternatively: config set cookie"`
