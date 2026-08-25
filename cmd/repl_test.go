@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -179,61 +178,6 @@ func TestReplMultilinePipedEndsAtEOF(t *testing.T) {
 	prompt, _ := completionBody(t, rec, 0)
 	if want := "just a continuation \nand its tail"; prompt != want {
 		t.Errorf("prompt = %q, want %q", prompt, want)
-	}
-}
-
-// TestExpandMentions: @path mentions load the referenced file's contents into
-// the prompt inside a <file> block; unresolvable mentions are left as-is.
-func TestExpandMentions(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hello file"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	cmd := &ChatCmd{Workdir: dir}
-
-	got := cmd.expandMentions("summarize @a.txt please")
-	if !strings.Contains(got, "<file path=\"a.txt\">\nhello file\n</file>") {
-		t.Errorf("expandMentions = %q, want the file block", got)
-	}
-	if !strings.HasPrefix(got, "summarize \n") || !strings.HasSuffix(got, "\n please") {
-		t.Errorf("mention expansion should keep surrounding text: %q", got)
-	}
-
-	// A missing file is left exactly as written.
-	if got := cmd.expandMentions("see @nope.txt"); got != "see @nope.txt" {
-		t.Errorf("missing file should be left as-is, got %q", got)
-	}
-	// A plain message without mentions is unchanged.
-	if got := cmd.expandMentions("hello there"); got != "hello there" {
-		t.Errorf("no-mention prompt changed: %q", got)
-	}
-	// A relative mention resolves against Workdir; an absolute one is used
-	// directly.
-	abs := filepath.Join(dir, "a.txt")
-	if got := cmd.expandMentions("read @" + abs); !strings.Contains(got, "<file path=\""+abs+"\">") {
-		t.Errorf("absolute mention not expanded: %q", got)
-	}
-}
-
-// TestExpandMentionsDir: a directory mention expands to a listing of its
-// entries (with a trailing "/" on subdirectories) instead of a literal that
-// could confuse the model.
-func TestExpandMentionsDir(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("x"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	cmd := &ChatCmd{Workdir: dir}
-
-	got := cmd.expandMentions("what's in @. please")
-	if !strings.Contains(got, "<dir path=\".\">") {
-		t.Errorf("expandMentions = %q, want a <dir> block", got)
-	}
-	if !strings.Contains(got, "a.txt") || !strings.Contains(got, "sub/") {
-		t.Errorf("dir listing missing entries: %q", got)
 	}
 }
 

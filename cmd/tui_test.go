@@ -491,84 +491,56 @@ func TestTUISuggestionsVertical(t *testing.T) {
 	}
 }
 
-// TestTUIMentionSuggestions: an @path on the line completes against files in
-// the workdir, replaced in place with the cursor at its end.
-func TestTUIMentionSuggestions(t *testing.T) {
+// TestTUIHandleFile: /file <path> loads a file into a buffer prepended to the
+// next message; repeating the command stacks files one by one.
+func TestTUIHandleFile(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("x"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("contents of a"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("x"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "b.txt"), []byte("contents of b"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(dir, "src"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "src", "main.go"), []byte("x"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	m, _ := tuiHarness(t, nil, dir)
+	m, rec := tuiHarness(t, []string{completionSSE(t, 2, "ok")}, dir)
 
-	m.input.SetValue("summarize @READ")
-	m.updateSuggestions()
-	if len(m.suggestions) != 1 || m.suggestions[0] != "@README.md" {
-		t.Errorf("mentions = %v, want [@README.md]", m.suggestions)
-	}
-	// Tab replaces the typed mention in place; no trailing space for paths.
-	m.input.SetValue("summarize @READ")
-	m.updateSuggestions()
-	m.Update(press(tea.KeyTab))
-	if got := m.input.Value(); got != "summarize @README.md" {
-		t.Errorf("tab mention = %q, want %q", got, "summarize @README.md")
-	}
-	if m.input.col != len([]rune("summarize @README.md")) {
-		t.Errorf("cursor col = %d, want %d", m.input.col, len([]rune("summarize @README.md")))
-	}
-	// A complete existing path yields no suggestions.
-	m.input.SetValue("read @README.md")
-	m.updateSuggestions()
-	if len(m.suggestions) != 0 {
-		t.Errorf("complete path suggested %v, want none", m.suggestions)
-	}
-	// A directory mention is marked with a trailing slash.
-	m.input.SetValue("list @sr")
-	m.updateSuggestions()
-	if len(m.suggestions) != 1 || m.suggestions[0] != "@src/" {
-		t.Errorf("dir mention = %v, want [@src/]", m.suggestions)
-	}
-	// Completing the folder opens its contents as the next suggestions.
-	m.input.SetValue("list @sr")
-	m.updateSuggestions()
+	m.input.SetValue("/file a.txt")
 	m.Update(press(tea.KeyEnter))
-	if got := m.input.Value(); got != "list @src/" {
-		t.Errorf("enter completed dir to %q, want %q", got, "list @src/")
+	if len(m.loaded) != 1 {
+		t.Fatalf("loaded = %d, want 1", len(m.loaded))
 	}
-	if len(m.suggestions) != 1 || m.suggestions[0] != "@src/main.go" {
-		t.Errorf("folder contents = %v, want [@src/main.go]", m.suggestions)
+	if !strings.Contains(m.loaded[0].block, "contents of a") {
+		t.Errorf("loaded block missing file contents: %q", m.loaded[0].block)
 	}
-	// Enter again completes the file and the list collapses.
+	// A second /file stacks the next file one by one.
+	m.input.SetValue("/file b.txt")
 	m.Update(press(tea.KeyEnter))
-	if got := m.input.Value(); got != "list @src/main.go" {
-		t.Errorf("enter completed file to %q, want %q", got, "list @src/main.go")
+	if len(m.loaded) != 2 {
+		t.Fatalf("loaded = %d, want 2", len(m.loaded))
 	}
-	if len(m.suggestions) != 0 {
-		t.Errorf("completed file suggested %v, want none", m.suggestions)
+	// Submitting sends both loaded files ahead of the typed message, then
+	// drops the buffer.
+	m.input.SetValue("summarize these")
+	m.Update(press(tea.KeyEnter))
+	pumpTUI(m)
+	prompt, _ := completionBody(t, rec, 0)
+	if !strings.Contains(prompt, "contents of a") || !strings.Contains(prompt, "contents of b") {
+		t.Errorf("sent prompt missing loaded files:\n%q", prompt)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(prompt), "summarize these") {
+		t.Errorf("sent prompt should end with the typed message:\n%q", prompt)
+	}
+	if len(m.loaded) != 0 {
+		t.Errorf("loaded buffer not cleared after send: %d", len(m.loaded))
 	}
 
-	// Esc from an open list dismisses it without losing the typed message —
-	// the escape hatch out of a folder descent.
-	m.input.SetValue("list @sr")
-	m.updateSuggestions()
-	m.Update(press(tea.KeyEnter)) // descend into @src/
-	if len(m.suggestions) != 1 {
-		t.Fatalf("expected the folder's contents open, got %v", m.suggestions)
+	// A missing file reports an error and loads nothing.
+	m.input.SetValue("/file nope.txt")
+	m.Update(press(tea.KeyEnter))
+	if len(m.loaded) != 0 {
+		t.Errorf("missing file should not load, got %d", len(m.loaded))
 	}
-	m.Update(press(tea.KeyEsc))
-	if len(m.suggestions) != 0 {
-		t.Errorf("esc should dismiss the list, got %v", m.suggestions)
-	}
-	if got := m.input.Value(); got != "list @src/" {
-		t.Errorf("esc lost the typed message: %q", got)
+	if !strings.Contains(m.scroll, "could not load nope.txt") {
+		t.Errorf("missing-file error not shown:\n%q", m.scroll)
 	}
 }
 

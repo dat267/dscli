@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -33,7 +32,7 @@ type ChatCmd struct {
 	UserAgent string `env:"DS_USER_AGENT" help:"Browser user-agent; some deployments reject non-browser UAs"`
 
 	NoPersist bool   `help:"Do not persist or reuse the default session; the session is deleted when the run ends"`
-	Workdir   string `help:"Working directory for @file mentions" default:"."`
+	Workdir   string `help:"Working directory for /file loads" default:"."`
 
 	// answer overrides the reply-text writer (the TUI renders it into its
 	// scrollback); nil falls back to deltaWriter (stdout / NDJSON).
@@ -151,50 +150,39 @@ func (c *ChatCmd) showPreview(text string) {
 
 // turn answers one user message and returns the conversation id for the next
 // turn. It is a single completion; file-tools were removed in favour of the
-// @file mention, so there is no tool loop to run.
+// /file command, so there is no tool loop to run.
 func (c *ChatCmd) turn(ctx context.Context, client *deepseek.Client, conversation, prompt, model string, fileTools bool, note func(string), sources *[]deepseek.Source) (string, error) {
 	return c.oneTurn(ctx, client, conversation, prompt, model, c.answerWriter(), sources)
 }
 
-// maxMentionBytes caps how much of a file an @mention loads into the prompt.
+// maxMentionBytes caps how much of a file /file loads into the prompt.
 const maxMentionBytes = 1 << 20 // 1 MiB
 
-// mentionRE matches an @<path> mention: a path of letters, digits and the
-// path characters / . _ ~ + - (no spaces).
-var mentionRE = regexp.MustCompile(`@[A-Za-z0-9_./~+-]+`)
-
-// expandMentions replaces @<path> mentions in a prompt with what the path
-// refers to (relative to Workdir): a regular file becomes its contents in a
-// <file> block, a directory becomes a listing of its entries in a <dir>
-// block. Used in interactive chat so a path can be dropped into the message
-// with @path. Unresolvable mentions (or files over maxMentionBytes) are
-// left exactly as written.
-func (c *ChatCmd) expandMentions(prompt string) string {
-	return mentionRE.ReplaceAllStringFunc(prompt, func(m string) string {
-		p := strings.TrimPrefix(m, "@")
-		path := p
-		if !filepath.IsAbs(path) {
-			path = filepath.Join(c.Workdir, p)
-		}
-		info, err := os.Stat(path)
-		if err != nil {
-			return m
-		}
-		// A directory mention expands to a listing of its contents, so the
-		// model sees what is in the path instead of a literal "@dir/" that it
-		// may misread.
-		if info.IsDir() {
-			return fmt.Sprintf("\n<dir path=%q>\n%s\n</dir>\n", p, dirListing(path))
-		}
-		if !info.Mode().IsRegular() || info.Size() > maxMentionBytes {
-			return m
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return m
-		}
-		return fmt.Sprintf("\n<file path=%q>\n%s\n</file>\n", p, data)
-	})
+// mentionBlock returns the <file>/<dir> block for a path (relative to
+// Workdir), or "" if the path cannot be loaded (missing, oversized, or not a
+// regular file/directory). Used by the /file command.
+func (c *ChatCmd) mentionBlock(p string) string {
+	path := p
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(c.Workdir, p)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	// A directory expands to a listing of its contents, so the model sees what
+	// is in the path instead of a literal name it may misread.
+	if info.IsDir() {
+		return fmt.Sprintf("\n<dir path=%q>\n%s\n</dir>\n", p, dirListing(path))
+	}
+	if !info.Mode().IsRegular() || info.Size() > maxMentionBytes {
+		return ""
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("\n<file path=%q>\n%s\n</file>\n", p, data)
 }
 
 // maxDirListingEntries caps how many directory entries a @dir mention lists.
@@ -490,7 +478,7 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 			return err
 		}
 		_, err := recoverStaleSession(ctx, client, c.cfgPath, conversation, firstTurn, func(sid string) error {
-			cid, e := c.oneTurn(ctx, client, sid, c.expandMentions(line), model, write, &sources)
+			cid, e := c.oneTurn(ctx, client, sid, line, model, write, &sources)
 			if e == nil {
 				convID = cid
 			}

@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 
@@ -47,7 +45,8 @@ type tuiModel struct {
 	input      tuiInput
 	history    []string
 	histIdx    int
-	draft      string // input stashed while recalling history
+	draft      string       // input stashed while recalling history
+	loaded     []loadedFile // <file>/<dir> blocks stacked by /file, sent with the next message
 
 	busy     bool
 	cancel   context.CancelFunc
@@ -55,22 +54,11 @@ type tuiModel struct {
 
 	suggestions []string
 	suggestIdx  int
-	suggestKind suggestKind
 
 	turns int
 	quit  bool
 	err   error
 }
-
-// suggestKind distinguishes what the suggestion menu is completing, so Tab
-// completes it correctly (a command gets a trailing space, a @mention is
-// replaced in place).
-type suggestKind int
-
-const (
-	suggestCommand suggestKind = iota
-	suggestMention
-)
 
 // stream messages sent by the turn goroutine into the model.
 type streamDelta struct{ text string }
@@ -431,7 +419,26 @@ func (m *tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 	m.addHistory(line)
 	m.appendLine(renderUserLine(line))
 	m.appendLine("") // breathing room before the reply streams
-	return m, m.startTurn(m.chat.expandMentions(line))
+	prompt := line
+	if len(m.loaded) > 0 {
+		// Files loaded via /file are prepended to this message, then dropped.
+		names := make([]string, len(m.loaded))
+		blocks := make([]string, len(m.loaded))
+		for i, f := range m.loaded {
+			names[i] = f.path
+			blocks[i] = f.block
+		}
+		m.appendSystem("attached " + strings.Join(names, ", "))
+		prompt = strings.Join(blocks, "") + "\n" + line
+		m.loaded = nil
+	}
+	return m, m.startTurn(prompt)
+}
+
+// appendSystem renders a system note (file loads, attachments) in a muted
+// style, distinct from the user and assistant text.
+func (m *tuiModel) appendSystem(text string) {
+	m.appendLine(m.u.muted(text))
 }
 
 // renderUserLine styles a submitted user message with a foreground colour so
@@ -488,7 +495,7 @@ func renderHistory(hist []deepseek.HistoryMessage) string {
 func knownCommand(line string) bool {
 	cmd, _, _ := strings.Cut(line, " ")
 	switch cmd {
-	case "/exit", "/quit", "/new", "/help", "/model", "/thinking", "/search", "/clear":
+	case "/exit", "/quit", "/new", "/help", "/model", "/thinking", "/search", "/clear", "/file":
 		return true
 	}
 	return false
@@ -535,60 +542,31 @@ func (m *tuiModel) historyNext() {
 	}
 }
 
-// updateSuggestions recomputes the completion menu from the input's last line:
-// slash commands first, then @file mentions.
+// updateSuggestions recomputes the slash-command completion menu from the
+// input's last line.
 func (m *tuiModel) updateSuggestions() {
 	lines := strings.Split(m.input.Value(), "\n")
-	last := lines[len(lines)-1]
-	if cmds := suggestCommands(last); len(cmds) > 0 {
-		m.suggestions = cmds
-		m.suggestIdx = 0
-		m.suggestKind = suggestCommand
-		return
-	}
-	if ms := suggestMentions(last, m.chat.Workdir); len(ms) > 0 {
-		m.suggestions = ms
-		m.suggestIdx = 0
-		m.suggestKind = suggestMention
-		return
-	}
-	m.suggestions = nil
+	m.suggestions = suggestCommands(lines[len(lines)-1])
+	m.suggestIdx = 0
 }
 
 // completeSuggestion fills in the highlighted suggestion and clears the menu.
 // Commands complete to "<command> " (cursor after the space) when they accept
-// an argument, or just "<command>" when they take none; @mentions replace the
-// typed @path in place with the cursor at its end. Completing a @folder
-// re-opens its contents as the next suggestions, so Enter/Tab can keep
-// descending; completing a file leaves nothing to suggest.
+// an argument, or just "<command>" when they take none.
 func (m *tuiModel) completeSuggestion() {
 	if len(m.suggestions) == 0 {
 		return
 	}
 	s := m.suggestions[m.suggestIdx]
-	lines := strings.Split(m.input.Value(), "\n")
-	last := lines[len(lines)-1]
-	switch m.suggestKind {
-	case suggestCommand:
-		if commandTakesArg(s) {
-			s += " "
-		}
-		lines[len(lines)-1] = s
-		m.input.SetValue(strings.Join(lines, "\n"))
-		m.input.End()
-		m.suggestions = nil
-		m.suggestIdx = 0
-	case suggestMention:
-		if token := mentionToken(last); token != "" {
-			idx := strings.LastIndex(last, token)
-			lines[len(lines)-1] = last[:idx] + s + last[idx+len(token):]
-			m.input.SetValue(strings.Join(lines, "\n"))
-			m.input.End()
-			// A completed directory lists its entries for the next completion;
-			// a completed file resolves to no suggestions.
-			m.updateSuggestions()
-		}
+	if commandTakesArg(s) {
+		s += " "
 	}
+	lines := strings.Split(m.input.Value(), "\n")
+	lines[len(lines)-1] = s
+	m.input.SetValue(strings.Join(lines, "\n"))
+	m.input.End()
+	m.suggestions = nil
+	m.suggestIdx = 0
 }
 
 // noArgCommands are slash commands that take no parameters, so completing
@@ -628,7 +606,7 @@ func suggestCommands(token string) []string {
 		return nil
 	}
 	var out []string
-	for _, c := range []string{"/exit", "/quit", "/new", "/help", "/model", "/thinking", "/search", "/clear"} {
+	for _, c := range []string{"/exit", "/quit", "/new", "/help", "/model", "/thinking", "/search", "/clear", "/file"} {
 		if strings.HasPrefix(c, token) {
 			out = append(out, c)
 		}
@@ -639,70 +617,6 @@ func suggestCommands(token string) []string {
 				out = append(out, "/model "+o)
 			}
 		}
-	}
-	return out
-}
-
-// mentionTokenRE matches an @-mention path token being typed. Unlike the
-// expansion regex it also matches an empty path ("@"), so a bare @ offers the
-// workdir root.
-var mentionTokenRE = regexp.MustCompile(`@[A-Za-z0-9_./~+-]*`)
-
-// mentionToken returns the last @-mention token on a line, or "" when none.
-func mentionToken(line string) string {
-	all := mentionTokenRE.FindAllString(line, -1)
-	if len(all) == 0 {
-		return ""
-	}
-	return all[len(all)-1]
-}
-
-// maxMentionSuggestions caps how many @-mention completions are offered.
-const maxMentionSuggestions = 20
-
-// suggestMentions returns @file completions for a partial @path on the line,
-// listing entries under workdir whose names extend the typed path. An already
-// complete (existing) path yields no suggestions. Directories are marked with
-// a trailing "/" so Tab can keep descending.
-func suggestMentions(line, workdir string) []string {
-	token := mentionToken(line)
-	if token == "" {
-		return nil
-	}
-	partial := strings.TrimPrefix(token, "@")
-	dir, base := filepath.Split(partial)
-	dir = filepath.Clean(dir)
-	if dir == "." || dir == "" {
-		dir = "."
-	}
-	// A resolved file (or the empty-partial case where base is empty but the
-	// dir exists) needs no completion when the path already exists.
-	if base != "" {
-		if _, err := os.Stat(filepath.Join(workdir, partial)); err == nil {
-			return nil
-		}
-	}
-	entries, err := os.ReadDir(filepath.Join(workdir, dir))
-	if err != nil {
-		return nil
-	}
-	var out []string
-	for _, e := range entries {
-		if len(out) >= maxMentionSuggestions {
-			break
-		}
-		name := e.Name()
-		if !strings.HasPrefix(name, base) {
-			continue
-		}
-		rel := name
-		if dir != "." {
-			rel = dir + "/" + name
-		}
-		if e.IsDir() {
-			rel += "/"
-		}
-		out = append(out, "@"+rel)
 	}
 	return out
 }
@@ -721,8 +635,9 @@ func (m *tuiModel) handleCommand(line string) (tea.Model, tea.Cmd) {
 		m.refreshStatus()
 		return m, nil
 	case "/help":
-		m.appendLine(m.u.dim("commands: /exit /quit /new /model /thinking /search /clear /help"))
+		m.appendLine(m.u.dim("commands: /exit /quit /new /model /thinking /search /clear /file /help"))
 		m.appendLine(m.u.dim("  /clear [--delete]  forget the persisted default session (--delete removes it server-side)"))
+		m.appendLine(m.u.dim("  /file <path>       load a file/directory into the message (repeat to stack files)"))
 		m.appendLine(m.u.dim("enter submits · ctrl+j / alt+enter newline · up/down cursor (history at first/last line) · pgup/pgdn/home/end scroll · tab completes /commands"))
 		return m, nil
 	case "/model":
@@ -752,9 +667,37 @@ func (m *tuiModel) handleCommand(line string) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "/clear":
 		return m.handleClearCommand(arg)
+	case "/file":
+		m.handleFileCommand(arg)
+		return m, nil
 	}
 	m.appendLine(m.u.red("unknown command (/help for commands)"))
 	return m, nil
+}
+
+// loadedFile is one file stacked by /file: the path as the user gave it, and
+// the <file>/<dir> block that carries its contents into the next message.
+type loadedFile struct {
+	path  string
+	block string
+}
+
+// handleFileCommand implements `/file <path>`: load the file's (or
+// directory's) contents into a buffer that is prepended to the next submitted
+// message. Repeating the command stacks files one by one.
+func (m *tuiModel) handleFileCommand(path string) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		m.appendLine(m.u.red("usage: /file <path>"))
+		return
+	}
+	block := m.chat.mentionBlock(path)
+	if block == "" {
+		m.appendLine(m.u.red("could not load " + path))
+		return
+	}
+	m.loaded = append(m.loaded, loadedFile{path: path, block: block})
+	m.appendSystem(fmt.Sprintf("loaded %s (%d file(s) in the next message)", path, len(m.loaded)))
 }
 
 // handleClearCommand implements `/clear [--delete]`: forget the persisted
