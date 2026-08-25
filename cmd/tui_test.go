@@ -460,6 +460,35 @@ func TestTUIHistory(t *testing.T) {
 	}
 }
 
+// TestTUIHistoryDraftPreserved: pressing Up to recall history must not lose
+// the currently typed prompt — Down past the newest entry restores it.
+func TestTUIHistoryDraftPreserved(t *testing.T) {
+	m, _ := tuiHarness(t, []string{
+		completionSSE(t, 2, "one"),
+		completionSSE(t, 3, "two"),
+	}, "")
+
+	m.input.SetValue("first")
+	m.Update(press(tea.KeyEnter))
+	pumpTUI(m)
+	m.input.SetValue("second")
+	m.Update(press(tea.KeyEnter))
+	pumpTUI(m)
+
+	// Type a fresh draft, then accidentally press Up: it must be stashed, not
+	// lost.
+	m.input.SetValue("my draft")
+	m.Update(press(tea.KeyUp))
+	if got := m.input.Value(); got != "second" {
+		t.Errorf("up 1 = %q, want second", got)
+	}
+	// Down past the newest entry restores the draft.
+	m.Update(press(tea.KeyDown))
+	if got := m.input.Value(); got != "my draft" {
+		t.Errorf("down past newest = %q, want the stashed draft %q", got, "my draft")
+	}
+}
+
 // TestTUIFileToolsConfirmDenied: a file-tools edit that needs confirmation is
 // routed into the TUI; a deny leaves the file untouched and the model is told
 // not to retry.

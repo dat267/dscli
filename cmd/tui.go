@@ -45,6 +45,7 @@ type tuiModel struct {
 	input      tuiInput
 	history    []string
 	histIdx    int
+	draft      string // input stashed while recalling history
 
 	busy     bool
 	cancel   context.CancelFunc
@@ -472,9 +473,15 @@ func (m *tuiModel) addHistory(p string) {
 	m.histIdx = len(m.history)
 }
 
+// historyPrev recalls the previous entry. Starting a recall from the neutral
+// position stashes the current input as draft, so an accidental Up never loses
+// the typed prompt (Down past the newest entry restores it).
 func (m *tuiModel) historyPrev() {
 	if len(m.history) == 0 {
 		return
+	}
+	if m.histIdx == len(m.history) {
+		m.draft = m.input.Value()
 	}
 	if m.histIdx > 0 {
 		m.histIdx--
@@ -482,14 +489,22 @@ func (m *tuiModel) historyPrev() {
 	}
 }
 
+// historyNext moves forward through recalled entries; past the newest one it
+// restores the stashed draft instead of wiping the input.
 func (m *tuiModel) historyNext() {
+	if m.histIdx >= len(m.history) {
+		return
+	}
+	m.histIdx++
 	if m.histIdx < len(m.history) {
-		m.histIdx++
-		if m.histIdx < len(m.history) {
-			m.input.SetValue(m.history[m.histIdx])
-		} else {
-			m.input.Clear()
-		}
+		m.input.SetValue(m.history[m.histIdx])
+		return
+	}
+	if m.draft != "" {
+		m.input.SetValue(m.draft)
+		m.draft = ""
+	} else {
+		m.input.Clear()
 	}
 }
 
