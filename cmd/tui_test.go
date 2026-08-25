@@ -504,6 +504,9 @@ func TestTUIMentionSuggestions(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "src"), 0755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(dir, "src", "main.go"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
 	m, _ := tuiHarness(t, nil, dir)
 
 	m.input.SetValue("summarize @READ")
@@ -532,6 +535,22 @@ func TestTUIMentionSuggestions(t *testing.T) {
 	m.updateSuggestions()
 	if len(m.suggestions) != 1 || m.suggestions[0] != "@src/" {
 		t.Errorf("dir mention = %v, want [@src/]", m.suggestions)
+	}
+	// Completing the folder opens its contents as the next suggestions.
+	m.Update(press(tea.KeyEnter))
+	if got := m.input.Value(); got != "list @src/" {
+		t.Errorf("enter completed dir to %q, want %q", got, "list @src/")
+	}
+	if len(m.suggestions) != 1 || m.suggestions[0] != "@src/main.go" {
+		t.Errorf("folder contents = %v, want [@src/main.go]", m.suggestions)
+	}
+	// Enter again completes the file; nothing is suggested for it.
+	m.Update(press(tea.KeyEnter))
+	if got := m.input.Value(); got != "list @src/main.go" {
+		t.Errorf("enter completed file to %q, want %q", got, "list @src/main.go")
+	}
+	if len(m.suggestions) != 0 {
+		t.Errorf("completed file suggested %v, want none", m.suggestions)
 	}
 }
 

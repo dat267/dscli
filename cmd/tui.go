@@ -551,7 +551,9 @@ func (m *tuiModel) updateSuggestions() {
 // completeSuggestion fills in the highlighted suggestion and clears the menu.
 // Commands complete to "<command> " (cursor after the space) when they accept
 // an argument, or just "<command>" when they take none; @mentions replace the
-// typed @path in place with the cursor at its end.
+// typed @path in place with the cursor at its end. Completing a @folder
+// re-opens its contents as the next suggestions, so Enter/Tab can keep
+// descending; completing a file leaves nothing to suggest.
 func (m *tuiModel) completeSuggestion() {
 	if len(m.suggestions) == 0 {
 		return
@@ -567,16 +569,19 @@ func (m *tuiModel) completeSuggestion() {
 		lines[len(lines)-1] = s
 		m.input.SetValue(strings.Join(lines, "\n"))
 		m.input.End()
+		m.suggestions = nil
+		m.suggestIdx = 0
 	case suggestMention:
 		if token := mentionToken(last); token != "" {
 			idx := strings.LastIndex(last, token)
 			lines[len(lines)-1] = last[:idx] + s + last[idx+len(token):]
 			m.input.SetValue(strings.Join(lines, "\n"))
 			m.input.End()
+			// A completed directory lists its entries for the next completion;
+			// a completed file resolves to no suggestions.
+			m.updateSuggestions()
 		}
 	}
-	m.suggestions = nil
-	m.suggestIdx = 0
 }
 
 // noArgCommands are slash commands that take no parameters, so completing
