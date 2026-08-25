@@ -795,11 +795,7 @@ func (m *tuiModel) newSession() {
 // and the input (plus any suggestion rows).
 func (m *tuiModel) outputRows() int {
 	inputH := m.inputHeight()
-	extra := 0
-	if len(m.suggestions) > 0 {
-		extra++
-	}
-	rows := m.height - 1 - inputH - extra // 1 = status line
+	rows := m.height - 1 - inputH - m.suggestionRows() // 1 = status line
 	if rows < 0 {
 		return 0
 	}
@@ -996,16 +992,54 @@ func (m *tuiModel) inputHeight() int { return maxInputLines }
 // within it.
 const maxInputLines = 2
 
+// maxSuggestionRows caps how many terminal rows the completion menu occupies
+// before the list scrolls to keep the highlighted item visible.
+const maxSuggestionRows = 8
+
+// suggestionRows returns how many terminal rows the completion menu occupies
+// (0 when no suggestions are shown).
+func (m *tuiModel) suggestionRows() int {
+	n := len(m.suggestions)
+	if n > maxSuggestionRows {
+		return maxSuggestionRows
+	}
+	return n
+}
+
 func (m *tuiModel) renderSuggestions() string {
-	var parts []string
-	for i, s := range m.suggestions {
-		if i == m.suggestIdx {
-			parts = append(parts, lipgloss.NewStyle().Bold(true).Background(lipgloss.Color("236")).Render(s))
-		} else {
-			parts = append(parts, s)
+	n := len(m.suggestions)
+	if n == 0 {
+		return ""
+	}
+	start := 0
+	shown := n
+	if n > maxSuggestionRows {
+		// Keep the highlighted entry visible.
+		start = m.suggestIdx - maxSuggestionRows + 1
+		if start < 0 {
+			start = 0
+		}
+		shown = maxSuggestionRows
+		if start+shown > n {
+			start = n - shown
 		}
 	}
-	return m.u.dim(strings.Join(parts, "  "))
+	var b strings.Builder
+	for i := start; i < start+shown; i++ {
+		if i > start {
+			b.WriteString("\n")
+		}
+		s := m.suggestions[i]
+		if i == m.suggestIdx {
+			b.WriteString(lipgloss.NewStyle().Bold(true).Background(lipgloss.Color("236")).Render(s))
+		} else {
+			b.WriteString(m.u.dim(s))
+		}
+	}
+	if n > maxSuggestionRows {
+		b.WriteString("\n" + m.u.dim(fmt.Sprintf("… %d more", n-maxSuggestionRows)))
+	}
+	return b.String()
 }
 
 // tuiInput is a minimal multi-line text buffer with a cursor, used for the

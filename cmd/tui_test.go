@@ -444,6 +444,42 @@ func TestTUISuggestions(t *testing.T) {
 	}
 }
 
+// TestTUISuggestionsVertical: the completion menu renders one entry per row,
+// and a long list scrolls to keep the highlighted entry visible.
+func TestTUISuggestionsVertical(t *testing.T) {
+	m, _ := tuiHarness(t, nil, "")
+	m.suggestions = []string{"a", "b", "c"}
+	m.suggestIdx = 1
+	got := m.renderSuggestions()
+	if !strings.Contains(got, "\n") {
+		t.Errorf("vertical menu missing line breaks: %q", got)
+	}
+	if m.suggestionRows() != 3 {
+		t.Errorf("suggestionRows = %d, want 3", m.suggestionRows())
+	}
+
+	// A long list is capped; cycling deep keeps the highlight in view.
+	var many []string
+	for i := 0; i < 20; i++ {
+		many = append(many, fmt.Sprintf("item%d", i))
+	}
+	m.suggestions = many
+	m.suggestIdx = 15
+	rows := strings.Split(m.renderSuggestions(), "\n")
+	if len(rows) > maxSuggestionRows+1 {
+		t.Errorf("menu too tall: %d rows", len(rows))
+	}
+	found := false
+	for _, r := range rows {
+		if strings.Contains(r, "item15") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("highlighted item not visible in scrolled menu: %v", rows)
+	}
+}
+
 // TestTUIMentionSuggestions: an @path on the line completes against files in
 // the workdir, replaced in place with the cursor at its end.
 func TestTUIMentionSuggestions(t *testing.T) {
