@@ -122,7 +122,7 @@ func (c *ChatCmd) oneTurn(ctx context.Context, client *deepseek.Client, conversa
 		*sources = reply.Sources
 	}
 	if reply.Filtered {
-		c.showPreview("reply was filtered by DeepSeek (content policy)")
+		c.showPreview("note: reply was filtered by DeepSeek (content policy)")
 	}
 	return conversationID(sessionID, parentID, reply.MessageID), nil
 }
@@ -148,14 +148,23 @@ func (c *ChatCmd) answerWriter() func(string) error {
 	return c.deltaWriter()
 }
 
-// showPreview renders a plan preview or progress line, honouring the TUI
-// override (nil falls back to stderr).
+// showPreview renders a progress or system note, honouring the TUI override
+// (nil falls back to noteToStderr so it reads as a side note rather than chat
+// output).
 func (c *ChatCmd) showPreview(text string) {
 	if c.preview != nil {
 		c.preview(text)
 		return
 	}
-	fmt.Fprintln(os.Stderr, text)
+	noteToStderr(text)
+}
+
+// noteToStderr prints a system note to stderr, muted when stderr is a
+// terminal (so it is visibly a note, not the model's reply); piped output
+// stays plain so scripts are not polluted with escape sequences.
+func noteToStderr(text string) {
+	u := ui{color: isTerminal(os.Stderr)}
+	fmt.Fprintln(os.Stderr, u.muted(text))
 }
 
 // turn answers one user message and returns the conversation id for the next

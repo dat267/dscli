@@ -128,7 +128,7 @@ func (c *AskCmd) Run(app *App, ctx context.Context) error {
 		}
 		reply = r
 		if reply.Filtered {
-			fmt.Fprintln(os.Stderr, "reply was filtered by DeepSeek (content policy)")
+			noteToStderr("note: reply was filtered by DeepSeek (content policy)")
 		}
 		return nil
 	})

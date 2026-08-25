@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/dat267/dscli/internal/deepseek"
 )
 
@@ -74,5 +76,22 @@ func TestChatFilteredNoNoteWhenAccepted(t *testing.T) {
 	})
 	if strings.Contains(stderr, "filtered") {
 		t.Errorf("stderr = %q, want no filtered note for an accepted reply", stderr)
+	}
+}
+
+// TestTUIFilteredNoteStyled: inside the TUI the filtered reply note renders
+// muted grey (visibly not the assistant's reply, which is plain) with a
+// "note:" prefix, instead of sharing the reply's text style.
+func TestTUIFilteredNoteStyled(t *testing.T) {
+	filtered := completionSSE(t, 2, "") + "data: {\"v\":[{\"p\":\"status\",\"v\":\"CONTENT_FILTER\"},{\"p\":\"quasi_status\",\"v\":\"CONTENT_FILTER\"}]}\n\n"
+	m, _ := tuiHarness(t, []string{filtered}, "")
+	m.input.SetValue("hi")
+	m.Update(press(tea.KeyEnter))
+	pumpTUI(m)
+	if !strings.Contains(m.scroll, ansiMuted) {
+		t.Errorf("filtered note not muted grey:\n%q", m.scroll)
+	}
+	if !strings.Contains(m.scroll, "note: reply was filtered by DeepSeek") {
+		t.Errorf("missing note text:\n%q", m.scroll)
 	}
 }

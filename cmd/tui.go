@@ -247,7 +247,10 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.appendText(msg.text)
 		return m, pump(m.streamCh)
 	case streamNote:
-		m.appendLine(m.u.dim(msg.text))
+		// System notes (e.g. the filtered reply note) render muted grey so
+		// they never read as the assistant's reply; plain SGR dim (2m) is
+		// indistinguishable from normal text on many terminals.
+		m.appendLine(m.u.muted(msg.text))
 		return m, pump(m.streamCh)
 	case streamDone:
 		m.busy = false
