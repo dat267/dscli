@@ -47,6 +47,11 @@ const (
 	// defaultCapBytes is the model's per-reply output cap used until a real
 	// truncation is observed (the site cuts replies around 36 KiB).
 	defaultCapBytes = 36 * 1024
+	// thinkingCapBytes is the assumed per-reply output cap when DeepThink
+	// reasoning is enabled: the reasoning model allows far longer replies than
+	// Instant, so chunks are sized bigger (fewer, longer generations). The
+	// real cap is still learned from the first truncation either way.
+	thinkingCapBytes = 3 * defaultCapBytes
 	// outputCapMargin keeps a sized chunk's expected output safely short of
 	// the cap, so it stops generating before the cut-off point.
 	outputCapMargin = 0.85
@@ -278,6 +283,9 @@ func Translate(ctx context.Context, client *deepseek.Client, sessionID string, c
 	conversation := sessionID
 	var translated []string
 	capBytes := defaultCapBytes
+	if opts.Thinking {
+		capBytes = thinkingCapBytes
+	}
 	inOutRatio := 0.0 // output/input byte ratio, learned from the first complete chunk
 	growOK := true    // allow growing the chunk size only until the first truncation
 	offset := 0

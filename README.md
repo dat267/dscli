@@ -509,8 +509,10 @@ dscli translate -f lyrics.lrc -o lyrics.lrc    # overwrite the source in place
   off the chunk size shrinks and that chunk is retried, so an incomplete
   result is never silently written. `--chunk-bytes N` is an upper bound on
   chunk size, not a fixed size.
-- `--thinking`/`-t` enables DeepThink reasoning per chunk (optional; it does
-  not change the output cap, but some prefer it for complex prose).
+- `--thinking`/`-t` enables DeepThink reasoning per chunk. The reasoning
+  model allows far longer replies than Instant, so chunks are sized bigger
+  (roughly 3×) and a file needs fewer generations — the real output cap is
+  still learned from the first truncation either way.
 - **Structural awareness for every subtitle/lyric format:** after every
   chunk the CLI verifies that the structure survived byte-for-byte — LRC
   `[mm:ss.xx]` timecodes, SRT `HH:MM:SS,mmm --> ...` timing lines, WebVTT
