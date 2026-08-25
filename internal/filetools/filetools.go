@@ -164,6 +164,19 @@ func Extract(text string) (Call, bool) {
 	return Call{}, false
 }
 
+// LikelyToolCall reports whether text embeds a tool-call-shaped JSON object
+// (a ```json fence or a balanced {"tool":...} object), even when it did not
+// parse as a valid Call. The chat loop uses it to keep a malformed tool call
+// out of the visible chat and re-prompt the model instead of rendering the
+// raw JSON.
+func LikelyToolCall(text string) bool {
+	if _, ok := fencedJSON(text); ok {
+		return true
+	}
+	_, ok := braceObject(text)
+	return ok
+}
+
 func valid(c Call) bool {
 	switch c.Tool {
 	case "read_file", "list_directory", "file_meta", "create_file", "delete_file":

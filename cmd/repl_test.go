@@ -302,6 +302,45 @@ func turnWith(t *testing.T, cmd *ChatCmd, client *deepseek.Client, prompt string
 	return convID, stdout, stderr, err
 }
 
+// TestFileToolsMalformedCallRetried: a reply shaped like a tool call but not
+// valid (missing required fields) is corrected and re-issued instead of
+// leaking raw JSON into the chat.
+func TestFileToolsMalformedCallRetried(t *testing.T) {
+	malformed := `{"tool":"edit_file","path":"a.txt"}` // missing old/new
+	srv, rec := fakeDeepSeekServerWith(t, []string{
+		completionSSE(t, 2, malformed),
+		completionSSE(t, 3, "Done."),
+	})
+	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
+	cmd := &ChatCmd{Workdir: t.TempDir()}
+
+	var note strings.Builder
+	convID, stdout, _, err := turnWith(t, cmd, client, "edit the file", &note)
+	if err != nil {
+		t.Fatalf("turn: %v", err)
+	}
+	if stdout != "Done.\n" {
+		t.Errorf("stdout = %q, want only the final prose", stdout)
+	}
+	if strings.Contains(stdout, `"tool"`) || strings.Contains(stdout, `edit_file`) {
+		t.Errorf("malformed tool JSON leaked to stdout: %q", stdout)
+	}
+	if !strings.Contains(note.String(), "malformed tool call") {
+		t.Errorf("missing retry note: %q", note.String())
+	}
+	if convID != "sess-1:3" {
+		t.Errorf("convID = %q", convID)
+	}
+	// The correction (not the raw JSON) was fed back for the re-issue.
+	prompt, parent := completionBody(t, rec, 1)
+	if !strings.Contains(prompt, "not a valid tool call") {
+		t.Errorf("correction not fed back:\n%s", prompt)
+	}
+	if parent != float64(2) {
+		t.Errorf("re-issue parent_message_id = %v, want 2 (the malformed message)", parent)
+	}
+}
+
 // TestFileToolsReadLoop: the model asks to read a file, gets its content fed
 // back, then answers in prose. The raw JSON never reaches stdout.
 func TestFileToolsReadLoop(t *testing.T) {

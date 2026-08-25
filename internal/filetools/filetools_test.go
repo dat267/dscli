@@ -14,6 +14,25 @@ import (
 	"testing"
 )
 
+func TestLikelyToolCall(t *testing.T) {
+	cases := []struct {
+		text string
+		want bool
+	}{
+		{`{"tool":"read_file","path":"a.go"}`, true},
+		{`{"tool":"edit_file","path":"a.go"}`, true}, // missing old/new: shaped but invalid
+		{"Here:\n```json\n{\"tool\":\"read_file\",\"path\":\"a\"}\n```", true},
+		{"prose before\n{\"tool\":\"grep\",\"pattern\":\"x\"}\nthen prose", true},
+		{"just a plain final answer", false},
+		{"the config has a tool but no object", false},
+	}
+	for _, tc := range cases {
+		if got := LikelyToolCall(tc.text); got != tc.want {
+			t.Errorf("LikelyToolCall(%q) = %v, want %v", tc.text, got, tc.want)
+		}
+	}
+}
+
 func TestExtract(t *testing.T) {
 	t.Run("exact json", func(t *testing.T) {
 		c, ok := Extract(`{"tool":"read_file","path":"src/main.go"}`)

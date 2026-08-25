@@ -237,6 +237,17 @@ func (c *ChatCmd) turn(ctx context.Context, client *deepseek.Client, conversatio
 
 		call, ok := filetools.Extract(buf.String())
 		if !ok {
+			// A reply shaped like a tool call but not valid (missing fields,
+			// prose-wrapped JSON, a broken fence) must not leak raw JSON into
+			// the chat: feed a correction back and let the model re-issue,
+			// bounded by MaxIterations.
+			if filetools.LikelyToolCall(buf.String()) {
+				note("malformed tool call; retrying")
+				curPrompt = filetools.FormatResult("", "",
+					"WARNING: your reply was not a valid tool call JSON. Reply with ONLY a valid tool-call object "+
+						"(one of the tools listed in the instructions) or a plain-text final answer — no prose around the JSON.")
+				continue
+			}
 			// Final answer: render the buffered text now, terminated by a
 			// newline so callers can add a clean blank separator.
 			text := buf.String()
