@@ -35,29 +35,30 @@ func (c *SessionCmdGroup) Run(app *App) error {
 	return nil
 }
 
-// SessionListCmd implements `dscli session list`: list the sessions the CLI
-// knows about locally — those with a saved transcript — most recently used
-// first, marking the persisted default.
-type SessionListCmd struct{}
+// sessionRow is one locally known session for `dscli session list` and the
+// chat /sessions command.
+type sessionRow struct {
+	id    string
+	msgs  int
+	last  string
+	mtime int64
+	def   bool // is the persisted default
+}
 
-func (c *SessionListCmd) Run(app *App) error {
-	cfgPath := app.CfgPath()
+// localSessionRows returns the sessions the CLI knows about locally (those
+// with a saved transcript), most recently used first, with message counts and
+// last-exchange times, marking the persisted default. nil when none exist.
+func localSessionRows(cfgPath string) ([]sessionRow, error) {
 	dir := filepath.Join(filepath.Dir(cfgPath), transcriptDirName)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			fmt.Println("no local sessions (nothing saved yet)")
-			return nil
+			return nil, nil
 		}
-		return fmt.Errorf("read transcripts: %w", err)
+		return nil, fmt.Errorf("read transcripts: %w", err)
 	}
-	type row struct {
-		id    string
-		msgs  int
-		last  string
-		mtime int64
-	}
-	var rows []row
+	saved, _ := splitConversation(loadSavedSession(cfgPath))
+	var rows []sessionRow
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
 			continue
@@ -68,25 +69,44 @@ func (c *SessionListCmd) Run(app *App) error {
 		}
 		path := filepath.Join(dir, e.Name())
 		msgs, last := transcriptSummary(path, info.ModTime().Unix())
-		rows = append(rows, row{
+		rows = append(rows, sessionRow{
 			id:    strings.TrimSuffix(e.Name(), ".jsonl"),
 			msgs:  msgs,
 			last:  last,
 			mtime: info.ModTime().Unix(),
+			def:   strings.TrimSuffix(e.Name(), ".jsonl") == saved,
 		})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].mtime > rows[j].mtime })
+	return rows, nil
+}
+
+// sessionRowText renders one session row for display.
+func sessionRowText(r sessionRow) string {
+	marker := ""
+	if r.def {
+		marker = "  (default)"
+	}
+	return fmt.Sprintf("%-24s %d msgs  last %s%s", r.id, r.msgs, r.last, marker)
+}
+
+// SessionListCmd implements `dscli session list`: list the sessions the CLI
+// knows about locally — those with a saved transcript — most recently used
+// first, marking the persisted default. The same rows back the chat-mode
+// /sessions command.
+type SessionListCmd struct{}
+
+func (c *SessionListCmd) Run(app *App) error {
+	rows, err := localSessionRows(app.CfgPath())
+	if err != nil {
+		return err
 	}
 	if len(rows) == 0 {
 		fmt.Println("no local sessions (nothing saved yet)")
 		return nil
 	}
-	sort.Slice(rows, func(i, j int) bool { return rows[i].mtime > rows[j].mtime })
-	saved, _ := splitConversation(loadSavedSession(cfgPath))
 	for _, r := range rows {
-		marker := ""
-		if r.id == saved {
-			marker = "  (default)"
-		}
-		fmt.Printf("%-24s %d msgs  last %s%s\n", r.id, r.msgs, r.last, marker)
+		fmt.Println(sessionRowText(r))
 	}
 	return nil
 }

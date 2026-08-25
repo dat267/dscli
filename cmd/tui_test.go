@@ -446,6 +446,83 @@ func TestTUITurnSpacing(t *testing.T) {
 	}
 }
 
+// TestTUISessionCommands: /sessions lists the local sessions (default
+// marked); /session <id> switches the live conversation and the persisted
+// default; bare /session shows the current conversation.
+func TestTUISessionCommands(t *testing.T) {
+	m, _ := tuiHarness(t, nil, "")
+	appendTranscript(m.cfgPath, "sess-a", "user", "hi")
+	appendTranscript(m.cfgPath, "sess-a", "assistant", "hello")
+	appendTranscript(m.cfgPath, "sess-b", "user", "yo")
+	if err := saveSession(m.cfgPath, "sess-a"); err != nil {
+		t.Fatal(err)
+	}
+	m.input.SetValue("/sessions")
+	m.Update(press(tea.KeyEnter))
+	for _, want := range []string{"sess-a", "sess-b", "2 msgs", "(default)"} {
+		if !strings.Contains(m.scroll, want) {
+			t.Errorf("/sessions output missing %q:\n%q", want, m.scroll)
+		}
+	}
+
+	m.input.SetValue("/session sess-b")
+	m.Update(press(tea.KeyEnter))
+	if m.conversation != "sess-b" {
+		t.Errorf("conversation = %q, want sess-b (live switch)", m.conversation)
+	}
+	if got := loadSavedSession(m.cfgPath); got != "sess-b" {
+		t.Errorf("persisted default = %q, want sess-b", got)
+	}
+	if !strings.Contains(m.scroll, "switched to session sess-b (1 saved messages") {
+		t.Errorf("missing switch note:\n%q", m.scroll)
+	}
+
+	// Bare /session shows the current conversation.
+	m.input.SetValue("/session")
+	m.Update(press(tea.KeyEnter))
+	if !strings.Contains(m.scroll, "conversation: sess-b") {
+		t.Errorf("missing conversation note:\n%q", m.scroll)
+	}
+
+	// A session without a local transcript is accepted with a note.
+	m.input.SetValue("/session sess-new")
+	m.Update(press(tea.KeyEnter))
+	if m.conversation != "sess-new" {
+		t.Errorf("conversation = %q, want sess-new", m.conversation)
+	}
+	if !strings.Contains(m.scroll, "no local transcript yet") {
+		t.Errorf("missing no-local-transcript note:\n%q", m.scroll)
+	}
+}
+
+// TestReplSessionCommands: the line REPL /sessions lists local sessions and
+// /session <id> switches the conversation used by the next turn.
+func TestReplSessionCommands(t *testing.T) {
+	srv, rec := fakeDeepSeekServerWith(t, []string{completionSSE(t, 2, "ok")})
+	defer srv.Close()
+	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
+	cfgPath := filepath.Join(t.TempDir(), "dscli.json")
+	cmd := &ChatCmd{cfgPath: cfgPath}
+	appendTranscript(cfgPath, "sess-9", "user", "hi")
+
+	var stderr string
+	withStdin(t, "/session sess-9\nhello\n/quit\n", func() {
+		captureStdout(t, func() {
+			stderr = captureStderr(t, func() {
+				_ = cmd.replLoop(context.Background(), client, "", nil, false)
+			})
+		})
+	})
+	if !strings.Contains(stderr, "switched to session sess-9") {
+		t.Errorf("stderr = %q, want the switch note", stderr)
+	}
+	// The next turn ran in the selected session.
+	prompt, _ := completionBody(t, rec, 0)
+	if !strings.Contains(prompt, "hello") {
+		t.Errorf("prompt = %q", prompt)
+	}
+}
+
 func TestTUISlashCommands(t *testing.T) {
 	m, rec := tuiHarness(t, nil, "")
 

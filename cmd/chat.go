@@ -495,6 +495,52 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 			instruction := strings.TrimSpace(strings.TrimPrefix(line, "/resume"))
 			line = resumePrompt(lastPartial, instruction)
 			fmt.Fprintln(os.Stderr, u.note("resuming from the filtered partial reply"))
+		case line == "/sessions":
+			rows, err := localSessionRows(c.cfgPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, u.red("error: "+err.Error()))
+				continue
+			}
+			if len(rows) == 0 {
+				fmt.Fprintln(os.Stderr, u.note("no local sessions (nothing saved yet)"))
+				continue
+			}
+			fmt.Fprintln(os.Stderr, u.note("local sessions (most recent first; the default is resumed on launch):"))
+			for _, r := range rows {
+				fmt.Fprintln(os.Stderr, u.note(sessionRowText(r)))
+			}
+			fmt.Fprintln(os.Stderr)
+			continue
+		case line == "/session" || strings.HasPrefix(line, "/session "):
+			arg := strings.TrimSpace(strings.TrimPrefix(line, "/session"))
+			if arg == "" {
+				if saved := loadSavedSession(c.cfgPath); saved != "" {
+					fmt.Fprintln(os.Stderr, u.note("conversation: "+saved))
+				} else {
+					fmt.Fprintln(os.Stderr, u.note("no persisted session"))
+				}
+				fmt.Fprintln(os.Stderr)
+				continue
+			}
+			bare, _ := splitConversation(arg)
+			if bare == "" {
+				fmt.Fprintln(os.Stderr, u.red("give a session id (see /sessions)"))
+				continue
+			}
+			if err := saveSession(c.cfgPath, bare); err != nil {
+				fmt.Fprintln(os.Stderr, u.red("error: "+err.Error()))
+				continue
+			}
+			if msgs, ok := transcriptCount(c.cfgPath, bare); ok {
+				fmt.Fprintf(os.Stderr, "%s\n", u.note(fmt.Sprintf("switched to session %s (%d saved messages; resumes from its root)", bare, msgs)))
+			} else {
+				fmt.Fprintf(os.Stderr, "%s\n", u.note("switched to session "+bare+" (no local transcript yet)"))
+			}
+			fmt.Fprintln(os.Stderr)
+			// The live chat now continues the selected thread, from its root.
+			conversation = bare
+			lastPartial = ""
+			continue
 		case strings.HasPrefix(line, "/"):
 			fmt.Fprintln(os.Stderr, u.red("unknown command (/help for commands)"))
 			continue
@@ -626,6 +672,8 @@ func printReplHelp(u ui) {
   /thinking [on|off]          toggle DeepThink reasoning
   /search [on|off]            toggle web search
   /resume [instruction]       continue a reply the filter cut off, from its partial text
+  /session [id]               show the current conversation; select a saved session to resume
+  /sessions                   list sessions with saved texts
   /help                       this help
 
 multiline: end a line with \ to continue it on the next line; a lone \ line

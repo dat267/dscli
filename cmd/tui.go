@@ -579,7 +579,7 @@ func renderHistory(hist []deepseek.HistoryMessage) string {
 func knownCommand(line string) bool {
 	cmd, _, _ := strings.Cut(line, " ")
 	switch cmd {
-	case "/exit", "/quit", "/new", "/help", "/model", "/thinking", "/search", "/clear", "/file", "/resume":
+	case "/exit", "/quit", "/new", "/help", "/model", "/thinking", "/search", "/clear", "/file", "/resume", "/session", "/sessions":
 		return true
 	}
 	return false
@@ -661,6 +661,7 @@ func (m *tuiModel) completeSuggestion() {
 // them leaves no trailing space.
 var noArgCommands = map[string]bool{
 	"/exit": true, "/quit": true, "/new": true, "/help": true,
+	"/sessions": true,
 }
 
 // commandTakesArg reports whether a completed command expects a parameter and
@@ -694,7 +695,7 @@ func suggestCommands(token string) []string {
 		return nil
 	}
 	var out []string
-	for _, c := range []string{"/exit", "/quit", "/new", "/help", "/model", "/thinking", "/search", "/clear", "/file", "/resume"} {
+	for _, c := range []string{"/exit", "/quit", "/new", "/help", "/model", "/thinking", "/search", "/clear", "/file", "/resume", "/session", "/sessions"} {
 		if strings.HasPrefix(c, token) {
 			out = append(out, c)
 		}
@@ -723,6 +724,12 @@ func (m *tuiModel) handleCommand(line string) (tea.Model, tea.Cmd) {
 		m.appendLine("")
 		m.refreshStatus()
 		return m, nil
+	case "/sessions":
+		m.handleSessionsCommand()
+		return m, nil
+	case "/session":
+		m.handleSessionCommand(arg)
+		return m, nil
 	case "/resume":
 		// Continue a reply the content filter cut off: the partial text is
 		// sent back as context with a continue instruction. Nothing is
@@ -744,6 +751,8 @@ func (m *tuiModel) handleCommand(line string) (tea.Model, tea.Cmd) {
 		m.appendLine(m.u.note("  /clear [--delete]  forget the persisted default session (--delete removes it server-side)"))
 		m.appendLine(m.u.note("  /file <path>       load a file/directory into the message (repeat to stack files)"))
 		m.appendLine(m.u.note("  /resume [hint]     continue a reply the filter cut off, from its partial text"))
+		m.appendLine(m.u.note("  /session [id]     show the current conversation; select a saved session to resume"))
+		m.appendLine(m.u.note("  /sessions          list sessions with saved texts"))
 		m.appendLine(m.u.note("enter submits · ctrl+j/alt+enter newline · up/down cursor (history at first/last row) · ctrl+left/right word · alt+backspace deletes a word · ctrl+a/e line start/end · tab completes /commands"))
 		m.appendLine(m.u.note("pgup/pgdn/home/end scroll · ctrl+l clears the pane · ctrl+c interrupts a reply (tapped again when idle, quits) · esc dismisses the menu or clears the input"))
 		m.appendLine("")
@@ -840,6 +849,67 @@ func (m *tuiModel) handleClearCommand(arg string) (tea.Model, tea.Cmd) {
 	m.appendLine("")
 	m.refreshStatus()
 	return m, nil
+}
+
+// handleSessionsCommand implements `/sessions`: list the locally saved
+// sessions (most recent first, default marked) in the chat pane.
+func (m *tuiModel) handleSessionsCommand() {
+	rows, err := localSessionRows(m.cfgPath)
+	if err != nil {
+		m.appendLine(m.u.red("error: " + err.Error()))
+		return
+	}
+	if len(rows) == 0 {
+		m.appendLine(m.u.note("no local sessions (nothing saved yet)"))
+		return
+	}
+	m.appendLine(m.u.note("local sessions (most recent first; the default is resumed on launch):"))
+	for _, r := range rows {
+		m.appendLine(m.u.note(sessionRowText(r)))
+	}
+	m.appendLine("")
+}
+
+// handleSessionCommand implements `/session [id]`: with an id it selects a
+// saved session — the live chat switches to it and it becomes the persisted
+// default (resumed from its root); without an id it shows the current
+// conversation.
+func (m *tuiModel) handleSessionCommand(arg string) {
+	if arg == "" {
+		if saved := loadSavedSession(m.cfgPath); saved != "" {
+			m.appendLine(m.u.note("conversation: " + saved))
+		} else {
+			m.appendLine(m.u.note("no persisted session"))
+		}
+		m.appendLine("")
+		return
+	}
+	bare, _ := splitConversation(arg)
+	if bare == "" {
+		m.appendLine(m.u.red("give a session id (see /sessions)"))
+		return
+	}
+	if err := saveSession(m.cfgPath, bare); err != nil {
+		m.appendLine(m.u.red("error: " + err.Error()))
+		return
+	}
+	// The live chat now continues the selected thread, from its root. The
+	// pane is cleared so it stops showing the previous thread, then the
+	// switch is announced.
+	m.conversation = bare
+	m.trusted = false
+	m.firstTurn = false
+	m.lastPartial = ""
+	m.scroll = ""
+	m.viewTop = 0
+	m.autoScroll = true
+	if msgs, ok := transcriptCount(m.cfgPath, bare); ok {
+		m.appendLine(m.u.note(fmt.Sprintf("switched to session %s (%d saved messages; resumes from its root)", bare, msgs)))
+	} else {
+		m.appendLine(m.u.note("switched to session " + bare + " (no local transcript yet)"))
+	}
+	m.appendLine("")
+	m.refreshStatus()
 }
 
 // newSession starts a fresh thread: persisted (saved as the new default) or,

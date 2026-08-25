@@ -128,7 +128,11 @@ lines, **Ctrl+L** clears the pane, and Home / End jump to the top/bottom. When
 a persisted conversation is resumed the past messages are loaded from the
 server into the pane first. User messages render in a foreground colour to
 stand apart from the assistant's replies. `/new` starts a fresh conversation,
-`/clear` forgets the persisted default session and starts a fresh one
+`/sessions` lists the sessions with saved texts (the persisted default
+marked), `/session <id>` switches to an existing one — the live chat resumes
+it from its root and it becomes the default for next launch — and bare
+`/session` shows the current conversation. `/clear` forgets the persisted
+default session and starts a fresh one
 (`/clear --delete` also removes the old thread server-side).
 **`/file <path>`** loads a file's (or directory's) contents (relative to
 `--workdir`, defaulting to `.`) into a buffer that is prepended to the next
