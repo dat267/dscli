@@ -276,7 +276,13 @@ func Translate(ctx context.Context, client *deepseek.Client, sessionID string, c
 		model = "default"
 	}
 	src := string(content)
+	// The probe is only for learning the output density so chunks can be sized
+	// to fill the cap; in think mode the chunk size is a fixed target, so the
+	// first chunk starts there directly (a small file stays a single chunk).
 	chunkBytes := initialChunkBytes
+	if opts.Thinking {
+		chunkBytes = thinkingChunkBytes
+	}
 	if chunkBytes > maxChunk {
 		chunkBytes = maxChunk
 	}

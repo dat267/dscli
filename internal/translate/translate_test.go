@@ -277,15 +277,25 @@ func TestTranslateThinkingBiggerChunks(t *testing.T) {
 		t.Errorf("thinking completions = %d, want fewer than plain (%d)", think, plain)
 	}
 
-	// A 700 KiB file with thinking splits as: probe (8 KiB) + 512 KiB + rest
-	// = 3 completions — the 512 KiB chunk target is used directly.
+	// A 700 KiB file with thinking splits as: 512 KiB + rest = 2 completions —
+	// no separate probe, the 512 KiB chunk target is used from the start.
 	srv3, calls3 := makeSrv()
 	client3 := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv3.URL)
 	if _, _, err := Translate(context.Background(), client3, "sess-1", []byte(strings.Repeat("a", 700*1024)), "text", Options{To: "English", Thinking: true}); err != nil {
 		t.Fatalf("thinking 700KiB: %v", err)
 	}
-	if got := *calls3; got != 3 {
-		t.Errorf("thinking 700 KiB completions = %d, want 3 (probe + 512 KiB + rest)", got)
+	if got := *calls3; got != 2 {
+		t.Errorf("thinking 700 KiB completions = %d, want 2 (512 KiB + rest)", got)
+	}
+
+	// A small file stays a single chunk in think mode.
+	srv4, calls4 := makeSrv()
+	client4 := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv4.URL)
+	if _, _, err := Translate(context.Background(), client4, "sess-1", []byte(strings.Repeat("a", 9*1024)), "text", Options{To: "English", Thinking: true}); err != nil {
+		t.Fatalf("thinking 9KiB: %v", err)
+	}
+	if got := *calls4; got != 1 {
+		t.Errorf("thinking 9 KiB completions = %d, want 1", got)
 	}
 }
 
