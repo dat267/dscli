@@ -161,12 +161,13 @@ func (c *ChatCmd) showPreview(text string) {
 	noteToStderr(text)
 }
 
-// noteToStderr prints a system note to stderr, muted when stderr is a
-// terminal (so it is visibly a note, not the model's reply); piped output
-// stays plain so scripts are not polluted with escape sequences.
+// noteToStderr prints a system note to stderr, dim when stderr is a terminal
+// (so it is visibly a note, not the model's reply — the same dim style the
+// TUI uses for notes); piped output stays plain so scripts are not polluted
+// with escape sequences.
 func noteToStderr(text string) {
 	u := ui{color: isTerminal(os.Stderr)}
-	fmt.Fprintln(os.Stderr, u.muted(text))
+	fmt.Fprintln(os.Stderr, u.dim(text))
 }
 
 // resumePrompt builds the continuation message sent by /resume: the filtered

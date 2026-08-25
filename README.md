@@ -135,8 +135,8 @@ files, and a system note in the chat shows each load and the final
 attachments.
 
 **Censorship.** Prompts are sent exactly as written — no hidden instructions.
-If DeepSeek's content filter rejects a reply, the CLI prints a short muted
-note ("reply was filtered by DeepSeek") instead of silently returning an empty
+If DeepSeek's content filter rejects a reply, the CLI prints a short dim note
+("reply was filtered by DeepSeek") instead of silently returning an empty
 answer. When the filter cuts a reply off mid-stream, the partial text that
 already streamed is kept, and **`/resume [hint]`** (TUI and line REPL) sends it
 back as context with a "continue from where it stopped" instruction — an

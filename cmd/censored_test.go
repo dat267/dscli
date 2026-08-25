@@ -80,15 +80,15 @@ func TestChatFilteredNoNoteWhenAccepted(t *testing.T) {
 }
 
 // TestTUIFilteredNoteStyled: inside the TUI the filtered reply note renders
-// muted grey (visibly not the assistant's reply, which is plain) with a
-// "note:" prefix, instead of sharing the reply's text style.
+// dim (visibly not the assistant's reply, which is plain) with a "note:"
+// prefix, instead of sharing the reply's text style.
 func TestTUIFilteredNoteStyled(t *testing.T) {
 	m, _ := tuiHarness(t, []string{filteredSSE(t, "")}, "")
 	m.input.SetValue("hi")
 	m.Update(press(tea.KeyEnter))
 	pumpTUI(m)
-	if !strings.Contains(m.scroll, ansiMuted) {
-		t.Errorf("filtered note not muted grey:\n%q", m.scroll)
+	if !strings.Contains(m.scroll, ansiDim) {
+		t.Errorf("filtered note not dim:\n%q", m.scroll)
 	}
 	if !strings.Contains(m.scroll, "note: reply was filtered by DeepSeek") {
 		t.Errorf("missing note text:\n%q", m.scroll)
