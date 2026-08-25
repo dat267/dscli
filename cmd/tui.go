@@ -305,8 +305,15 @@ func (m *tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.suggestPrev()
 		return m, nil
 	case "esc":
-		m.input.Clear()
-		m.suggestions = nil
+		if len(m.suggestions) > 0 {
+			// First Esc dismisses the completion menu without losing the
+			// typed message, so you can break out of a folder descent and
+			// submit; a second Esc clears the input.
+			m.suggestions = nil
+			m.suggestIdx = 0
+		} else {
+			m.input.Clear()
+		}
 		return m, nil
 	case "up":
 		if len(m.suggestions) > 0 {

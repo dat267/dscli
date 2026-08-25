@@ -537,6 +537,8 @@ func TestTUIMentionSuggestions(t *testing.T) {
 		t.Errorf("dir mention = %v, want [@src/]", m.suggestions)
 	}
 	// Completing the folder opens its contents as the next suggestions.
+	m.input.SetValue("list @sr")
+	m.updateSuggestions()
 	m.Update(press(tea.KeyEnter))
 	if got := m.input.Value(); got != "list @src/" {
 		t.Errorf("enter completed dir to %q, want %q", got, "list @src/")
@@ -544,13 +546,29 @@ func TestTUIMentionSuggestions(t *testing.T) {
 	if len(m.suggestions) != 1 || m.suggestions[0] != "@src/main.go" {
 		t.Errorf("folder contents = %v, want [@src/main.go]", m.suggestions)
 	}
-	// Enter again completes the file; nothing is suggested for it.
+	// Enter again completes the file and the list collapses.
 	m.Update(press(tea.KeyEnter))
 	if got := m.input.Value(); got != "list @src/main.go" {
 		t.Errorf("enter completed file to %q, want %q", got, "list @src/main.go")
 	}
 	if len(m.suggestions) != 0 {
 		t.Errorf("completed file suggested %v, want none", m.suggestions)
+	}
+
+	// Esc from an open list dismisses it without losing the typed message —
+	// the escape hatch out of a folder descent.
+	m.input.SetValue("list @sr")
+	m.updateSuggestions()
+	m.Update(press(tea.KeyEnter)) // descend into @src/
+	if len(m.suggestions) != 1 {
+		t.Fatalf("expected the folder's contents open, got %v", m.suggestions)
+	}
+	m.Update(press(tea.KeyEsc))
+	if len(m.suggestions) != 0 {
+		t.Errorf("esc should dismiss the list, got %v", m.suggestions)
+	}
+	if got := m.input.Value(); got != "list @src/" {
+		t.Errorf("esc lost the typed message: %q", got)
 	}
 }
 
