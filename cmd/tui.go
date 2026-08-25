@@ -104,7 +104,7 @@ func (m *tuiModel) refreshStatus() {
 	} else if !m.noPersist && m.cfgPath != "" {
 		mode = "persisted"
 	}
-	m.status = m.u.dim(fmt.Sprintf(
+	m.status = m.u.muted(fmt.Sprintf(
 		"DeepSeek · model %s · thinking %s · search %s · tools %s · %s",
 		m.model, onoff(m.thinking), onoff(m.search), onoff(m.fileTools), mode,
 	))
@@ -452,7 +452,7 @@ func (m *tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 // it stands apart from the plain assistant reply (no "you>" prefix — the
 // input box already shows what was typed).
 func renderUserLine(line string) string {
-	return "\x1b[38;5;81m" + line + ansiReset
+	return ansiCyan + line + ansiReset
 }
 
 // knownCommand reports whether line is a complete slash command (with or
@@ -647,9 +647,9 @@ func (m *tuiModel) newSession() {
 }
 
 // outputRows returns how many scrollback lines fit between the status line
-// and the input box (plus any confirm/suggestion rows).
+// and the input (plus any confirm/suggestion rows).
 func (m *tuiModel) outputRows() int {
-	inputH := m.inputHeight() + 2 // box border
+	inputH := m.inputHeight()
 	extra := 0
 	if m.awaitingConfirm {
 		extra++
@@ -807,10 +807,8 @@ func (m *tuiModel) render() string {
 		b.WriteString("\n")
 	}
 
-	// 3. Input box at the bottom.
-	b.WriteString(lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		Render(m.input.render(max(0, m.width))))
+	// 3. Input at the bottom (open textarea with a "::: " prompt).
+	b.WriteString(m.input.render(max(0, m.width)))
 	b.WriteString("\n")
 
 	// 4. Status line below the input (m.status is already dimmed; only
@@ -960,12 +958,19 @@ func (in *tuiInput) Home() { in.col = 0 }
 
 func (in *tuiInput) End() { in.col = len(in.lines[in.row]) }
 
-// render draws the input into a fixed-height (maxInputLines) box: long lines
-// wrap at width-2 columns (the box border), short lines are padded so the box
+// inputPrompt is the prompt glyph shown in front of the input text, styled in
+// the mint accent (Guac).
+const inputPrompt = "::: "
+const inputPromptAnsi = "\x1b[38;2;18;199;143m"
+
+// render draws the input into a fixed-height (maxInputLines) textarea: the
+// text wraps at width-promptW columns, short lines are padded so the input
 // spans the terminal, and the cursor is marked with a block character. The
-// window follows the cursor, so earlier content scrolls out of view.
+// prompt ("::: ") sits at the left of the first visible row and the window
+// follows the cursor, so earlier content scrolls out of view.
 func (in *tuiInput) render(width int) string {
-	boxW := width - 2 // box border sides
+	promptW := len(inputPrompt)
+	boxW := width - promptW
 	if boxW < 1 {
 		boxW = 1
 	}
@@ -1007,10 +1012,15 @@ func (in *tuiInput) render(width int) string {
 			overChar := cursorCol < len(rows[i])
 			s = applyCursor(s, cursorCol, overChar)
 		}
+		if i == start {
+			s = inputPromptAnsi + inputPrompt + ansiReset + s
+		} else {
+			s = strings.Repeat(" ", promptW) + s
+		}
 		out = append(out, s)
 	}
 	for len(out) < maxInputLines {
-		out = append(out, strings.Repeat(" ", boxW))
+		out = append(out, strings.Repeat(" ", width))
 	}
 	return strings.Join(out, "\n")
 }

@@ -466,15 +466,17 @@ type ui struct {
 var (
 	ansiDim   = "\x1b[2m"
 	ansiBold  = "\x1b[1m"
-	ansiCyan  = "\x1b[36m"
-	ansiRed   = "\x1b[31m"
+	ansiCyan  = "\x1b[38;2;107;80;255m"  // Charple violet
+	ansiMuted = "\x1b[38;2;133;131;146m" // Squid grey
+	ansiRed   = "\x1b[38;2;255;87;125m"  // Coral
 	ansiReset = "\x1b[0m"
 )
 
-func (u ui) dim(s string) string  { return u.wrap(ansiDim, s) }
-func (u ui) bold(s string) string { return u.wrap(ansiBold, s) }
-func (u ui) cyan(s string) string { return u.wrap(ansiCyan, s) }
-func (u ui) red(s string) string  { return u.wrap(ansiRed, s) }
+func (u ui) dim(s string) string   { return u.wrap(ansiDim, s) }
+func (u ui) bold(s string) string  { return u.wrap(ansiBold, s) }
+func (u ui) cyan(s string) string  { return u.wrap(ansiCyan, s) }
+func (u ui) muted(s string) string { return u.wrap(ansiMuted, s) }
+func (u ui) red(s string) string   { return u.wrap(ansiRed, s) }
 func (u ui) wrap(code, s string) string {
 	if !u.color {
 		return s

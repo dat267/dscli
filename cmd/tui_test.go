@@ -100,14 +100,14 @@ func TestTUIViewLayout(t *testing.T) {
 	m.appendLine(renderUserLine("hi"))
 	m.Update(streamDelta{text: "Hello"})
 	v := m.View().Content
-	for _, want := range []string{"hi", "Hello", "╭", "╰"} {
+	for _, want := range []string{"hi", "Hello", ":::"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("view missing %q:\n%s", want, v)
 		}
 	}
-	// The chat pane renders above the input box, and the status line below it.
+	// The chat pane renders above the input, and the status line below it.
 	chatIdx := strings.Index(v, "Hello")
-	boxIdx := strings.Index(v, "╭")
+	boxIdx := strings.Index(v, ":::")
 	statusIdx := strings.Index(v, "DeepSeek · model")
 	if !(chatIdx >= 0 && boxIdx >= 0 && statusIdx >= 0 && chatIdx < boxIdx && boxIdx < statusIdx) {
 		t.Errorf("layout order wrong (chat=%d box=%d status=%d):\n%s", chatIdx, boxIdx, statusIdx, v)
@@ -143,16 +143,13 @@ func TestTUIViewPinnedToBottom(t *testing.T) {
 				t.Fatalf("view has %d rows, want %d", len(rows), tc.height)
 			}
 			statusRow := tc.height - 1
-			boxRows := m.inputHeight() + 2 // border top + lines + border bottom
-			boxTop := statusRow - boxRows
+			inputRows := m.inputHeight()
+			inputTop := statusRow - inputRows
 			if !strings.Contains(rows[statusRow], "DeepSeek") {
 				t.Errorf("last row is not the status line: %q", rows[statusRow])
 			}
-			if !strings.HasPrefix(strings.TrimSpace(rows[statusRow-1]), "╰") {
-				t.Errorf("row above status is not the input box bottom: %q", rows[statusRow-1])
-			}
-			if !strings.HasPrefix(strings.TrimSpace(rows[boxTop]), "╭") {
-				t.Errorf("row %d is not the input box top: %q", boxTop, rows[boxTop])
+			if !strings.Contains(rows[inputTop], ":::") {
+				t.Errorf("row %d is not the input prompt row: %q", inputTop, rows[inputTop])
 			}
 			for _, cl := range strings.Split(tc.content, "\n") {
 				found := false
@@ -166,7 +163,7 @@ func TestTUIViewPinnedToBottom(t *testing.T) {
 					t.Errorf("input line %q not rendered", cl)
 				}
 			}
-			// The chat pane occupies the top rows above the box.
+			// The chat pane occupies the top rows above the input.
 			if tc.scroll != "" && !strings.Contains(rows[0], strings.TrimSpace(strings.Split(tc.scroll, "\n")[0])) {
 				t.Errorf("first row is not chat content: %q", rows[0])
 			}
@@ -192,7 +189,7 @@ func TestTUIUserLineStyled(t *testing.T) {
 	m.input.SetValue("hello")
 	m.Update(press(tea.KeyEnter))
 	pumpTUI(m)
-	if !strings.Contains(m.scroll, "\x1b[38;5;81m") {
+	if !strings.Contains(m.scroll, "\x1b[38;2;107;80;255m") {
 		t.Errorf("user line missing foreground ANSI:\n%q", m.scroll)
 	}
 	if !strings.Contains(m.scroll, "hello") {
@@ -203,8 +200,8 @@ func TestTUIUserLineStyled(t *testing.T) {
 	}
 }
 
-// TestTUIInputWrap: long input text wraps inside the fixed 3-row box and the
-// cursor stays visible.
+// TestTUIInputWrap: long input text wraps inside the fixed 2-row textarea and
+// the cursor stays visible.
 func TestTUIInputWrap(t *testing.T) {
 	m, _ := tuiHarness(t, nil, "")
 	m.width = 30
@@ -215,9 +212,10 @@ func TestTUIInputWrap(t *testing.T) {
 	if len(rows) != maxInputLines {
 		t.Fatalf("box rows = %d, want %d", len(rows), maxInputLines)
 	}
-	// 60 chars at boxW=28 wrap into 28+28+4; the first row is a full wrap.
-	if !strings.Contains(rows[0], strings.Repeat("x", 28)) {
-		t.Errorf("row 0 not wrapped at box width: %q", rows[0])
+	// 60 chars at boxW=26 (width minus the 4-col "::: " prompt) wrap into
+	// 26+26+8; the first row is a full wrap.
+	if !strings.Contains(rows[0], strings.Repeat("x", 26)) {
+		t.Errorf("row 0 not wrapped at text width: %q", rows[0])
 	}
 	if !strings.Contains(box, "█") {
 		t.Errorf("end-of-text block cursor missing:\n%s", box)
@@ -225,13 +223,13 @@ func TestTUIInputWrap(t *testing.T) {
 }
 
 // TestTUICursorAtExactWidth: a cursor at the very end of a row that exactly
-// fills the box width must not panic (slice-bounds regression) and still draw
+// fills the text width must not panic (slice-bounds regression) and still draw
 // a block.
 func TestTUICursorAtExactWidth(t *testing.T) {
 	m, _ := tuiHarness(t, nil, "")
-	m.width = 30 // boxW = 28
-	m.input.SetValue(strings.Repeat("x", 28))
-	m.input.End() // col = 28 = boxW
+	m.width = 30 // text width = 26
+	m.input.SetValue(strings.Repeat("x", 26))
+	m.input.End() // col = 26 = text width
 	box := m.input.render(m.width)
 	if !strings.Contains(box, "█") {
 		t.Errorf("cursor block missing:\n%s", box)
@@ -359,7 +357,7 @@ func TestTUIScrollbackWraps(t *testing.T) {
 		if r == "" {
 			continue // the blank separator row is unstyled by design
 		}
-		if !strings.Contains(r, "\x1b[38;5;81m") {
+		if !strings.Contains(r, "\x1b[38;2;107;80;255m") {
 			t.Errorf("styled row missing colour: %q", r)
 		}
 	}

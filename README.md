@@ -113,8 +113,8 @@ Keys: **Enter** submits, **Ctrl+J / Alt+Enter** inserts a newline, **Up/Down**
 move the cursor through multiline input (at the first/last line they recall
 history), **Tab** cycles the slash-command menu (Enter completes it),
 **Esc** clears the input, **PgUp/PgDn / mouse wheel** scroll the chat pane,
-**Ctrl+C** quits. The layout is a scrollable chat pane on top, a bordered
-2-line input box (text wraps inside it) at the bottom, and the status line
+**Ctrl+C** quits. The layout is a scrollable chat pane on top, a 2-line input
+with a `::: ` prompt (text wraps inside it) at the bottom, and the status line
 below it. User messages render in a foreground colour to stand apart from the
 assistant's replies. `/new` starts a fresh conversation, `/clear` forgets the
 persisted default session and starts a fresh one (`/clear --delete` also
