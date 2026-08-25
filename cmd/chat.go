@@ -90,13 +90,15 @@ func (c *ChatCmd) transcriptsOn() bool {
 
 // oneTurn asks one question in the given conversation, feeding every reply
 // delta to write, and returns the conversation id to use on the NEXT turn
-// ("<session_id>:<message_id>").
-func (c *ChatCmd) oneTurn(ctx context.Context, client *deepseek.Client, conversation, prompt, model string, write func(string) error, sources *[]deepseek.Source) (string, error) {
+// ("<session_id>:<message_id>") and whether the reply was rejected by the
+// content-safety filter (the partial text already written is kept for
+// /resume).
+func (c *ChatCmd) oneTurn(ctx context.Context, client *deepseek.Client, conversation, prompt, model string, write func(string) error, sources *[]deepseek.Source) (string, bool, error) {
 	sessionID, parentID := splitConversation(conversation)
 	if sessionID == "" {
 		sid, err := client.CreateChatSession(ctx)
 		if err != nil {
-			return "", fmt.Errorf("create chat session: %w", err)
+			return "", false, fmt.Errorf("create chat session: %w", err)
 		}
 		sessionID = sid
 	}
@@ -116,7 +118,7 @@ func (c *ChatCmd) oneTurn(ctx context.Context, client *deepseek.Client, conversa
 		SearchEnabled:   c.Search,
 	}, write)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if sources != nil {
 		*sources = reply.Sources
@@ -124,7 +126,7 @@ func (c *ChatCmd) oneTurn(ctx context.Context, client *deepseek.Client, conversa
 	if reply.Filtered {
 		c.showPreview("note: reply was filtered by DeepSeek (content policy)")
 	}
-	return conversationID(sessionID, parentID, reply.MessageID), nil
+	return conversationID(sessionID, parentID, reply.MessageID), reply.Filtered, nil
 }
 
 // deltaWriter returns the writer that renders reply deltas to the user:
@@ -167,11 +169,20 @@ func noteToStderr(text string) {
 	fmt.Fprintln(os.Stderr, u.muted(text))
 }
 
-// turn answers one user message and returns the conversation id for the next
-// turn. It is a single completion; file-tools were removed in favour of the
-// /file command, so there is no tool loop to run.
-func (c *ChatCmd) turn(ctx context.Context, client *deepseek.Client, conversation, prompt, model string, fileTools bool, note func(string), sources *[]deepseek.Source) (string, error) {
-	return c.oneTurn(ctx, client, conversation, prompt, model, c.answerWriter(), sources)
+// resumePrompt builds the continuation message sent by /resume: the filtered
+// partial reply embedded as context with an instruction to continue it in the
+// same voice. The content filter still applies to whatever the model
+// generates next — this only recovers the user's own cut-off text.
+func resumePrompt(partial, instruction string) string {
+	var b strings.Builder
+	b.WriteString("The previous reply was cut off by a content-safety filter. ")
+	b.WriteString("Continue the answer from where it stopped, keeping the same language, style and format — do not restate the text above:\n\n")
+	b.WriteString(partial)
+	b.WriteString("\n")
+	if instruction != "" {
+		b.WriteString("\n" + instruction + "\n")
+	}
+	return b.String()
 }
 
 // maxMentionBytes caps how much of a file /file loads into the prompt.
@@ -256,7 +267,7 @@ func (c *ChatCmd) ask(ctx context.Context, prompt string) error {
 		appendTranscript(c.cfgPath, conversation, "user", prompt)
 	}
 	_, err := recoverStaleSession(ctx, client, c.cfgPath, conversation, trusted, func(sid string) error {
-		cid, e := c.oneTurn(ctx, client, sid, prompt, effectiveModel(c.Model), func(delta string) error {
+		cid, _, e := c.oneTurn(ctx, client, sid, prompt, effectiveModel(c.Model), func(delta string) error {
 			replyBuf.WriteString(delta)
 			return c.answerWriter()(delta)
 		}, &sources)
@@ -413,6 +424,9 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	var turns int
+	// lastPartial keeps the text of the most recent filtered reply so /resume
+	// can continue it; it is cleared when a later turn completes unfiltered.
+	var lastPartial string
 	for {
 		if !scanner.Scan() {
 			break
@@ -457,6 +471,17 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 			search = toggleState(line, "/search", search)
 			status()
 			continue
+		case line == "/resume" || strings.HasPrefix(line, "/resume "):
+			// Continue a reply the content filter cut off: the partial text
+			// is sent back as context with a continue instruction. Nothing is
+			// bypassed — the filter still applies to the new generation.
+			if lastPartial == "" {
+				fmt.Fprintln(os.Stderr, u.red("nothing to resume: no filtered partial (or the last reply was accepted)"))
+				continue
+			}
+			instruction := strings.TrimSpace(strings.TrimPrefix(line, "/resume"))
+			line = resumePrompt(lastPartial, instruction)
+			fmt.Fprintln(os.Stderr, u.dim("resuming from the filtered partial reply"))
 		case strings.HasPrefix(line, "/"):
 			fmt.Fprintln(os.Stderr, "unknown command (/help for commands)")
 			continue
@@ -512,10 +537,12 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 		if c.transcriptsOn() {
 			appendTranscript(c.cfgPath, turnSession, "user", line)
 		}
+		var filtered bool
 		_, err := recoverStaleSession(ctx, client, c.cfgPath, conversation, firstTurn, func(sid string) error {
-			cid, e := c.oneTurn(ctx, client, sid, line, model, write, &sources)
+			cid, isFiltered, e := c.oneTurn(ctx, client, sid, line, model, write, &sources)
 			if e == nil {
 				convID = cid
+				filtered = isFiltered
 			}
 			return e
 		})
@@ -532,6 +559,18 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 		}
 		if c.transcriptsOn() {
 			appendTranscript(c.cfgPath, turnSession, "assistant", replyBuf.String())
+		}
+		if filtered {
+			// The filter cut the reply off; whatever streamed before it is the
+			// seed for /resume.
+			if replyBuf.Len() > 0 {
+				lastPartial = replyBuf.String()
+				fmt.Fprintln(os.Stderr, u.dim("hint: /resume continues from the partial reply (kept as context)"))
+			} else {
+				lastPartial = ""
+			}
+		} else {
+			lastPartial = ""
 		}
 		if last != '\n' {
 			fmt.Fprintln(os.Stdout)
@@ -573,6 +612,7 @@ func printReplHelp(u ui) {
   /model <default|expert>     switch model (starts a fresh conversation)
   /thinking [on|off]          toggle DeepThink reasoning
   /search [on|off]            toggle web search
+  /resume [instruction]       continue a reply the filter cut off, from its partial text
   /help                       this help
 
 multiline: end a line with \ to continue it on the next line; a lone \ line

@@ -54,6 +54,9 @@ type tuiModel struct {
 	// written from the turn goroutine and read only after streamDone (the
 	// channel send establishes the happens-before edge).
 	reply strings.Builder
+	// lastPartial keeps the text of the most recent filtered reply so /resume
+	// can continue it; cleared by later successful turns and /new.
+	lastPartial string
 
 	busy     bool
 	cancel   context.CancelFunc
@@ -75,9 +78,10 @@ type tuiModel struct {
 type streamDelta struct{ text string }
 type streamNote struct{ text string }
 type streamDone struct {
-	err     error
-	convID  string
-	sources []deepseek.Source
+	err      error
+	convID   string
+	sources  []deepseek.Source
+	filtered bool
 }
 
 func newTUIModel(chat *ChatCmd, client *deepseek.Client, conversation string, trusted bool) *tuiModel {
@@ -174,10 +178,12 @@ func (m *tuiModel) startTurn(prompt string) tea.Cmd {
 	go func() {
 		var convID string
 		var sources []deepseek.Source
+		var filtered bool
 		run := func(sid string) error {
-			cid, e := m.doTurn(ctx, ch, sid, prompt, &sources)
+			cid, isFiltered, e := m.doTurn(ctx, ch, sid, prompt, &sources)
 			if e == nil {
 				convID = cid
+				filtered = isFiltered
 			}
 			return e
 		}
@@ -189,13 +195,13 @@ func (m *tuiModel) startTurn(prompt string) tea.Cmd {
 		} else {
 			err = run(m.conversation)
 		}
-		m.streamCh <- streamDone{err: err, convID: convID, sources: sources}
+		m.streamCh <- streamDone{err: err, convID: convID, sources: sources, filtered: filtered}
 	}()
 	return pump(m.streamCh)
 }
 
 // doTurn runs one user message, mirroring the scanner REPL.
-func (m *tuiModel) doTurn(ctx context.Context, ch *ChatCmd, sid, prompt string, sources *[]deepseek.Source) (string, error) {
+func (m *tuiModel) doTurn(ctx context.Context, ch *ChatCmd, sid, prompt string, sources *[]deepseek.Source) (string, bool, error) {
 	return ch.oneTurn(ctx, m.client, sid, prompt, m.model, ch.answerWriter(), sources)
 }
 
@@ -267,6 +273,18 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			persistConversation(m.cfgPath, m.noPersist, msg.convID)
 			if transcriptsEnabled(m.cfgPath, m.noPersist, m.chat.NoTranscript) {
 				appendTranscript(m.cfgPath, msg.convID, "assistant", m.reply.String())
+			}
+			if msg.filtered {
+				// The filter cut the reply off; whatever streamed before it is
+				// the seed for /resume (a fully-filtered reply offers nothing).
+				if m.reply.Len() > 0 {
+					m.lastPartial = m.reply.String()
+					m.appendLine(m.u.dim("hint: /resume continues from the partial reply above"))
+				} else {
+					m.lastPartial = ""
+				}
+			} else {
+				m.lastPartial = ""
 			}
 			m.renderSources(msg.sources)
 			m.appendLine("")
@@ -562,7 +580,7 @@ func renderHistory(hist []deepseek.HistoryMessage) string {
 func knownCommand(line string) bool {
 	cmd, _, _ := strings.Cut(line, " ")
 	switch cmd {
-	case "/exit", "/quit", "/new", "/help", "/model", "/thinking", "/search", "/clear", "/file":
+	case "/exit", "/quit", "/new", "/help", "/model", "/thinking", "/search", "/clear", "/file", "/resume":
 		return true
 	}
 	return false
@@ -677,7 +695,7 @@ func suggestCommands(token string) []string {
 		return nil
 	}
 	var out []string
-	for _, c := range []string{"/exit", "/quit", "/new", "/help", "/model", "/thinking", "/search", "/clear", "/file"} {
+	for _, c := range []string{"/exit", "/quit", "/new", "/help", "/model", "/thinking", "/search", "/clear", "/file", "/resume"} {
 		if strings.HasPrefix(c, token) {
 			out = append(out, c)
 		}
@@ -705,10 +723,27 @@ func (m *tuiModel) handleCommand(line string) (tea.Model, tea.Cmd) {
 		m.appendLine(m.u.dim("new conversation"))
 		m.refreshStatus()
 		return m, nil
+	case "/resume":
+		// Continue a reply the content filter cut off: the partial text is
+		// sent back as context with a continue instruction. Nothing is
+		// bypassed — the filter still applies to the new generation.
+		if m.lastPartial == "" {
+			m.appendLine(m.u.red("nothing to resume: no filtered partial (or the last reply was accepted)"))
+			return m, nil
+		}
+		shown := strings.TrimSpace(line)
+		m.appendLine(renderUserLine(shown))
+		m.appendLine("") // breathing room
+		if transcriptsEnabled(m.cfgPath, m.noPersist, m.chat.NoTranscript) {
+			appendTranscript(m.cfgPath, m.conversation, "user", shown)
+		}
+		m.loaded = nil
+		return m, m.startTurn(resumePrompt(m.lastPartial, arg))
 	case "/help":
-		m.appendLine(m.u.dim("commands: /exit /quit /new /model /thinking /search /clear /file /help"))
+		m.appendLine(m.u.dim("commands: /exit /quit /new /model /thinking /search /clear /file /resume /help"))
 		m.appendLine(m.u.dim("  /clear [--delete]  forget the persisted default session (--delete removes it server-side)"))
 		m.appendLine(m.u.dim("  /file <path>       load a file/directory into the message (repeat to stack files)"))
+		m.appendLine(m.u.dim("  /resume [hint]     continue a reply the filter cut off, from its partial text"))
 		m.appendLine(m.u.dim("enter submits · ctrl+j/alt+enter newline · up/down cursor (history at first/last row) · ctrl+left/right word · alt+backspace deletes a word · ctrl+a/e line start/end · tab completes /commands"))
 		m.appendLine(m.u.dim("pgup/pgdn/home/end scroll · ctrl+l clears the pane · ctrl+c interrupts a reply (tapped again when idle, quits) · esc dismisses the menu or clears the input"))
 		return m, nil
@@ -802,8 +837,10 @@ func (m *tuiModel) handleClearCommand(arg string) (tea.Model, tea.Cmd) {
 }
 
 // newSession starts a fresh thread: persisted (saved as the new default) or,
-// with --no-persist, tracked for deletion on quit.
+// with --no-persist, tracked for deletion on quit. The thread changes mean any
+// filtered partial belongs to the old conversation, so it is dropped.
 func (m *tuiModel) newSession() {
+	m.lastPartial = ""
 	sid, err := m.client.CreateChatSession(context.Background())
 	if err != nil {
 		m.appendLine(m.u.red("error: create chat session: " + err.Error()))

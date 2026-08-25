@@ -135,9 +135,14 @@ files, and a system note in the chat shows each load and the final
 attachments.
 
 **Censorship.** Prompts are sent exactly as written — no hidden instructions.
-If DeepSeek's content filter rejects a reply, the CLI just prints a short
-note ("reply was filtered by DeepSeek") instead of silently returning an
-empty answer. Translation keeps its own separate style (see below).
+If DeepSeek's content filter rejects a reply, the CLI prints a short muted
+note ("reply was filtered by DeepSeek") instead of silently returning an empty
+answer. When the filter cuts a reply off mid-stream, the partial text that
+already streamed is kept, and **`/resume [hint]`** (TUI and line REPL) sends it
+back as context with a "continue from where it stopped" instruction — an
+honest recovery for wrongly flagged replies: the text is sent as an ordinary
+prompt, and the filter still applies to whatever the model generates next.
+Translation keeps its own separate style (see below).
 
 When stdin or stdout is **not** a terminal (pipes, scripts, `--json-out`), the
 line-based loop is used instead: replies stream to stdout, no prompts or
