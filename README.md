@@ -367,6 +367,10 @@ dscli translate -f lyrics.lrc -o lyrics.lrc    # overwrite the source in place
   first and defaults to a `.translated.txt` output.
 - `file_meta` reports duration for lrc/srt/vtt/ass/ssa/ttml files.
 - The output path defaults to `<input>.translated.<ext>` and is never
-  overwritten without `-f`. Translation runs by default in the persisted
-  default session (`--no-persist` for a fresh session deleted when the run
-  ends).
+  overwritten without `-f`. Each translation runs in a fresh session deleted
+  when the run ends (`--no-persist` is the default; pass `--no-persist=false`
+  to resume the persisted default session instead).
+- If DeepSeek's content filter cuts a chunk's reply off mid-stream, the
+  partial translation produced before the filter is kept instead of the run
+  retrying (a smaller chunk cannot un-censor content); a reply with no
+  content at all fails loudly.

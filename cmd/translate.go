@@ -32,7 +32,7 @@ type TranslateCmd struct {
 
 	Thinking bool `short:"t" help:"Enable DeepThink reasoning for each chunk (the reasoning model allows longer replies, so chunks are sized bigger and fewer are needed)"`
 
-	NoPersist bool `help:"Do not persist or reuse the default session; the session is deleted when the run ends"`
+	NoPersist bool `help:"Do not persist or reuse the default session; the session is deleted when the run ends (default: on)" default:"true"`
 
 	// clientBase overrides the API base URL for tests.
 	clientBase string

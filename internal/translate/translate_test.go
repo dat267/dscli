@@ -209,12 +209,57 @@ func sseReply(t *testing.T, content string) string {
 	return "data: " + string(line) + "\n\n"
 }
 
-// sseTruncated is sseReply followed by a CONTENT_FILTER terminal batch,
-// simulating a reply the model cut off at its output limit.
+// sseTruncated is sseReply followed by an INCOMPLETE status, simulating a
+// reply cut off at the model's output limit (the site's ~36 KiB cap).
 func sseTruncated(t *testing.T, content string) string {
 	t.Helper()
 	return sseReply(t, content) +
+		"data: {\"p\":\"response/status\",\"o\":\"SET\",\"v\":\"INCOMPLETE\"}\n\n"
+}
+
+// sseFiltered is sseReply followed by a CONTENT_FILTER terminal batch,
+// simulating a reply rejected by DeepSeek's content filter (a censor).
+func sseFiltered(t *testing.T, content string) string {
+	t.Helper()
+	return sseReply(t, content) +
 		"data: {\"v\":[{\"p\":\"status\",\"v\":\"CONTENT_FILTER\"},{\"p\":\"quasi_status\",\"v\":\"CONTENT_FILTER\"}]}\n\n"
+}
+
+// TestTranslateFilteredKeepsPartial: a reply DeepSeek's content filter cuts
+// off mid-stream keeps the partial translation (no futile retry), and a fully
+// censored reply fails loudly instead of hanging.
+func TestTranslateFilteredKeepsPartial(t *testing.T) {
+	srv, calls := fakeTranslateServer(t, func(n int) (int, string) {
+		if n == 1 {
+			return 200, sseFiltered(t, "partial translation\n")
+		}
+		return 200, sseReply(t, "rest\n")
+	})
+	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
+	content := strings.Repeat("a", 16*1024) // one chunk
+	text, _, err := Translate(context.Background(), client, "sess-1", []byte(content), "text", Options{To: "English"})
+	if err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+	if !strings.Contains(text, "partial translation") {
+		t.Errorf("filtered partial was not kept:\n%q", text)
+	}
+	// No retry: the filtered reply is accepted as-is, then the next chunk.
+	if got := *calls; got != 2 {
+		t.Errorf("completions = %d, want 2 (filtered partial + next chunk, no retry)", got)
+	}
+
+	// A reply filtered with no content at all fails loudly, not hang.
+	srv2, calls2 := fakeTranslateServer(t, func(n int) (int, string) {
+		return 200, sseFiltered(t, "")
+	})
+	client2 := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv2.URL)
+	if _, _, err := Translate(context.Background(), client2, "sess-1", []byte(strings.Repeat("a", 1024)), "text", Options{To: "English"}); err == nil {
+		t.Fatal("Translate succeeded, want a content-policy error")
+	}
+	if got := *calls2; got != 1 {
+		t.Errorf("completions = %d, want 1 (no retry on a censored reply)", got)
+	}
 }
 
 // TestTranslateGivesUpAtFloor: when even the minimum chunk size is cut off,

@@ -444,6 +444,25 @@ func translateChunk(ctx context.Context, client *deepseek.Client, conversation, 
 	if err != nil {
 		return "", "", false, err
 	}
+	if reply.Filtered {
+		// DeepSeek's content filter rejected the reply mid-stream. The content
+		// produced before the filter is a genuine (if partial) translation, so
+		// keep it rather than retrying: a smaller chunk cannot un-censor the
+		// content, and retrying just re-triggers the filter (slow in think
+		// mode, which made the run appear to hang). A reply with no content at
+		// all is a hard failure.
+		partial := strings.TrimSpace(buf.String())
+		if partial == "" {
+			return "", "", false, fmt.Errorf("reply was filtered by DeepSeek (content policy); no content produced")
+		}
+		next := sessionID
+		if reply.MessageID != 0 {
+			next = fmt.Sprintf("%s:%d", sessionID, reply.MessageID)
+		} else if parent != nil {
+			next = fmt.Sprintf("%s:%d", sessionID, *parent)
+		}
+		return partial, next, false, nil
+	}
 	if reply.Truncated {
 		// The model stopped at its output limit: the reply is incomplete.
 		// Return the partial text and an error so the caller shrinks the chunk
