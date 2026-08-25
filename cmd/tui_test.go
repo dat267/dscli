@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,12 +9,19 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	uv "github.com/charmbracelet/ultraviolet"
 
 	"github.com/dat267/dscli/internal/deepseek"
 )
 
 // press builds a v2 key-press message for a code (e.g. tea.KeyEnter).
 func press(code rune) tea.KeyPressMsg { return tea.KeyPressMsg{Code: code} }
+
+// pressMod builds a key-press message with a modifier (e.g. uv.ModCtrl for
+// ctrl+left).
+func pressMod(code rune, mod uv.KeyMod) tea.KeyPressMsg {
+	return tea.KeyPressMsg{Code: code, Mod: mod}
+}
 
 // pressText builds a v2 key-press message for a printable string.
 func pressText(s string) tea.KeyPressMsg {
@@ -197,7 +205,7 @@ func TestTUIUserLineStyled(t *testing.T) {
 }
 
 // TestTUIInputWrap: long input text wraps inside the fixed 2-row textarea and
-// the cursor stays visible.
+// the cursor stays visible; the top row marks content clipped above with "…".
 func TestTUIInputWrap(t *testing.T) {
 	m, _ := tuiHarness(t, nil, "")
 	m.width = 30
@@ -209,9 +217,11 @@ func TestTUIInputWrap(t *testing.T) {
 		t.Fatalf("box rows = %d, want %d", len(rows), maxInputLines)
 	}
 	// 60 chars at boxW=26 (width minus the 4-col "::: " prompt) wrap into
-	// 26+26+8; the first row is a full wrap.
-	if !strings.Contains(rows[0], strings.Repeat("x", 26)) {
-		t.Errorf("row 0 not wrapped at text width: %q", rows[0])
+	// 26+26+8; the window shows the last two rows, and the first visible row
+	// is full, so its last cell becomes the "…" clip marker.
+	wantTop := strings.Repeat("x", 25) + "…"
+	if !strings.Contains(rows[0], wantTop) {
+		t.Errorf("row 0 not wrapped with clip marker, want %q in %q", wantTop, rows[0])
 	}
 	if !strings.Contains(box, "█") {
 		t.Errorf("end-of-text block cursor missing:\n%s", box)
@@ -651,5 +661,232 @@ func TestTUIWheelAndHomeEndScroll(t *testing.T) {
 	m.scrollDownN(wheelScrollLines)
 	if m.viewTop != wheelScrollLines {
 		t.Errorf("wheel down viewTop = %d, want %d", m.viewTop, wheelScrollLines)
+	}
+}
+
+// TestWrapWordsWideChars: wrapping counts display columns, not runes, so CJK
+// text (2 columns per rune) wraps at the right place and a wide rune is never
+// split in half.
+func TestWrapWordsWideChars(t *testing.T) {
+	rows := wrapWords([]rune("あいうえおかきくけこ"), 6)
+	got := make([]string, len(rows))
+	for i, r := range rows {
+		got[i] = string(r)
+	}
+	if want := []string{"あいう", "えおか", "きくけ", "こ"}; strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("wide wrap = %v, want %v", got, want)
+	}
+	for _, r := range rows {
+		w := textWidth(string(r))
+		if w > 6 {
+			t.Errorf("row %q is %d columns, over the 6-column box", string(r), w)
+		}
+		if w%2 != 0 {
+			t.Errorf("row %q splits a wide rune (odd width %d)", string(r), w)
+		}
+	}
+	// ASCII word-wrapping still prefers a space break.
+	rows = wrapWords([]rune("one two three"), 7)
+	got = got[:0]
+	for _, r := range rows {
+		got = append(got, string(r))
+	}
+	if want := []string{"one ", "two ", "three"}; strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("word wrap = %v, want %v", got, want)
+	}
+}
+
+// TestTUIInputWideRowsRenderInsideBox: a box full of CJK text renders every
+// row inside the terminal width — the rune-count wrapping bug used to push
+// wide rows past the right edge.
+func TestTUIInputWideRowsRenderInsideBox(t *testing.T) {
+	m, _ := tuiHarness(t, nil, "")
+	m.width = 10
+	m.input.SetValue("あいうえおかきくけこ")
+	m.input.End()
+	box := m.input.render(m.width)
+	for _, row := range strings.Split(box, "\n") {
+		if w := textWidth(stripANSI(row)); w > 10 {
+			t.Errorf("box row overflows %d columns (%d): %q", 10, w, row)
+		}
+	}
+	// 20 columns of text in a 6-column box window: content above is clipped,
+	// so the first visible row carries the clip marker.
+	if !strings.Contains(box, "…") {
+		t.Errorf("wide wrapped box missing clip marker:\n%s", box)
+	}
+}
+
+// stripANSI removes colour/reset escape sequences so display widths can be
+// measured on rendered rows.
+func stripANSI(s string) string {
+	var b strings.Builder
+	for {
+		i := strings.IndexByte(s, 0x1b)
+		if i < 0 {
+			b.WriteString(s)
+			break
+		}
+		b.WriteString(s[:i])
+		if j := strings.IndexByte(s[i:], 'm'); j >= 0 {
+			s = s[i+j+1:]
+		} else {
+			break
+		}
+	}
+	return b.String()
+}
+
+// TestTUIWordMovement: ctrl/alt+left/right move by word (across line
+// boundaries), alt+backspace deletes the word before the cursor.
+func TestTUIWordMovement(t *testing.T) {
+	m, _ := tuiHarness(t, nil, "")
+	m.input.SetValue("one two three")
+	m.input.End()
+	// "one two three": end → start of "three" (8) → start of "two" (4) → 0.
+	m.Update(pressMod(tea.KeyLeft, uv.ModCtrl))
+	if m.input.col != 8 {
+		t.Errorf("ctrl+left 1: col = %d, want 8", m.input.col)
+	}
+	m.Update(pressMod(tea.KeyLeft, uv.ModCtrl))
+	if m.input.col != 4 {
+		t.Errorf("ctrl+left 2: col = %d, want 4", m.input.col)
+	}
+	m.Update(pressMod(tea.KeyLeft, uv.ModCtrl))
+	if m.input.col != 0 {
+		t.Errorf("ctrl+left 3: col = %d, want 0", m.input.col)
+	}
+	// alt+left behaves the same as ctrl+left.
+	m.Update(pressMod(tea.KeyRight, uv.ModCtrl))
+	if m.input.col != 4 {
+		t.Errorf("ctrl+right: col = %d, want 4", m.input.col)
+	}
+	m.Update(pressMod(tea.KeyRight, uv.ModCtrl))
+	if m.input.col != 8 {
+		t.Errorf("ctrl+right 2: col = %d, want 8", m.input.col)
+	}
+	// alt+backspace at the start of "three" removes "two " (and the space),
+	// leaving "one three" with the cursor at the start of "three".
+	m.input.SetValue("one two three")
+	m.input.End()
+	m.Update(pressMod(tea.KeyLeft, uv.ModCtrl))
+	m.Update(pressMod(tea.KeyBackspace, uv.ModAlt))
+	if got := m.input.Value(); got != "one three" {
+		t.Errorf("alt+backspace = %q, want %q", got, "one three")
+	}
+	if m.input.col != 4 {
+		t.Errorf("alt+backspace col = %d, want 4", m.input.col)
+	}
+	// ctrl+right at the end of a line jumps to the start of the next line;
+	// ctrl+left at the start of a line jumps to the end of the previous line.
+	m.input.SetValue("alpha beta\ngamma")
+	m.input.row = len(m.input.lines) - 1
+	m.input.End() // end of "gamma"
+	m.Update(pressMod(tea.KeyLeft, uv.ModCtrl))
+	if m.input.row != 1 || m.input.col != 0 {
+		t.Errorf("ctrl+left to line start: (%d,%d), want (1,0)", m.input.row, m.input.col)
+	}
+	m.Update(pressMod(tea.KeyLeft, uv.ModCtrl))
+	if m.input.row != 0 || m.input.col != len("alpha beta") {
+		t.Errorf("ctrl+left onto previous line: (%d,%d), want (0,%d)", m.input.row, m.input.col, len("alpha beta"))
+	}
+	m.Update(pressMod(tea.KeyRight, uv.ModCtrl))
+	if m.input.row != 1 || m.input.col != 0 {
+		t.Errorf("ctrl+right onto next line: (%d,%d), want (1,0)", m.input.row, m.input.col)
+	}
+}
+
+// TestTUIVisualUpDown: Up/Down move one *visual* row at a time through
+// wrapped input, so a line that wraps is walked row by row instead of skipped,
+// and the display column is preserved (clamped to the target row).
+func TestTUIVisualUpDown(t *testing.T) {
+	m, _ := tuiHarness(t, nil, "")
+	m.width = 20 // boxW 16: "aa bb cc dd ee ff" wraps to [15][2]
+	m.input.SetValue("aa bb cc dd ee ff")
+	m.input.End() // (0,17): after the last visual row
+	m.Update(press(tea.KeyUp))
+	// Up preserves the cursor's display column within the row above: the
+	// end-of-text column was 2 inside the last row (15+2=17), so (0,2).
+	if m.input.row != 0 || m.input.col != 2 {
+		t.Errorf("visual up: (%d,%d), want (0,2)", m.input.row, m.input.col)
+	}
+	m.Update(press(tea.KeyDown))
+	// Down returns to the end of the wrapped line.
+	if m.input.row != 0 || m.input.col != 17 {
+		t.Errorf("visual down: (%d,%d), want (0,17)", m.input.row, m.input.col)
+	}
+	// At the very top row, Up recalls history (no logical move in between).
+	m.input.SetValue("abc abc abc abc abcx")
+	m.input.Home()
+	m.addHistory("previous")
+	m.Update(press(tea.KeyUp))
+	if got := m.input.Value(); got != "previous" {
+		t.Errorf("up at the true top should recall history, got %q", got)
+	}
+}
+
+// TestTUIInterrupt: Ctrl+C while a turn streams interrupts the completion and
+// keeps the chat open; the cancelled turn reports "interrupted" rather than an
+// error. Ctrl+C when idle quits.
+func TestTUIInterrupt(t *testing.T) {
+	m, _ := tuiHarness(t, nil, "")
+	// Idle: ctrl+c quits.
+	_, cmd := m.Update(pressMod('c', uv.ModCtrl))
+	if cmd == nil {
+		t.Error("ctrl+c while idle should quit")
+	}
+
+	m.input.SetValue("hi")
+	m.Update(press(tea.KeyEnter))
+	if !m.busy {
+		t.Fatal("submit should start a turn")
+	}
+	// While busy, ctrl+c interrupts: no quit cmd, chat stays open.
+	_, cmd = m.Update(pressMod('c', uv.ModCtrl))
+	if cmd != nil {
+		t.Fatal("ctrl+c while streaming must not quit")
+	}
+	if !m.interrupted || !m.busy {
+		t.Errorf("after interrupt: interrupted=%v busy=%v, want true true", m.interrupted, m.busy)
+	}
+	// The cancelled turn finishes with a note, not an error line.
+	m.Update(streamDone{err: context.Canceled})
+	if m.busy {
+		t.Error("turn should finish after streamDone")
+	}
+	if !strings.Contains(m.scroll, "interrupted") {
+		t.Errorf("missing interrupted note:\n%q", m.scroll)
+	}
+	if strings.Contains(m.scroll, "error:") {
+		t.Errorf("a cancelled turn must not render as an error:\n%q", m.scroll)
+	}
+}
+
+// TestTUICtrlLClearsScrollback: ctrl+l clears the chat pane (display only —
+// the conversation and thread are untouched).
+func TestTUICtrlLClearsScrollback(t *testing.T) {
+	m, _ := tuiHarness(t, nil, "")
+	m.height, m.width = 20, 60
+	m.scroll = "some conversation text\n"
+	m.viewTop = 3
+	m.autoScroll = false
+	m.Update(pressMod('l', uv.ModCtrl))
+	if m.scroll != "" {
+		t.Errorf("scroll = %q, want empty", m.scroll)
+	}
+	if m.viewTop != 0 || !m.autoScroll {
+		t.Errorf("after ctrl+l: viewTop=%d autoScroll=%v, want 0 true", m.viewTop, m.autoScroll)
+	}
+}
+
+// TestTUIHistoryDedup: re-submitting the same prompt does not add duplicate
+// consecutive history entries.
+func TestTUIHistoryDedup(t *testing.T) {
+	m, _ := tuiHarness(t, nil, "")
+	m.addHistory("same")
+	m.addHistory("same")
+	m.addHistory("other")
+	if len(m.history) != 2 {
+		t.Errorf("history = %v, want 2 entries (dedup)", m.history)
 	}
 }

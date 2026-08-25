@@ -9,6 +9,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/mattn/go-runewidth"
 
 	"github.com/dat267/dscli/internal/deepseek"
 )
@@ -51,6 +52,10 @@ type tuiModel struct {
 	busy     bool
 	cancel   context.CancelFunc
 	streamCh chan tea.Msg
+	// interrupted is true from the moment Ctrl+C cancels an in-flight turn
+	// until that turn's streamDone arrives; it selects the "interrupted" note
+	// over the error line.
+	interrupted bool
 
 	suggestions []string
 	suggestIdx  int
@@ -146,6 +151,7 @@ func (m *tuiModel) startTurn(prompt string) tea.Cmd {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
 	m.busy = true
+	m.interrupted = false
 	m.streamCh = make(chan tea.Msg, 128)
 	ch := m.chat
 	ch.answer = func(d string) error {
@@ -220,6 +226,13 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "end":
 			m.scrollBottom()
 			return m, nil
+		case "ctrl+l":
+			// Clear the scrollback pane (display only — the conversation and
+			// its server-side thread are untouched).
+			m.scroll = ""
+			m.viewTop = 0
+			m.autoScroll = true
+			return m, nil
 		}
 		return m.handleKey(msg)
 	case streamDelta:
@@ -231,7 +244,12 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case streamDone:
 		m.busy = false
 		if msg.err != nil {
-			m.appendLine(m.u.red("error: " + msg.err.Error()))
+			// A cancelled turn (Ctrl+C) is not an error; keep the chat usable.
+			if m.interrupted {
+				m.appendLine(m.u.dim("interrupted"))
+			} else {
+				m.appendLine(m.u.red("error: " + msg.err.Error()))
+			}
 			m.appendLine("")
 		} else {
 			m.conversation = msg.convID
@@ -263,11 +281,11 @@ func (m *tuiModel) renderSources(sources []deepseek.Source) {
 
 func (m *tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.busy {
+		// While a turn streams, Ctrl+C interrupts the completion but keeps the
+		// chat open; Ctrl+C when idle quits.
 		if msg.String() == "ctrl+c" {
-			if m.cancel != nil {
-				m.cancel()
-			}
-			return m, tea.Quit
+			m.interruptTurn()
+			return m, nil
 		}
 		return m, nil
 	}
@@ -276,6 +294,22 @@ func (m *tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c":
 		m.quitCleanup()
 		return m, tea.Quit
+	case "ctrl+a":
+		m.input.Home()
+		return m, nil
+	case "ctrl+e":
+		m.input.End()
+		return m, nil
+	case "ctrl+left", "alt+left":
+		m.input.WordLeft()
+		return m, nil
+	case "ctrl+right", "alt+right":
+		m.input.WordRight()
+		return m, nil
+	case "alt+backspace":
+		m.input.WordBackspace()
+		m.updateSuggestions()
+		return m, nil
 	case "enter":
 		return m.handleSubmit()
 	case "shift+enter", "alt+enter", "ctrl+j":
@@ -308,8 +342,11 @@ func (m *tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.suggestPrev()
 			return m, nil
 		}
-		// Move the cursor up through multiline input; at the first line,
-		// recall history instead.
+		// Move the cursor up one visual row (through wrapped rows); at the
+		// very top row, recall history instead.
+		if m.input.moveUpVisual(m.width) {
+			return m, nil
+		}
 		if m.input.row > 0 {
 			m.input.MoveUp()
 			return m, nil
@@ -321,7 +358,11 @@ func (m *tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.suggestNext()
 			return m, nil
 		}
-		// Move the cursor down; at the last line, go to the next history entry.
+		// Move the cursor down one visual row; at the bottom row, recall the
+		// next history entry instead.
+		if m.input.moveDownVisual(m.width) {
+			return m, nil
+		}
 		if m.input.row < len(m.input.lines)-1 {
 			m.input.MoveDown()
 			return m, nil
@@ -393,6 +434,15 @@ func (m *tuiModel) quitCleanup() {
 			fmt.Fprintf(os.Stderr, "warning: failed to delete session(s): %v\n", err)
 		}
 	}
+}
+
+// interruptTurn cancels the in-flight completion; the turn's streamDone then
+// reports "interrupted" instead of an error, and the chat stays open.
+func (m *tuiModel) interruptTurn() {
+	if m.cancel != nil {
+		m.cancel()
+	}
+	m.interrupted = true
 }
 
 // handleSubmit sends the typed input: a fully-typed slash command runs it, a
@@ -501,9 +551,13 @@ func knownCommand(line string) bool {
 	return false
 }
 
-// addHistory records a submitted prompt for Up/Down recall.
+// addHistory records a submitted prompt for Up/Down recall. Consecutive
+// duplicates are coalesced, so re-sending the same prompt does not pile up
+// identical history entries.
 func (m *tuiModel) addHistory(p string) {
-	m.history = append(m.history, p)
+	if len(m.history) == 0 || m.history[len(m.history)-1] != p {
+		m.history = append(m.history, p)
+	}
 	m.histIdx = len(m.history)
 }
 
@@ -638,7 +692,8 @@ func (m *tuiModel) handleCommand(line string) (tea.Model, tea.Cmd) {
 		m.appendLine(m.u.dim("commands: /exit /quit /new /model /thinking /search /clear /file /help"))
 		m.appendLine(m.u.dim("  /clear [--delete]  forget the persisted default session (--delete removes it server-side)"))
 		m.appendLine(m.u.dim("  /file <path>       load a file/directory into the message (repeat to stack files)"))
-		m.appendLine(m.u.dim("enter submits · ctrl+j / alt+enter newline · up/down cursor (history at first/last line) · pgup/pgdn/home/end scroll · tab completes /commands"))
+		m.appendLine(m.u.dim("enter submits · ctrl+j/alt+enter newline · up/down cursor (history at first/last row) · ctrl+left/right word · alt+backspace deletes a word · ctrl+a/e line start/end · tab completes /commands"))
+		m.appendLine(m.u.dim("pgup/pgdn/home/end scroll · ctrl+l clears the pane · ctrl+c interrupts a reply (tapped again when idle, quits) · esc dismisses the menu or clears the input"))
 		return m, nil
 	case "/model":
 		if arg == "" {
@@ -932,11 +987,16 @@ func (m *tuiModel) render() string {
 	b.WriteString("\n")
 
 	// 4. Status line below the input (m.status is already dimmed; only
-	// truncate to the terminal width so it never wraps).
+	// truncate to the terminal width so it never wraps). While a turn streams
+	// a live suffix tells the user it can be interrupted.
+	status := m.status
+	if m.busy {
+		status = status + " " + m.u.muted("· streaming (ctrl+c interrupts)")
+	}
 	if m.width > 0 {
-		b.WriteString(lipgloss.NewStyle().MaxWidth(m.width).Render(m.status))
+		b.WriteString(lipgloss.NewStyle().MaxWidth(m.width).Render(status))
 	} else {
-		b.WriteString(m.status)
+		b.WriteString(status)
 	}
 	return b.String()
 }
@@ -1133,6 +1193,179 @@ func (in *tuiInput) MoveDown() {
 	}
 }
 
+// boxWidth is the text width of the input box: the terminal width minus the
+// "::: " prompt. It returns 0 until a real terminal width is known, in which
+// case callers fall back to logical (line-based) movement — a degenerate
+// sub-prompt width is not something a user navigates.
+func (in *tuiInput) boxWidth(width int) int {
+	if width > len(inputPrompt) {
+		return width - len(inputPrompt)
+	}
+	return 0
+}
+
+// vrowEntry maps one visual (wrapped) row of the input back to the logical
+// line and the rune offset at which the row begins.
+type vrowEntry struct {
+	line  int
+	start int
+}
+
+// vrowEntries lists every visual row of the input in order, as a logical line
+// plus the rune offset where the row starts.
+func (in *tuiInput) vrowEntries(width int) []vrowEntry {
+	var out []vrowEntry
+	for li, line := range in.lines {
+		off := 0
+		for _, r := range wrapWords(line, width) {
+			out = append(out, vrowEntry{line: li, start: off})
+			off += len(r)
+		}
+	}
+	return out
+}
+
+// visualPos returns the cursor's visual coordinates: the index of its visual
+// row and its display column within that row. A cursor at the very end of a
+// line sits just past its last visual row.
+func (in *tuiInput) visualPos(width int) (vrow, vcol int) {
+	for li := 0; li < in.row; li++ {
+		vrow += len(wrapWords(in.lines[li], width))
+	}
+	line := in.lines[in.row]
+	rows := wrapWords(line, width)
+	off := 0
+	for _, r := range rows {
+		if in.col < off+len(r) {
+			return vrow, runesWidth(r[:in.col-off])
+		}
+		off += len(r)
+	}
+	return vrow + len(rows) - 1, runesWidth(rows[len(rows)-1])
+}
+
+// gotoVisual places the cursor at the entry's logical position, preserving
+// the display column (clamped to the target row's end). width must be the
+// same value used to build the entry list.
+func (in *tuiInput) gotoVisual(e vrowEntry, vcol, width int) {
+	in.row = e.line
+	line := in.lines[e.line]
+	off := 0
+	var rowText []rune
+	for _, r := range wrapWords(line, width) {
+		if off == e.start {
+			rowText = r
+			break
+		}
+		off += len(r)
+	}
+	in.col = e.start + runeIndexAt(rowText, vcol)
+}
+
+// moveUpVisual moves the cursor up one visual row; it reports false at the
+// top of the input (or without a usable width), so the caller can fall back
+// to history recall.
+func (in *tuiInput) moveUpVisual(width int) bool {
+	bw := in.boxWidth(width)
+	if bw < 1 {
+		return false
+	}
+	entries := in.vrowEntries(bw)
+	vrow, vcol := in.visualPos(bw)
+	if vrow <= 0 {
+		return false
+	}
+	in.gotoVisual(entries[vrow-1], vcol, bw)
+	return true
+}
+
+// moveDownVisual moves the cursor down one visual row; it reports false at
+// the bottom of the input, so the caller can fall back to the next history
+// entry.
+func (in *tuiInput) moveDownVisual(width int) bool {
+	bw := in.boxWidth(width)
+	if bw < 1 {
+		return false
+	}
+	entries := in.vrowEntries(bw)
+	vrow, vcol := in.visualPos(bw)
+	if vrow >= len(entries)-1 {
+		return false
+	}
+	in.gotoVisual(entries[vrow+1], vcol, bw)
+	return true
+}
+
+// WordLeft moves the cursor to the start of the previous word, skipping
+// intervening whitespace; at the start of a line it jumps to the end of the
+// previous line.
+func (in *tuiInput) WordLeft() {
+	line := in.lines[in.row]
+	if in.col == 0 {
+		if in.row > 0 {
+			in.row--
+			in.col = len(in.lines[in.row])
+		}
+		return
+	}
+	j := in.col
+	for j > 0 && line[j-1] == ' ' {
+		j--
+	}
+	for j > 0 && line[j-1] != ' ' {
+		j--
+	}
+	in.col = j
+}
+
+// WordRight moves the cursor to the start of the next word, skipping
+// intervening whitespace; at the end of a line it jumps to the start of the
+// next line.
+func (in *tuiInput) WordRight() {
+	line := in.lines[in.row]
+	if in.col >= len(line) {
+		if in.row < len(in.lines)-1 {
+			in.row++
+			in.col = 0
+		}
+		return
+	}
+	j := in.col
+	for j < len(line) && line[j] != ' ' {
+		j++
+	}
+	for j < len(line) && line[j] == ' ' {
+		j++
+	}
+	in.col = j
+}
+
+// WordBackspace deletes from the cursor back to the start of the previous
+// word (whitespace included); at the start of a line it joins the previous
+// line, mirroring Backspace.
+func (in *tuiInput) WordBackspace() {
+	line := in.lines[in.row]
+	if in.col == 0 {
+		if in.row > 0 {
+			prev := in.lines[in.row-1]
+			in.col = len(prev)
+			in.lines[in.row-1] = append(prev, line...)
+			in.lines = append(in.lines[:in.row], in.lines[in.row+1:]...)
+			in.row--
+		}
+		return
+	}
+	j := in.col
+	for j > 0 && line[j-1] == ' ' {
+		j--
+	}
+	for j > 0 && line[j-1] != ' ' {
+		j--
+	}
+	in.lines[in.row] = append(line[:j], line[in.col:]...)
+	in.col = j
+}
+
 func (in *tuiInput) Home() { in.col = 0 }
 
 func (in *tuiInput) End() { in.col = len(in.lines[in.row]) }
@@ -1143,10 +1376,12 @@ const inputPrompt = "::: "
 const inputPromptAnsi = "\x1b[38;2;18;199;143m"
 
 // render draws the input into a fixed-height (maxInputLines) textarea: the
-// text wraps at width-promptW columns, short lines are padded so the input
-// spans the terminal, and the cursor is marked with a block character. The
-// prompt ("::: ") sits at the left of the first visible row and the window
-// follows the cursor, so earlier content scrolls out of view.
+// text wraps at width-promptW display columns, short lines are padded so the
+// input spans the terminal, and the cursor is marked with a block character.
+// The prompt ("::: ") sits at the left of the first visible row and the window
+// follows the cursor, so earlier content scrolls out of view; a dim "…" in the
+// rightmost cell of the first/last visible row marks content clipped above or
+// below the window.
 func (in *tuiInput) render(width int) string {
 	promptW := len(inputPrompt)
 	boxW := width - promptW
@@ -1158,11 +1393,12 @@ func (in *tuiInput) render(width int) string {
 	for i, line := range in.lines {
 		vis := wrapWords(line, boxW)
 		if i == in.row {
-			// Wrap the prefix to find the cursor's visual row/col; a word-wrap
-			// break can land the cursor earlier than a pure char/boxW split.
+			// Wrap the prefix to find the cursor's visual row and its display
+			// column; a word-wrap break can land the cursor earlier than a
+			// pure char/boxW split.
 			prefix := wrapWords(line[:in.col], boxW)
 			cursorRow = len(rows) + len(prefix) - 1
-			cursorCol = len(prefix[len(prefix)-1])
+			cursorCol = runesWidth(prefix[len(prefix)-1])
 		}
 		rows = append(rows, vis...)
 	}
@@ -1184,11 +1420,23 @@ func (in *tuiInput) render(width int) string {
 			start = 0
 		}
 	}
+	clipAbove := start > 0
+	clipBelow := start+maxInputLines < len(rows)
+	lastVisible := len(rows) - 1
+	if lastVisible >= start+maxInputLines {
+		lastVisible = start + maxInputLines - 1
+	}
 	var out []string
-	for i := start; i < len(rows) && i < start+maxInputLines; i++ {
+	for i := start; i <= lastVisible; i++ {
 		s := padRunes(rows[i], boxW)
+		// Clip markers go under the cursor so the block always stays visible.
+		if clipAbove && i == start {
+			s = clipMarker(s, boxW)
+		} else if clipBelow && i == lastVisible {
+			s = clipMarker(s, boxW)
+		}
 		if i == cursorRow {
-			overChar := cursorCol < len(rows[i])
+			overChar := cursorCol < runesWidth(rows[i])
 			s = applyCursor(s, cursorCol, overChar)
 		}
 		if i == start {
@@ -1206,44 +1454,95 @@ func (in *tuiInput) render(width int) string {
 
 // applyCursor renders the cell under the cursor: the character in reverse
 // video (the opposite of the cursor colour) when it is over text, or a solid
-// block when the cursor sits past the text. A cursor at the very end of a row
-// that exactly fills the box is drawn over the last cell.
+// block when the cursor sits past the text. col is a display column; it maps
+// onto the rune that covers it, so a wide character under the cursor is
+// highlighted whole. A cursor at the very end of a row that exactly fills the
+// box is drawn over the last cell.
 func applyCursor(s string, col int, overChar bool) string {
 	r := []rune(s)
 	if len(r) == 0 {
 		return "█"
 	}
-	if col >= len(r) {
-		col = len(r) - 1
+	idx := runeIndexAt(r, col)
+	if idx >= len(r) {
+		idx = len(r) - 1
 		overChar = false
 	}
 	if overChar {
-		return string(r[:col]) + "\x1b[7m" + string(r[col]) + ansiReset + string(r[col+1:])
+		return string(r[:idx]) + "\x1b[7m" + string(r[idx]) + ansiReset + string(r[idx+1:])
 	}
-	return string(r[:col]) + "█" + string(r[col+1:])
+	return string(r[:idx]) + "█" + string(r[idx+1:])
 }
 
-// wrapWords breaks a logical line into visual rows of at most width runes,
-// preferring to break at whitespace so words are never split. A word longer
-// than width hard-breaks.
+// runeWidth returns the display width of a rune in terminal columns: wide
+// (CJK, emoji) runes are 2, combining marks 0, everything else 1. Without
+// this, wrapping a Japanese prompt by rune count would overflow the box.
+func runeWidth(r rune) int { return runewidth.RuneWidth(r) }
+
+// textWidth returns the display width of a string in terminal columns.
+func textWidth(s string) int { return runewidth.StringWidth(s) }
+
+// runesWidth is textWidth for a rune slice.
+func runesWidth(s []rune) int { return runewidth.StringWidth(string(s)) }
+
+// runeIndexAt maps a display column back to the rune index that covers it
+// (the rune whose cell range contains displayCol), clamping to len(s).
+func runeIndexAt(s []rune, displayCol int) int {
+	w := 0
+	for i, r := range s {
+		rw := runeWidth(r)
+		if w+rw > displayCol {
+			return i
+		}
+		w += rw
+	}
+	return len(s)
+}
+
+// breakIndex returns the rune index where a width-limited first row of s
+// ends: the furthest index whose display width fits within width, preferring
+// to break just after a space (so a word is never split) — the space stays at
+// the end of the row and any further leading spaces of the remainder are
+// stripped by wrapWords.
+func breakIndex(s []rune, width int) int {
+	hard := 0
+	w := 0
+	for i, r := range s {
+		rw := runeWidth(r)
+		if w+rw > width {
+			break
+		}
+		w += rw
+		hard = i + 1
+	}
+	if hard == 0 {
+		// First rune wider than the box (a wide char in a 1-column box):
+		// take it anyway so the loop always makes progress.
+		hard = 1
+	}
+	for j := hard - 1; j >= 0; j-- {
+		if s[j] == ' ' {
+			return j + 1
+		}
+	}
+	return hard
+}
+
+// wrapWords breaks a logical line into visual rows of at most width display
+// columns, preferring to break at whitespace so words are never split. A word
+// longer than width hard-breaks (a wide rune is never split in half). The
+// rows are purely visual: hard line breaks are handled by the caller
+// splitting on '\n'.
 func wrapWords(s []rune, width int) [][]rune {
+	if width < 1 {
+		return [][]rune{s}
+	}
 	if len(s) == 0 {
 		return [][]rune{{}}
 	}
 	var out [][]rune
-	for len(s) > width {
-		cut := width
-		for i := width; i > 0; i-- {
-			if s[i-1] == ' ' {
-				cut = i
-				break
-			}
-		}
-		if cut == width { // single word longer than width: hard break
-			out = append(out, s[:width])
-			s = s[width:]
-			continue
-		}
+	for runesWidth(s) > width {
+		cut := breakIndex(s, width)
 		out = append(out, s[:cut])
 		s = s[cut:]
 		for len(s) > 0 && s[0] == ' ' {
@@ -1256,13 +1555,21 @@ func wrapWords(s []rune, width int) [][]rune {
 	return out
 }
 
-// padRunes right-pads a visual row to width columns.
+// padRunes right-pads a visual row to width display columns.
 func padRunes(r []rune, width int) string {
 	s := string(r)
-	if n := width - len(r); n > 0 {
+	if n := width - textWidth(s); n > 0 {
 		s += strings.Repeat(" ", n)
 	}
 	return s
+}
+
+// clipMarker replaces the rightmost display cell of a padded row with "…",
+// signalling that input content is scrolled out of the box above or below.
+func clipMarker(s string, boxW int) string {
+	r := []rune(s)
+	r[runeIndexAt(r, boxW-1)] = '…'
+	return string(r)
 }
 
 // runTUI runs the interactive bubbletea session. It must only be called when

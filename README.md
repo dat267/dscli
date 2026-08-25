@@ -108,22 +108,29 @@ conversation: 0123456789:42
 ```
 
 Keys: **Enter** submits, **Ctrl+J / Alt+Enter** inserts a newline, **Up/Down**
-move the cursor through multiline input (at the first/last line they recall
-history), **Tab** completes a command (cycling through the candidates when
-several match; Enter also completes), **Esc** clears the
-input, **Ctrl+C** quits. The layout is a scrollable chat pane on top, a 2-line input
-with a `::: ` prompt (text wraps inside it) at the bottom, and the status line
-below it. PgUp/PgDn scroll a page, the mouse wheel scrolls a few lines, and
-Home / End jump to the top/bottom. When a persisted conversation is resumed
-the past messages are loaded from the server into the pane first. User
-messages render in a foreground colour to stand apart from the assistant's
-replies. `/new` starts a fresh conversation, `/clear` forgets the
-persisted default session and starts a fresh one (`/clear --delete` also
-removes the old thread server-side). **`/file <path>`** loads a file's (or
-directory's) contents (relative to `--workdir`, defaulting to `.`) into a
-buffer that is prepended to the next submitted message inside a `<file>`/`<dir>`
-block — repeat it to stack several files, and a system note in the chat shows
-each load and the final attachments.
+move the cursor one *visual* row at a time through wrapped input (at the first
+and last rows they fall back to history recall), **Ctrl+←/→** (or **Alt+←/→**)
+move by word, **Alt+Backspace** deletes the word before the cursor, **Ctrl+A /**
+**Ctrl+E** jump to the start/end of the line, and **Tab** completes a command
+(cycling through the candidates when several match; Enter also completes).
+**Esc** first dismisses the completion menu without losing what you typed, then
+clears the input, and **Ctrl+C** interrupts a reply while it streams — the chat
+stays open — or quits when idle. The layout is a scrollable chat pane on top, a
+2-line input with a `::: ` prompt at the bottom, and the status line below it.
+Text wraps inside the box by *display* width (so line breaks land correctly for
+CJK/wide characters too), and a `…` in the rightmost cell marks content
+scrolled out of the box. PgUp/PgDn scroll a page, the mouse wheel scrolls a few
+lines, **Ctrl+L** clears the pane, and Home / End jump to the top/bottom. When
+a persisted conversation is resumed the past messages are loaded from the
+server into the pane first. User messages render in a foreground colour to
+stand apart from the assistant's replies. `/new` starts a fresh conversation,
+`/clear` forgets the persisted default session and starts a fresh one
+(`/clear --delete` also removes the old thread server-side).
+**`/file <path>`** loads a file's (or directory's) contents (relative to
+`--workdir`, defaulting to `.`) into a buffer that is prepended to the next
+submitted message inside a `<file>`/`<dir>` block — repeat it to stack several
+files, and a system note in the chat shows each load and the final
+attachments.
 
 **Censorship.** Prompts are sent exactly as written — no hidden instructions.
 If DeepSeek's content filter rejects a reply, the CLI just prints a short
