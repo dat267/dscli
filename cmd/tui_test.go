@@ -458,25 +458,36 @@ func TestTUISuggestionsVertical(t *testing.T) {
 		t.Errorf("suggestionRows = %d, want 3", m.suggestionRows())
 	}
 
-	// A long list is capped; cycling deep keeps the highlight in view.
+	// A long list is capped and scrolls; the below-marker tail shrinks as you
+	// navigate down and disappears at the bottom.
 	var many []string
 	for i := 0; i < 20; i++ {
 		many = append(many, fmt.Sprintf("item%d", i))
 	}
 	m.suggestions = many
 	m.suggestIdx = 15
-	rows := strings.Split(m.renderSuggestions(), "\n")
-	if len(rows) > maxSuggestionRows+1 {
-		t.Errorf("menu too tall: %d rows", len(rows))
+	rendered := m.renderSuggestions()
+	if !strings.Contains(rendered, "item15") {
+		t.Errorf("highlighted item not visible in scrolled menu: %v", rendered)
 	}
-	found := false
-	for _, r := range rows {
-		if strings.Contains(r, "item15") {
-			found = true
-		}
+	if !strings.Contains(rendered, "↓ 4 more") {
+		t.Errorf("missing below-tail at mid-list: %v", rendered)
 	}
-	if !found {
-		t.Errorf("highlighted item not visible in scrolled menu: %v", rows)
+	if !strings.Contains(rendered, "↑ 8 more") {
+		t.Errorf("missing above-tail at mid-list: %v", rendered)
+	}
+	// suggestionRows matches the actual rendered line count.
+	if got := strings.Count(rendered, "\n") + 1; got != m.suggestionRows() {
+		t.Errorf("rendered rows = %d, suggestionRows = %d", got, m.suggestionRows())
+	}
+	// At the bottom the below-tail is gone.
+	m.suggestIdx = 19
+	rendered = m.renderSuggestions()
+	if strings.Contains(rendered, "↓") {
+		t.Errorf("below-tail should vanish at the bottom: %v", rendered)
+	}
+	if !strings.Contains(rendered, "item19") {
+		t.Errorf("last item not visible: %v", rendered)
 	}
 }
 

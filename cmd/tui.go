@@ -992,18 +992,45 @@ func (m *tuiModel) inputHeight() int { return maxInputLines }
 // within it.
 const maxInputLines = 2
 
-// maxSuggestionRows caps how many terminal rows the completion menu occupies
-// before the list scrolls to keep the highlighted item visible.
+// maxSuggestionRows caps how many completion entries the menu shows; when the
+// list is longer the menu scrolls, marking any entries above/below the window.
 const maxSuggestionRows = 8
 
-// suggestionRows returns how many terminal rows the completion menu occupies
-// (0 when no suggestions are shown).
-func (m *tuiModel) suggestionRows() int {
+// suggestionWindow returns the [start,end) index range of suggestions to
+// display, keeping the highlighted entry visible.
+func (m *tuiModel) suggestionWindow() (start, end int) {
 	n := len(m.suggestions)
-	if n > maxSuggestionRows {
-		return maxSuggestionRows
+	if n == 0 {
+		return 0, 0
 	}
-	return n
+	if n <= maxSuggestionRows {
+		return 0, n
+	}
+	start = m.suggestIdx - maxSuggestionRows + 1
+	if start < 0 {
+		start = 0
+	}
+	if start+maxSuggestionRows > n {
+		start = n - maxSuggestionRows
+	}
+	return start, start + maxSuggestionRows
+}
+
+// suggestionRows returns how many terminal rows the completion menu occupies
+// (0 when no suggestions are shown), matching renderSuggestions exactly.
+func (m *tuiModel) suggestionRows() int {
+	if len(m.suggestions) == 0 {
+		return 0
+	}
+	start, end := m.suggestionWindow()
+	rows := end - start
+	if start > 0 {
+		rows++
+	}
+	if end < len(m.suggestions) {
+		rows++
+	}
+	return rows
 }
 
 func (m *tuiModel) renderSuggestions() string {
@@ -1011,22 +1038,13 @@ func (m *tuiModel) renderSuggestions() string {
 	if n == 0 {
 		return ""
 	}
-	start := 0
-	shown := n
-	if n > maxSuggestionRows {
-		// Keep the highlighted entry visible.
-		start = m.suggestIdx - maxSuggestionRows + 1
-		if start < 0 {
-			start = 0
-		}
-		shown = maxSuggestionRows
-		if start+shown > n {
-			start = n - shown
-		}
-	}
+	start, end := m.suggestionWindow()
 	var b strings.Builder
-	for i := start; i < start+shown; i++ {
-		if i > start {
+	if start > 0 {
+		b.WriteString(m.u.dim(fmt.Sprintf("↑ %d more", start)))
+	}
+	for i := start; i < end; i++ {
+		if b.Len() > 0 {
 			b.WriteString("\n")
 		}
 		s := m.suggestions[i]
@@ -1036,8 +1054,11 @@ func (m *tuiModel) renderSuggestions() string {
 			b.WriteString(m.u.dim(s))
 		}
 	}
-	if n > maxSuggestionRows {
-		b.WriteString("\n" + m.u.dim(fmt.Sprintf("… %d more", n-maxSuggestionRows)))
+	if end < n {
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(m.u.dim(fmt.Sprintf("↓ %d more", n-end)))
 	}
 	return b.String()
 }
