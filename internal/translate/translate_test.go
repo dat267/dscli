@@ -247,12 +247,12 @@ func TestTranslateThinkingFlag(t *testing.T) {
 	}
 }
 
-// TestTranslateThinkingBiggerChunks: with DeepThink enabled the engine
-// assumes a larger per-reply output cap, so chunks are sized bigger and a
-// fixed file needs fewer completions than without thinking.
+// TestTranslateThinkingBiggerChunks: with DeepThink enabled the engine sizes
+// chunks at a fixed 512 KiB, so a file needs far fewer completions than the
+// adaptive (≈31 KiB) sizing used without thinking.
 func TestTranslateThinkingBiggerChunks(t *testing.T) {
 	// The fake replies a fixed ~8 KiB regardless of input, so the learned
-	// output/input ratio is ≈1 and chunk size ≈ cap×0.85.
+	// output/input ratio is ≈1.
 	reply := sseReply(t, strings.Repeat("x", 8192))
 	makeSrv := func() (*httptest.Server, *int) {
 		return fakeTranslateServer(t, func(n int) (int, string) { return 200, reply })
@@ -274,7 +274,18 @@ func TestTranslateThinkingBiggerChunks(t *testing.T) {
 	think := *calls2
 
 	if think >= plain {
-		t.Errorf("thinking completions = %d, want fewer than plain (%d) — thinking should size chunks bigger", think, plain)
+		t.Errorf("thinking completions = %d, want fewer than plain (%d)", think, plain)
+	}
+
+	// A 700 KiB file with thinking splits as: probe (8 KiB) + 512 KiB + rest
+	// = 3 completions — the 512 KiB chunk target is used directly.
+	srv3, calls3 := makeSrv()
+	client3 := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv3.URL)
+	if _, _, err := Translate(context.Background(), client3, "sess-1", []byte(strings.Repeat("a", 700*1024)), "text", Options{To: "English", Thinking: true}); err != nil {
+		t.Fatalf("thinking 700KiB: %v", err)
+	}
+	if got := *calls3; got != 3 {
+		t.Errorf("thinking 700 KiB completions = %d, want 3 (probe + 512 KiB + rest)", got)
 	}
 }
 

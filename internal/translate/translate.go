@@ -47,11 +47,16 @@ const (
 	// defaultCapBytes is the model's per-reply output cap used until a real
 	// truncation is observed (the site cuts replies around 36 KiB).
 	defaultCapBytes = 36 * 1024
-	// thinkingCapBytes is the assumed per-reply output cap when DeepThink
-	// reasoning is enabled: the reasoning model allows far longer replies than
-	// Instant, so chunks are sized bigger (fewer, longer generations). The
-	// real cap is still learned from the first truncation either way.
+	// thinkingCapBytes is the per-reply output cap assumed when DeepThink
+	// reasoning is enabled, used until a real truncation is observed: the
+	// reasoning model allows far longer replies than Instant. The real cap is
+	// still learned from the first truncation either way.
 	thinkingCapBytes = 3 * defaultCapBytes
+	// thinkingChunkBytes is the fixed chunk size used when DeepThink is
+	// enabled: the reasoning model handles long output, so chunks can be
+	// large (bounded by --chunk-bytes); the truncation shrink still guards
+	// against a reply that is cut off.
+	thinkingChunkBytes = 512 * 1024
 	// outputCapMargin keeps a sized chunk's expected output safely short of
 	// the cap, so it stops generating before the cut-off point.
 	outputCapMargin = 0.85
@@ -335,7 +340,16 @@ func Translate(ctx context.Context, client *deepseek.Client, sessionID string, c
 			inOutRatio = float64(len(text)) / float64(len(chunk))
 		}
 		if inOutRatio > 0 {
-			if n := idealChunk(capBytes, inOutRatio, maxChunk); growOK || n < chunkBytes {
+			n := idealChunk(capBytes, inOutRatio, maxChunk)
+			if opts.Thinking {
+				// DeepThink: use a fixed large chunk (bounded by the user's
+				// --chunk-bytes cap); the truncation shrink still guards it.
+				n = thinkingChunkBytes
+				if n > maxChunk {
+					n = maxChunk
+				}
+			}
+			if growOK || n < chunkBytes {
 				chunkBytes = n
 			}
 		}
