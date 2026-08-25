@@ -2,17 +2,25 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
+	"time"
 
 	"github.com/dat267/dscli/internal/deepseek"
 )
 
 // SessionCmdGroup implements `dscli session`: show the persisted default
-// conversation, forget it, delete it server-side and forget it, or inspect the
-// saved session texts. A bare `dscli session` prints the persisted value.
+// conversation, list and select sessions with saved texts, forget/delete the
+// default, or inspect the saved texts. A bare `dscli session` prints the
+// persisted value.
 type SessionCmdGroup struct {
+	List       SessionListCmd       `cmd:"" help:"List sessions with saved texts"`
+	Select     SessionSelectCmd     `cmd:"" help:"Select a session to resume as the default"`
 	Transcript SessionTranscriptCmd `cmd:"" help:"Print or delete the saved session texts (transcript) for a session"`
 	Delete     SessionDeleteCmd     `cmd:"" help:"Delete the persisted default session server-side and forget it"`
 	Forget     SessionForgetCmd     `cmd:"" help:"Forget the persisted default session (the thread is kept server-side)"`
@@ -23,6 +31,124 @@ func (c *SessionCmdGroup) Run(app *App) error {
 		fmt.Println(saved)
 	} else {
 		fmt.Println("no persisted session")
+	}
+	return nil
+}
+
+// SessionListCmd implements `dscli session list`: list the sessions the CLI
+// knows about locally — those with a saved transcript — most recently used
+// first, marking the persisted default.
+type SessionListCmd struct{}
+
+func (c *SessionListCmd) Run(app *App) error {
+	cfgPath := app.CfgPath()
+	dir := filepath.Join(filepath.Dir(cfgPath), transcriptDirName)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Println("no local sessions (nothing saved yet)")
+			return nil
+		}
+		return fmt.Errorf("read transcripts: %w", err)
+	}
+	type row struct {
+		id    string
+		msgs  int
+		last  string
+		mtime int64
+	}
+	var rows []row
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		msgs, last := transcriptSummary(path, info.ModTime().Unix())
+		rows = append(rows, row{
+			id:    strings.TrimSuffix(e.Name(), ".jsonl"),
+			msgs:  msgs,
+			last:  last,
+			mtime: info.ModTime().Unix(),
+		})
+	}
+	if len(rows) == 0 {
+		fmt.Println("no local sessions (nothing saved yet)")
+		return nil
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].mtime > rows[j].mtime })
+	saved, _ := splitConversation(loadSavedSession(cfgPath))
+	for _, r := range rows {
+		marker := ""
+		if r.id == saved {
+			marker = "  (default)"
+		}
+		fmt.Printf("%-24s %d msgs  last %s%s\n", r.id, r.msgs, r.last, marker)
+	}
+	return nil
+}
+
+// transcriptSummary counts a transcript file's messages and returns the
+// timestamp of the last one, falling back to the file's mtime when the file
+// is empty or unreadable.
+func transcriptSummary(path string, fallbackMtime int64) (msgs int, last string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, timeString(fallbackMtime)
+	}
+	last = timeString(fallbackMtime)
+	for _, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		msgs++
+		var e transcriptEntry
+		if json.Unmarshal([]byte(line), &e) == nil && e.Time != "" {
+			last = e.Time
+		}
+	}
+	return msgs, last
+}
+
+// timeString renders a unix timestamp in a compact local form.
+func timeString(ts int64) string {
+	return time.Unix(ts, 0).Format("2006-01-02 15:04")
+}
+
+// transcriptCount reports how many messages a session's transcript holds, and
+// whether the transcript exists at all.
+func transcriptCount(cfgPath, bare string) (msgs int, ok bool) {
+	entries, err := loadTranscript(cfgPath, bare)
+	if err != nil || len(entries) == 0 {
+		return 0, false
+	}
+	return len(entries), true
+}
+
+// SessionSelectCmd implements `dscli session select <session>`: make the
+// given session the persisted default to resume next time. The thread resumes
+// from its root (the bare session id; a "session:message" tail is stripped).
+type SessionSelectCmd struct {
+	Session string `arg:"" help:"Session id to resume as the default"`
+}
+
+func (c *SessionSelectCmd) Run(app *App) error {
+	path := app.CfgPath()
+	bare, _ := splitConversation(strings.TrimSpace(c.Session))
+	if bare == "" {
+		return errors.New("give a session id (run 'dscli session list' to see the saved ones)")
+	}
+	if msgs, ok := transcriptCount(path, bare); ok {
+		fmt.Printf("selected session %s (%d saved messages)\n", bare, msgs)
+	} else {
+		fmt.Printf("selected session %s (no local transcript yet — first chat will create it)\n", bare)
+	}
+	if err := saveSession(path, bare); err != nil {
+		return err
 	}
 	return nil
 }

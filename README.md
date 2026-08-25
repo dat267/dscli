@@ -25,6 +25,8 @@ Commands:
                         or stdin)
   translate             Translate a file (txt, md, lrc, srt, vtt, ass, ttml,
                         epub) via the model
+  session list          List sessions with saved texts
+  session select        Select a session to resume as the default
   session transcript    Print or delete the saved session texts (transcript) for
                         a session
   session delete        Delete the persisted default session server-side and
@@ -162,6 +164,8 @@ conversation id shown is the live thread's position, and the config's
 
 ```bash
 dscli session                 # show the persisted conversation
+dscli session list            # list sessions with saved texts, most recent first (default marked)
+dscli session select <id>     # make a session the default to resume
 dscli session forget          # forget it (thread stays server-side)
 dscli session delete          # delete it server-side and forget it
 dscli config unset session    # equivalent to `session forget`

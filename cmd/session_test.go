@@ -347,4 +347,94 @@ func TestSessionDeleteNoCreds(t *testing.T) {
 	}
 }
 
+// TestSessionList: list shows the locally saved sessions (transcripts) with
+// their message counts and marks the persisted default.
+func TestSessionList(t *testing.T) {
+	cfg := filepath.Join(t.TempDir(), "dscli.json")
+	appendTranscript(cfg, "sess-1", "user", "hi")
+	appendTranscript(cfg, "sess-1", "assistant", "hello")
+	appendTranscript(cfg, "sess-2", "user", "yo")
+	if err := saveSession(cfg, "sess-1:7"); err != nil {
+		t.Fatal(err)
+	}
+	out := captureStdout(t, func() {
+		if err := (&SessionListCmd{}).Run(&App{cfgPath: cfg}); err != nil {
+			t.Fatalf("session list: %v", err)
+		}
+	})
+	for _, want := range []string{"sess-1", "sess-2", "2 msgs", "1 msgs", "(default)"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("list output missing %q:\n%s", want, out)
+		}
+	}
+	// The default marker sits on sess-1, not sess-2.
+	sess1 := strings.Index(out, "sess-1")
+	sess2 := strings.Index(out, "sess-2")
+	if sess1 < 0 || sess2 < 0 || sess1 > sess2 {
+		t.Errorf("unexpected order:\n%s", out)
+	}
+}
+
+// TestSessionListEmpty: no transcripts means no sessions.
+func TestSessionListEmpty(t *testing.T) {
+	cfg := filepath.Join(t.TempDir(), "dscli.json")
+	out := captureStdout(t, func() {
+		if err := (&SessionListCmd{}).Run(&App{cfgPath: cfg}); err != nil {
+			t.Fatalf("session list: %v", err)
+		}
+	})
+	if !strings.Contains(out, "no local sessions") {
+		t.Errorf("empty list output = %q", out)
+	}
+}
+
+// TestSessionSelect: select saves the bare session id as the persisted
+// default, reports how many saved messages it has, and warns when the session
+// has no local transcript yet.
+func TestSessionSelect(t *testing.T) {
+	cfg := filepath.Join(t.TempDir(), "dscli.json")
+	appendTranscript(cfg, "sess-9", "user", "why?")
+	appendTranscript(cfg, "sess-9", "assistant", "because")
+	app := &App{cfgPath: cfg}
+
+	out := captureStdout(t, func() {
+		if err := (&SessionSelectCmd{Session: "sess-9"}).Run(app); err != nil {
+			t.Fatalf("session select: %v", err)
+		}
+	})
+	if !strings.Contains(out, "selected session sess-9 (2 saved messages)") {
+		t.Errorf("select output = %q", out)
+	}
+	if got := loadSavedSession(cfg); got != "sess-9" {
+		t.Errorf("saved default = %q, want sess-9", got)
+	}
+
+	// A session:message tail is stripped — selection resumes from the root.
+	if err := (&SessionSelectCmd{Session: "sess-7:123"}).Run(app); err != nil {
+		t.Fatalf("session select: %v", err)
+	}
+	if got := loadSavedSession(cfg); got != "sess-7" {
+		t.Errorf("saved default = %q, want sess-7", got)
+	}
+
+	// No local transcript: still accepted, with a note.
+	noLocal := captureStdout(t, func() {
+		if err := (&SessionSelectCmd{Session: "sess-new"}).Run(app); err != nil {
+			t.Fatalf("session select: %v", err)
+		}
+	})
+	if !strings.Contains(noLocal, "no local transcript yet") {
+		t.Errorf("no-local output = %q", noLocal)
+	}
+
+	// Empty session: error, nothing selected.
+	before := loadSavedSession(cfg)
+	if err := (&SessionSelectCmd{}).Run(app); err == nil {
+		t.Error("empty select should error")
+	}
+	if got := loadSavedSession(cfg); got != before {
+		t.Errorf("saved default changed on empty select: %q", got)
+	}
+}
+
 var _ = deepseek.Session{} // keep the import if assertions change
