@@ -18,15 +18,14 @@ import (
 // history, and a slash-command suggestion menu — the terminal-agent feel of
 // opencode / Claude Code.
 //
-// Output routing: the underlying ChatCmd's answer/preview/confirm hooks are
-// pointed at this model, so the model's reply, tool notes, plan previews and
-// write-confirmations render inside the TUI instead of stdout/stderr. A turn
-// runs in a goroutine and reports deltas over a channel that the model pumps.
+// Output routing: the underlying ChatCmd's answer/preview hooks are pointed
+// at this model, so the model's reply and progress notes render inside the
+// TUI instead of stdout/stderr. A turn runs in a goroutine and reports deltas
+// over a channel that the model pumps.
 type tuiModel struct {
 	chat         *ChatCmd
 	client       *deepseek.Client
 	model        string
-	fileTools    bool
 	thinking     bool
 	search       bool
 	cfgPath      string
@@ -55,10 +54,6 @@ type tuiModel struct {
 	suggestions []string
 	suggestIdx  int
 
-	awaitingConfirm bool
-	confirmPrompt   string
-	confirmResp     chan bool
-
 	turns int
 	quit  bool
 	err   error
@@ -67,10 +62,6 @@ type tuiModel struct {
 // stream messages sent by the turn goroutine into the model.
 type streamDelta struct{ text string }
 type streamNote struct{ text string }
-type streamConfirm struct {
-	prompt string
-	resp   chan bool
-}
 type streamDone struct {
 	err     error
 	convID  string
@@ -82,7 +73,6 @@ func newTUIModel(chat *ChatCmd, client *deepseek.Client, conversation string, tr
 		chat:         chat,
 		client:       client,
 		model:        effectiveModel(chat.Model),
-		fileTools:    chat.FileTools,
 		thinking:     chat.Thinking,
 		search:       chat.Search,
 		cfgPath:      chat.cfgPath,
@@ -107,8 +97,8 @@ func (m *tuiModel) refreshStatus() {
 		mode = "persisted"
 	}
 	m.status = m.u.muted(fmt.Sprintf(
-		"DeepSeek · model %s · thinking %s · search %s · tools %s · %s",
-		m.model, onoff(m.thinking), onoff(m.search), onoff(m.fileTools), mode,
+		"DeepSeek · model %s · thinking %s · search %s · %s",
+		m.model, onoff(m.thinking), onoff(m.search), mode,
 	))
 }
 
@@ -164,11 +154,6 @@ func (m *tuiModel) startTurn(prompt string) tea.Cmd {
 	ch.preview = func(t string) {
 		m.streamCh <- streamNote{t}
 	}
-	ch.confirm = func(q string) bool {
-		resp := make(chan bool)
-		m.streamCh <- streamConfirm{prompt: q, resp: resp}
-		return <-resp
-	}
 	recoverStale := m.firstTurn && m.trusted
 	m.firstTurn = false
 	go func() {
@@ -194,15 +179,9 @@ func (m *tuiModel) startTurn(prompt string) tea.Cmd {
 	return pump(m.streamCh)
 }
 
-// doTurn runs one user message, mirroring the scanner REPL: oneTurn when file
-// tools are off, the tool loop otherwise.
+// doTurn runs one user message, mirroring the scanner REPL.
 func (m *tuiModel) doTurn(ctx context.Context, ch *ChatCmd, sid, prompt string, sources *[]deepseek.Source) (string, error) {
-	if !m.fileTools {
-		return ch.oneTurn(ctx, m.client, sid, prompt, m.model, ch.answerWriter(), sources)
-	}
-	return ch.turn(ctx, m.client, sid, prompt, m.model, true, func(s string) {
-		m.streamCh <- streamNote{s}
-	}, sources)
+	return ch.oneTurn(ctx, m.client, sid, prompt, m.model, ch.answerWriter(), sources)
 }
 
 func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -248,11 +227,6 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case streamNote:
 		m.appendLine(m.u.dim(msg.text))
 		return m, pump(m.streamCh)
-	case streamConfirm:
-		m.awaitingConfirm = true
-		m.confirmPrompt = msg.prompt
-		m.confirmResp = msg.resp
-		return m, pump(m.streamCh)
 	case streamDone:
 		m.busy = false
 		if msg.err != nil {
@@ -287,15 +261,6 @@ func (m *tuiModel) renderSources(sources []deepseek.Source) {
 }
 
 func (m *tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	if m.awaitingConfirm {
-		switch msg.String() {
-		case "y", "Y", "yes":
-			m.respondConfirm(true)
-		case "enter", "n", "N", "no", "esc", "ctrl+c":
-			m.respondConfirm(false)
-		}
-		return m, nil
-	}
 	if m.busy {
 		if msg.String() == "ctrl+c" {
 			if m.cancel != nil {
@@ -407,16 +372,7 @@ func normalizePasteRunes(runes []rune) []rune {
 	return out
 }
 
-func (m *tuiModel) respondConfirm(yes bool) {
-	if m.confirmResp != nil {
-		m.confirmResp <- yes
-		m.confirmResp = nil
-	}
-	m.awaitingConfirm = false
-}
-
 func (m *tuiModel) quitCleanup() {
-	m.respondConfirm(false)
 	if m.cancel != nil {
 		m.cancel()
 	}
@@ -453,7 +409,7 @@ func (m *tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 	m.addHistory(line)
 	m.appendLine(renderUserLine(line))
 	m.appendLine("") // breathing room before the reply streams
-	return m, m.startTurn(line)
+	return m, m.startTurn(m.chat.expandMentions(line))
 }
 
 // renderUserLine styles a submitted user message with a foreground colour so
@@ -510,7 +466,7 @@ func renderHistory(hist []deepseek.HistoryMessage) string {
 func knownCommand(line string) bool {
 	cmd, _, _ := strings.Cut(line, " ")
 	switch cmd {
-	case "/exit", "/quit", "/new", "/help", "/model", "/thinking", "/search", "/tools", "/files", "/clear":
+	case "/exit", "/quit", "/new", "/help", "/model", "/thinking", "/search", "/clear":
 		return true
 	}
 	return false
@@ -590,7 +546,7 @@ func suggestCommands(token string) []string {
 		return nil
 	}
 	var out []string
-	for _, c := range []string{"/exit", "/quit", "/new", "/help", "/model", "/thinking", "/search", "/tools", "/files", "/clear"} {
+	for _, c := range []string{"/exit", "/quit", "/new", "/help", "/model", "/thinking", "/search", "/clear"} {
 		if strings.HasPrefix(c, token) {
 			out = append(out, c)
 		}
@@ -619,7 +575,7 @@ func (m *tuiModel) handleCommand(line string) (tea.Model, tea.Cmd) {
 		m.refreshStatus()
 		return m, nil
 	case "/help":
-		m.appendLine(m.u.dim("commands: /exit /quit /new /model /thinking /search /tools /files /clear /help"))
+		m.appendLine(m.u.dim("commands: /exit /quit /new /model /thinking /search /clear /help"))
 		m.appendLine(m.u.dim("  /clear [--delete]  forget the persisted default session (--delete removes it server-side)"))
 		m.appendLine(m.u.dim("enter submits · ctrl+j / alt+enter newline · up/down cursor (history at first/last line) · pgup/pgdn/home/end scroll · tab completes /commands"))
 		return m, nil
@@ -646,15 +602,6 @@ func (m *tuiModel) handleCommand(line string) (tea.Model, tea.Cmd) {
 	case "/search":
 		m.search = toggleState(line, "/search", m.search)
 		m.chat.Search = m.search
-		m.refreshStatus()
-		return m, nil
-	case "/tools", "/files":
-		cmd := "/tools"
-		if strings.HasPrefix(line, "/files") {
-			cmd = "/files"
-		}
-		m.fileTools = toggleState(line, cmd, m.fileTools)
-		m.chat.FileTools = m.fileTools
 		m.refreshStatus()
 		return m, nil
 	case "/clear":
@@ -711,13 +658,10 @@ func (m *tuiModel) newSession() {
 }
 
 // outputRows returns how many scrollback lines fit between the status line
-// and the input (plus any confirm/suggestion rows).
+// and the input (plus any suggestion rows).
 func (m *tuiModel) outputRows() int {
 	inputH := m.inputHeight()
 	extra := 0
-	if m.awaitingConfirm {
-		extra++
-	}
 	if len(m.suggestions) > 0 {
 		extra++
 	}
@@ -892,11 +836,7 @@ func (m *tuiModel) render() string {
 		b.WriteString("\n")
 	}
 
-	// 2. Write-confirm prompt and slash-command menu sit just above the input.
-	if m.awaitingConfirm {
-		b.WriteString(m.u.bold("confirm: " + m.confirmPrompt + " [y/N] "))
-		b.WriteString("\n")
-	}
+	// 2. Slash-command menu sits just above the input.
 	if len(m.suggestions) > 0 {
 		b.WriteString(m.renderSuggestions())
 		b.WriteString("\n")

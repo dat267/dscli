@@ -13,8 +13,7 @@ import (
 
 // TranslateCmd implements `dscli translate`: a format-aware, chunked file
 // translation driven by the DeepSeek session. The heavy lifting lives in
-// internal/translate so the CLI command and the translate_file tool call
-// share one engine.
+// internal/translate.
 type TranslateCmd struct {
 	File         string        `arg:"" help:"File to translate (txt, md, lrc, srt, vtt, ass, ttml, epub)"`
 	From         string        `help:"Source language (defaults to auto-detect)" default:"auto"`

@@ -1,6 +1,5 @@
 // Package translate implements the chunked, format-aware translation engine
-// shared by the `dscli translate` command and the translate_file tool call,
-// so the command and the chat mode can never drift apart.
+// behind the `dscli translate` command.
 package translate
 
 import (
@@ -19,9 +18,6 @@ import (
 const (
 	// MaxInputBytes caps a full translate job on the CLI.
 	MaxInputBytes = 64 << 20 // 64 MiB
-	// MaxChatInputBytes caps what the chat translate_file tool accepts —
-	// one tool call is a deliberately long unit, so keep it sane.
-	MaxChatInputBytes = 1 << 20 // 1 MiB
 	// MaxContextTokens is the model's maximum context window (1M tokens).
 	// The site's long-text mode slides/truncates older history, so each
 	// chunk can use the full window.

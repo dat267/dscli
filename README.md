@@ -21,7 +21,6 @@ Flags:
 Commands:
   chat              Chat with DeepSeek (omit the prompt for an interactive
                     session)
-  do                Do a one-shot task with file tools (DeepThink on by default)
   ask               Ask the model once and print the answer (input from args or
                     stdin)
   translate         Translate a file (txt, md, lrc, srt, vtt, ass, ttml,
@@ -96,7 +95,7 @@ type; replies, tool notes and file-write previews render inside the pane
 instead of stdout:
 
 ```
-DeepSeek · model default · thinking off · search off · tools off · persisted
+DeepSeek · model default · thinking off · search off · persisted
 
 What is 2+2?
 4
@@ -104,7 +103,6 @@ What is 2+2?
 /model expert              # switch model (starts a fresh conversation)
 /thinking on               # or bare /thinking to flip it
 /search off
-/tools                    # toggle file tools (list/read/meta/grep/fetch_url/…)
 /exit
 conversation: 0123456789:42
 ```
@@ -120,7 +118,10 @@ the past messages are loaded from the server into the pane first. User
 messages render in a foreground colour to stand apart from the assistant's
 replies. `/new` starts a fresh conversation, `/clear` forgets the
 persisted default session and starts a fresh one (`/clear --delete` also
-removes the old thread server-side), and `/tools` toggles the file tools.
+removes the old thread server-side). An **`@file` mention** in a message loads
+that file's contents (relative to `--workdir`, defaulting to `.`) into the
+prompt inside a `<file>` block, so you can drop a file into the chat with
+`@path/to/file`.
 
 **Censorship.** Prompts are sent exactly as written — no hidden instructions.
 If DeepSeek's content filter rejects a reply, the CLI just prints a short
@@ -181,8 +182,7 @@ chapter-012.translated.zh.md    ← a second target, same dir
 ## Custom translation styles
 
 Every language pair can carry its own translation instructions. Inside each
-chunk prompt, the style is appended after the format rules; the `translate_file`
-chat tool resolves the same way, so CLI and chat mode stay consistent.
+chunk prompt, the style is appended after the format rules.
 
 **Resolution order** for a `from → to` pair:
 
@@ -203,21 +203,6 @@ file) and it applies to that pair everywhere:
 ```bash
 dscli translate book.lrc --from Japanese --to English   # picks up translate/ja-en.md if present
 dscli translate --instructions my-style.md chapter.md  # explicit file for any pair
-```
-
-## Batch translation in chat
-
-With `/tools` on you can drive translation as part of an organising session —
-translate several files, then rename/move the outputs:
-
-```
-translate all .lrc files in Music/ into Chinese
-translate_file Music/one.lrc
-Music/one.lrc → Music/one.translated.lrc (lrc, to Chinese)
-translate Music/one.lrc → Music/one.translated.lrc to Chinese? [y/N] y
-  chunk 1/1 ok
-…
-/help
 ```
 
 ## Models, DeepThink & web search
@@ -247,153 +232,6 @@ a new conversation, and `--model` cannot be combined with `--conversation`.
 DeepThink and search can be toggled freely at any point of a thread — and
 **both default to off** (the status line in the REPL shows the current state:
 `thinking off · search off`).
-
-## File tools
-
-The model can read and edit files in a working directory — enabled per run
-with `--file-tools` (and `--workdir` to scope it, defaulting to the current
-directory), or mid-session with `/tools`:
-
-```bash
-dscli chat --file-tools "what does this repo's Makefile do?"
-dscli chat --file-tools --workdir /path/to/project "rename the Foo function to Bar"
-```
-
-It calls a tool by replying with *only* a JSON object:
-
-```json
-{"tool":"list_directory","path":".","recursive":true}
-{"tool":"file_meta","path":"song.lrc"}
-{"tool":"read_file","path":"book.epub"}
-{"tool":"grep","pattern":"func main","path":"."}
-{"tool":"fetch_url","url":"https://example.com/page"}
-{"tool":"translate_file","path":"song.lrc","to":"Chinese"}
-{"tool":"create_file","path":"notes.txt","content":"hello"}
-{"tool":"edit_file","path":"src/cli.go","old":"func Foo(","new":"func Bar("}
-{"tool":"delete_file","path":"old.txt"}
-```
-
-- **`list_directory` and `read_file` run without prompting** — reading and
-  directory listing inside the workdir are always allowed. `file_meta`
-  reports size, mode, modified time, EPUB title/author, LRC/VTT duration,
-  and directory entry counts/total size without prompting. `list_directory`
-  lists ONE directory per call (directories marked with a trailing `/`,
-  files with human-readable sizes); add `"recursive": true` to map the whole
-  subtree in a single bounded call (≤ 500 entries, ≤ 6 levels deep) instead
-  of one call per directory — the model is instructed to prefer this when
-  exploring. `read_file` only reads text, **but `.epub` files are
-  auto-extracted** (ZIP of XHTML → spine-ordered chapters, markup stripped,
-  capped at the read limit) so books are readable.: binary content (NUL-byte detection over the leading
-  8 KB) and files larger than the size ceiling are rejected outright — never
-  truncated — and the rejection is fed back to the model, which is told not to
-  retry. The ceiling defaults to 512 KiB and is tunable per run:
-
-  ```bash
-  dscli chat --file-tools --max-read 100000 "summarize client.go"
-  ```
-
-  `list_directory` lists ONE directory, non-recursive, directories marked
-  with a trailing `/`. The model is instructed to start with
-  `{"tool":"list_directory","path":"."}` to discover files.
-- **`grep` and `fetch_url` also run without prompting.** `grep` searches a
-  Go regular expression over the workdir (or a single file/dir via `path`,
-  defaulting to `.`) and returns up to 200 matches as `path:line:text`; VCS
-  directories (`.git`/`.hg`/`.svn`), binary files and files over the read
-  ceiling are skipped, and case-insensitive search is `"(?i)pattern"`.
-  `fetch_url` retrieves an http(s) URL (redirects followed) and returns the
-  body — capped at the same 512 KiB read ceiling, binary or non-2xx
-  responses rejected, only `http`/`https` schemes allowed — as
-  `HTTP <status> · <final URL>` plus the text. Both are bounded and
-  read-only, so no confirmation is needed; the network call runs from your
-  machine.
-- **`translate_file`** bundles the whole translate pipeline into one tool
-  call (handy for bulk translating a library in chat mode): `path`, `to`
-  (target language), optional `output`. It previews (`song.lrc →
-  song.translated.lrc`, format + target), asks, then translates in a
-  dedicated ephemeral session using the exact same engine as `dscli
-  translate` — timestamps/XML/markup preserved and verified — writing the
-  result and telling the model it succeeded. Input is capped at 1 MiB per
-  call (use `dscli translate` for bigger files).
-- **`create_file`, `edit_file` and `delete_file` always ask first — after
-  showing a deterministic preview.** `create_file` makes a *new* file (it
-  errors if the path already exists, and creates parent directories within
-  the workdir); `edit_file` replaces the first exact occurrence; `delete_file`
-  removes a file and previews its head. Every write/delete is planned on the
-  actual file bytes, previewed line-by-line (`-` removed, `+` added), then
-  applied with exactly the planned content — so what you approve is precisely
-  what happens:
-
-  ```
-  a.txt — replacing first of 1 occurrence(s)
-        1 │ module x
-  -     2 │ go 1.26.5
-  +     2 │ go 1.27.0
-        3 │ require (
-  ```
-
-  The confirmation answer is read from the controlling terminal (`/dev/tty`),
-  so it never collides with the REPL's input; if no terminal is available the
-  write/delete is denied and the model is told not to retry. If an edit
-  pattern doesn't match, that surfaces at the preview step (nothing is
-  prompted) and the model is told to re-read the file and copy the exact
-  text.
-- Tool calls resolve within the same session (each `read_file`/`edit_file`
-  turn feeds a `<tool_result>` back), hard-capped at 12 tool calls per
-  user message — after the budget the model is forced to give a final prose
-  answer, so exploring a very large tree can never loop indefinitely. A
-  consecutive duplicate of the same deterministic read-only call
-  (`read_file`/`list_directory`/`file_meta`/`grep` with identical arguments —
-  a DeepThink model sometimes re-lists what it was just shown) is skipped and
-  the model is told to reuse the result it already has instead of burning a
-  budget slot. Listings
-  are read in bounded batches, so a directory with hundreds of thousands of
-  entries costs ~200 entries of work, not a full scan. The raw JSON never reaches your screen; a dim
-  note shows each call (`read_file Makefile`). All paths are confined to the
-  workdir (fetch_url is the one networked tool and never touches the
-  filesystem): lexical `..` escapes **and symlink chains leading outside** are
-  rejected via canonical resolution, writes preserve the target's file mode,
-  and every apply re-verifies the file still matches the preview (a file
-   changed in between — or a create target that appeared — refuses the
-   operation instead of clobbering). The session is the persisted default
-   (deleted on close only with `--no-persist`).
-
-`ask` is the minimal one-shot: positional args or piped stdin, the answer
-streams to stdout (or NDJSON with `--json-out`), and by default it resumes the
-same persisted default session as everything else (so consecutive `ask`s
-continue one thread; `--no-persist` runs in a fresh session deleted
-afterwards). Two shell gotchas:
-
-- **A prompt starting with `-`** is parsed as a flag; terminate flags with
-  `--`: `dscli ask -- "what is --help about?"`.
-- **`?` and `*` are shell globs** (zsh: `no matches found`); quote the prompt:
-  `dscli ask "What is the current gold price?"`.
-
-## One-shot tasks: `do`
-
-`do` is `ask` plus the file tools: a single task, run with DeepThink reasoning
-on by default, where the model can list/read/grep files and fetch URLs to get
-the job done — then gives one final prose answer. Like `ask`, the input is
-positional args or piped stdin, and by default it resumes the persisted default
-session (`--no-persist` runs in a fresh session deleted when the task ends):
-
-```bash
-dscli do "which functions in cmd/ are unused? check imports too"
-dscli do --workdir /path/to/project "refactor Foo to Bar and run the diff"
-echo "summarize this log" | dscli do
-```
-
-- File tools are always on; the same 12-call budget, workdir confinement and
-  confirm-before-write rules apply as in `chat --file-tools`. Writes still ask
-  first on the terminal.
-- **DeepThink is on by default** (`-t` flips it; disable with
-  `--thinking=false`), and `--search` enables web search.
-- **`-y` auto-approves every file write** (create/edit/rename/delete/translate
-  run without prompts) — combine it with a scoped `--workdir` to run a task
-  fully unattended.
-- `--json-out` emits the final answer as `{"delta":...}`, then a
-  `{"done":true}` line.
-- A task starting with `-` needs `--`: `dscli do -- "-delete that file"`.
-  The `?`/`*` glob gotcha above applies to `do` too.
 
 **Search citations:** with `-s` the reply carries `[citation:N]` markers; the
 CLI extracts the search sources from the stream (TOOL_SEARCH fragments /

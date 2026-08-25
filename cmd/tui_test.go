@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -33,7 +32,7 @@ func tuiHarness(t *testing.T, completions []string, workdir string) (*tuiModel, 
 }
 
 // pumpTUI drains the turn goroutine's messages into the model until the turn
-// finishes. If a write-confirmation arrives, it answers with deny.
+// finishes.
 func pumpTUI(m *tuiModel) {
 	for {
 		msg, ok := <-m.streamCh
@@ -41,10 +40,6 @@ func pumpTUI(m *tuiModel) {
 			return
 		}
 		switch msg.(type) {
-		case streamConfirm:
-			m.Update(msg) // sets m.confirmResp + awaitingConfirm
-			m.respondConfirm(false)
-			continue // the goroutine proceeds; keep draining
 		case streamDone:
 			m.Update(msg)
 			return
@@ -538,36 +533,4 @@ func TestTUIWheelAndHomeEndScroll(t *testing.T) {
 	if m.viewTop != wheelScrollLines {
 		t.Errorf("wheel down viewTop = %d, want %d", m.viewTop, wheelScrollLines)
 	}
-}
-
-// TestTUIFileToolsConfirmDenied: a file-tools edit that needs confirmation is
-// routed into the TUI; a deny leaves the file untouched and the model is told
-// not to retry.
-func TestTUIFileToolsConfirmDenied(t *testing.T) {
-	dir := t.TempDir()
-	f := filepath.Join(dir, "a.txt")
-	if err := os.WriteFile(f, []byte("aaa\nbbb\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	editCall := `{"tool":"edit_file","path":"a.txt","old":"bbb","new":"B"}` + "\n"
-	srv, rec := fakeDeepSeekServerWith(t, []string{
-		completionSSE(t, 2, editCall),
-		completionSSE(t, 3, "OK."),
-	})
-	t.Cleanup(srv.Close)
-	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
-	chat := &ChatCmd{FileTools: true, Workdir: dir, cfgPath: filepath.Join(t.TempDir(), "cfg.json")}
-	m := newTUIModel(chat, client, "sess-1", false)
-
-	m.input.SetValue("edit the file")
-	m.Update(press(tea.KeyEnter))
-	pumpTUI(m)
-
-	if got, _ := os.ReadFile(f); string(got) != "aaa\nbbb\n" {
-		t.Errorf("file changed despite denied confirm: %q", got)
-	}
-	if m.awaitingConfirm {
-		t.Error("confirm state not cleared after deny")
-	}
-	_ = rec
 }
