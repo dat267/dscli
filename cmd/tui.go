@@ -49,6 +49,12 @@ type tuiModel struct {
 	draft      string       // input stashed while recalling history
 	loaded     []loadedFile // <file>/<dir> blocks stacked by /file, sent with the next message
 
+	// reply accumulates the streamed assistant text of the current turn so it
+	// can be saved to the session transcript when the turn finishes. It is
+	// written from the turn goroutine and read only after streamDone (the
+	// channel send establishes the happens-before edge).
+	reply strings.Builder
+
 	busy     bool
 	cancel   context.CancelFunc
 	streamCh chan tea.Msg
@@ -152,9 +158,11 @@ func (m *tuiModel) startTurn(prompt string) tea.Cmd {
 	m.cancel = cancel
 	m.busy = true
 	m.interrupted = false
+	m.reply.Reset()
 	m.streamCh = make(chan tea.Msg, 128)
 	ch := m.chat
 	ch.answer = func(d string) error {
+		m.reply.WriteString(d)
 		m.streamCh <- streamDelta{d}
 		return nil
 	}
@@ -254,6 +262,9 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.conversation = msg.convID
 			persistConversation(m.cfgPath, m.noPersist, msg.convID)
+			if transcriptsEnabled(m.cfgPath, m.noPersist, m.chat.NoTranscript) {
+				appendTranscript(m.cfgPath, msg.convID, "assistant", m.reply.String())
+			}
 			m.renderSources(msg.sources)
 			m.appendLine("")
 		}
@@ -469,6 +480,9 @@ func (m *tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 	m.addHistory(line)
 	m.appendLine(renderUserLine(line))
 	m.appendLine("") // breathing room before the reply streams
+	if transcriptsEnabled(m.cfgPath, m.noPersist, m.chat.NoTranscript) {
+		appendTranscript(m.cfgPath, m.conversation, "user", line)
+	}
 	prompt := line
 	if len(m.loaded) > 0 {
 		// Files loaded via /file are prepended to this message, then dropped.

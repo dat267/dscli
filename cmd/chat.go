@@ -31,8 +31,9 @@ type ChatCmd struct {
 	Cookie    string `env:"DS_COOKIE" help:"DeepSeek ds_session_id cookie value. Alternatively: config set cookie"`
 	UserAgent string `env:"DS_USER_AGENT" help:"Browser user-agent; some deployments reject non-browser UAs"`
 
-	NoPersist bool   `help:"Do not persist or reuse the default session; the session is deleted when the run ends"`
-	Workdir   string `help:"Working directory for /file loads" default:"."`
+	NoPersist    bool   `help:"Do not persist or reuse the default session; the session is deleted when the run ends"`
+	NoTranscript bool   `help:"Do not save session texts (transcripts) next to the config file"`
+	Workdir      string `help:"Working directory for /file loads" default:"."`
 
 	// answer overrides the reply-text writer (the TUI renders it into its
 	// scrollback); nil falls back to deltaWriter (stdout / NDJSON).
@@ -40,6 +41,9 @@ type ChatCmd struct {
 	// preview overrides where progress lines go (the TUI renders them into
 	// its scrollback); nil falls back to stderr.
 	preview func(string)
+
+	// clientBase overrides the API base URL for tests.
+	clientBase string
 
 	// cfgPath is the config file path used for session persistence; set from
 	// app in Run.
@@ -75,7 +79,13 @@ func (c *ChatCmd) newClient() *deepseek.Client {
 		Token:     c.Token,
 		Cookie:    c.Cookie,
 		UserAgent: c.UserAgent,
-	}, c.Timeout)
+	}, c.Timeout, c.clientBase)
+}
+
+// transcriptsOn reports whether this run saves session texts, given the
+// resolved config path and flags.
+func (c *ChatCmd) transcriptsOn() bool {
+	return transcriptsEnabled(c.cfgPath, c.NoPersist, c.NoTranscript)
 }
 
 // oneTurn asks one question in the given conversation, feeding every reply
@@ -232,8 +242,15 @@ func (c *ChatCmd) ask(ctx context.Context, prompt string) error {
 	}
 
 	var convID string
+	var replyBuf strings.Builder
+	if c.transcriptsOn() {
+		appendTranscript(c.cfgPath, conversation, "user", prompt)
+	}
 	_, err := recoverStaleSession(ctx, client, c.cfgPath, conversation, trusted, func(sid string) error {
-		cid, e := c.oneTurn(ctx, client, sid, prompt, effectiveModel(c.Model), c.answerWriter(), &sources)
+		cid, e := c.oneTurn(ctx, client, sid, prompt, effectiveModel(c.Model), func(delta string) error {
+			replyBuf.WriteString(delta)
+			return c.answerWriter()(delta)
+		}, &sources)
 		if e == nil {
 			convID = cid
 		}
@@ -241,6 +258,9 @@ func (c *ChatCmd) ask(ctx context.Context, prompt string) error {
 	})
 	if err != nil {
 		return err
+	}
+	if c.transcriptsOn() {
+		appendTranscript(c.cfgPath, convID, "assistant", replyBuf.String())
 	}
 	persistConversation(c.cfgPath, c.NoPersist, convID)
 	if c.JSONOut {
@@ -470,12 +490,18 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 		var last byte
 		var sources []deepseek.Source
 		var convID string
+		var replyBuf strings.Builder
 		write := func(delta string) error {
 			if len(delta) > 0 {
 				last = delta[len(delta)-1]
 			}
+			replyBuf.WriteString(delta)
 			_, err := os.Stdout.WriteString(delta)
 			return err
+		}
+		turnSession := conversation
+		if c.transcriptsOn() {
+			appendTranscript(c.cfgPath, turnSession, "user", line)
 		}
 		_, err := recoverStaleSession(ctx, client, c.cfgPath, conversation, firstTurn, func(sid string) error {
 			cid, e := c.oneTurn(ctx, client, sid, line, model, write, &sources)
@@ -494,6 +520,9 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 				fmt.Fprintln(os.Stdout)
 			}
 			continue
+		}
+		if c.transcriptsOn() {
+			appendTranscript(c.cfgPath, turnSession, "assistant", replyBuf.String())
 		}
 		if last != '\n' {
 			fmt.Fprintln(os.Stdout)

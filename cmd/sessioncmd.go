@@ -9,11 +9,12 @@ import (
 )
 
 // SessionCmdGroup implements `dscli session`: show the persisted default
-// conversation, forget it, or delete it server-side and forget it.
-// A bare `dscli session` prints the persisted value.
+// conversation, forget it, delete it server-side and forget it, or print the
+// saved session texts. A bare `dscli session` prints the persisted value.
 type SessionCmdGroup struct {
-	Delete SessionDeleteCmd `cmd:"" help:"Delete the persisted default session server-side and forget it"`
-	Forget SessionForgetCmd `cmd:"" help:"Forget the persisted default session (the thread is kept server-side)"`
+	Transcript SessionTranscriptCmd `cmd:"" help:"Print the saved session texts (transcript) for a session"`
+	Delete     SessionDeleteCmd     `cmd:"" help:"Delete the persisted default session server-side and forget it"`
+	Forget     SessionForgetCmd     `cmd:"" help:"Forget the persisted default session (the thread is kept server-side)"`
 }
 
 func (c *SessionCmdGroup) Run(app *App) error {
@@ -21,6 +22,44 @@ func (c *SessionCmdGroup) Run(app *App) error {
 		fmt.Println(saved)
 	} else {
 		fmt.Println("no persisted session")
+	}
+	return nil
+}
+
+// SessionTranscriptCmd implements `dscli session transcript [session]`: print
+// the session texts saved by the chat (the JSONL transcript next to the
+// config file) for the persisted default session, or for an explicit session
+// id.
+type SessionTranscriptCmd struct {
+	Session string `arg:"" optional:"" help:"Session id (defaults to the persisted default session)"`
+}
+
+func (c *SessionTranscriptCmd) Run(app *App) error {
+	path := app.CfgPath()
+	sess := c.Session
+	if sess == "" {
+		sess = loadSavedSession(path)
+	}
+	bare, _ := splitConversation(sess)
+	if bare == "" {
+		fmt.Println("no session to show")
+		return nil
+	}
+	entries, err := loadTranscript(path, bare)
+	if err != nil {
+		return fmt.Errorf("read transcript: %w", err)
+	}
+	p := transcriptPath(path, bare)
+	if len(entries) == 0 {
+		fmt.Printf("no saved texts for session %s (%s does not exist)\n", bare, p)
+		return nil
+	}
+	fmt.Printf("session %s · %s\n", bare, p)
+	for i, e := range entries {
+		if i > 0 {
+			fmt.Println()
+		}
+		fmt.Printf("%s  %s\n%s\n", e.Time, e.Role, e.Text)
 	}
 	return nil
 }

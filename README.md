@@ -19,23 +19,24 @@ Flags:
       --config-file=STRING    Config file path
 
 Commands:
-  chat              Chat with DeepSeek (omit the prompt for an interactive
-                    session)
-  ask               Ask the model once and print the answer (input from args or
-                    stdin)
-  translate         Translate a file (txt, md, lrc, srt, vtt, ass, ttml,
-                    epub) via the model
-  session delete    Delete the persisted default session server-side and forget
-                    it
-  session forget    Forget the persisted default session (the thread is kept
-                    server-side)
-  login             Show how to capture your DeepSeek login (token + cookie)
-  version           Show version
-  config init       Generate a default configuration file
-  config path       Show configuration file path
-  config show       Print current configuration values
-  config set        Set a config value
-  config unset      Unset a config value
+  chat                  Chat with DeepSeek (omit the prompt for an interactive
+                        session)
+  ask                   Ask the model once and print the answer (input from args
+                        or stdin)
+  translate             Translate a file (txt, md, lrc, srt, vtt, ass, ttml,
+                        epub) via the model
+  session transcript    Print the saved session texts (transcript) for a session
+  session delete        Delete the persisted default session server-side and
+                        forget it
+  session forget        Forget the persisted default session (the thread is kept
+                        server-side)
+  login                 Show how to capture your DeepSeek login (token + cookie)
+  version               Show version
+  config init           Generate a default configuration file
+  config path           Show configuration file path
+  config show           Print current configuration values
+  config set            Set a config value
+  config unset          Unset a config value
 
 Run "dscli <command> --help" for more information on a command.
 ```
@@ -165,6 +166,25 @@ created per run, kept for its turns, and deleted on close (`/exit`, `/quit`,
 Ctrl-D, or Ctrl-C). If the saved default session no longer exists server-side
 (e.g. deleted in the web UI), the CLI creates a fresh one, saves it, and
 retries once automatically.
+
+**Session texts.** Every turn's typed prompt and the streamed reply are
+appended to a JSONL transcript — one line per message, `{"time": "...",
+"role": "user|assistant", "text": "..."}` — in the `transcripts/` folder
+inside the app's persistent data directory (next to the config file,
+`~/.config/dscli/transcripts/` by default), named `<session-id>.jsonl`. The
+whole thread's texts accumulate in one file as the conversation advances,
+whether from the TUI, the line REPL, or a one-shot `chat`/`ask` (in the TUI,
+`/file` attachments are the only things not copied — the typed prompt is).
+Print a transcript with:
+
+```bash
+dscli session transcript            # the persisted default session
+dscli session transcript <session>  # any session id
+```
+
+Ephemeral runs (`--no-persist`) leave no transcript, and `--no-transcript`
+(or `config set no-transcript true`) disables saving when you do not want the
+texts kept locally.
 
 ## File naming & grouping
 

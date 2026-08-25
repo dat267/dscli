@@ -18,13 +18,14 @@ import (
 // afterwards, so nothing persists and no conversation-id noise is printed.
 // The input may be positional args or piped stdin.
 type AskCmd struct {
-	Prompt    []string      `arg:"" optional:"" help:"Input to send (omit to read from stdin; use -- before a prompt that starts with -)"`
-	Model     string        `short:"m" help:"Model: default (Instant) or expert" default:""`
-	Thinking  bool          `short:"t" help:"Enable DeepThink reasoning"`
-	Search    bool          `short:"s" help:"Enable web search"`
-	NoPersist bool          `help:"Do not persist or reuse the default session; the session is deleted when the run ends"`
-	JSONOut   bool          `help:"Emit NDJSON: one {\"delta\":...} line per chunk, then a {\"sources\":[...]} line when search returned citations"`
-	Timeout   time.Duration `help:"Overall budget (0 = no limit)" default:"15m"`
+	Prompt       []string      `arg:"" optional:"" help:"Input to send (omit to read from stdin; use -- before a prompt that starts with -)"`
+	Model        string        `short:"m" help:"Model: default (Instant) or expert" default:""`
+	Thinking     bool          `short:"t" help:"Enable DeepThink reasoning"`
+	Search       bool          `short:"s" help:"Enable web search"`
+	NoPersist    bool          `help:"Do not persist or reuse the default session; the session is deleted when the run ends"`
+	NoTranscript bool          `help:"Do not save session texts (transcripts) next to the config file"`
+	JSONOut      bool          `help:"Emit NDJSON: one {\"delta\":...} line per chunk, then a {\"sources\":[...]} line when search returned citations"`
+	Timeout      time.Duration `help:"Overall budget (0 = no limit)" default:"15m"`
 
 	Token     string `env:"DS_TOKEN" help:"DeepSeek user token (localStorage.userToken). Alternatively: config set token"`
 	Cookie    string `env:"DS_COOKIE" help:"DeepSeek ds_session_id cookie value. Alternatively: config set cookie"`
@@ -95,15 +96,20 @@ func (c *AskCmd) Run(app *App, ctx context.Context) error {
 	}
 
 	var last byte
+	var replyBuf strings.Builder
 	write := func(delta string) error {
 		if len(delta) > 0 {
 			last = delta[len(delta)-1]
 		}
+		replyBuf.WriteString(delta)
 		if c.JSONOut {
 			return json.NewEncoder(os.Stdout).Encode(map[string]string{"delta": delta})
 		}
 		_, err := os.Stdout.WriteString(delta)
 		return err
+	}
+	if transcriptsEnabled(c.cfgPath, c.NoPersist, c.NoTranscript) {
+		appendTranscript(c.cfgPath, sessionID, "user", prompt)
 	}
 	var reply deepseek.Reply
 	var usedSession string
@@ -128,6 +134,9 @@ func (c *AskCmd) Run(app *App, ctx context.Context) error {
 	})
 	if err != nil {
 		return err
+	}
+	if transcriptsEnabled(c.cfgPath, c.NoPersist, c.NoTranscript) {
+		appendTranscript(c.cfgPath, usedSession, "assistant", replyBuf.String())
 	}
 	persistConversation(c.cfgPath, c.NoPersist, advanceConversation(usedSession, reply.MessageID))
 	if c.JSONOut {
