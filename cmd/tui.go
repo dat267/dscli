@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -212,9 +213,9 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseWheelMsg:
 		switch msg.Mouse().Button {
 		case tea.MouseWheelUp:
-			m.scrollUp()
+			m.scrollUpN(wheelScrollLines)
 		case tea.MouseWheelDown:
-			m.scrollDown()
+			m.scrollDownN(wheelScrollLines)
 		}
 		return m, nil
 	case tea.PasteMsg:
@@ -232,6 +233,12 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "pgdown", "ctrl+d":
 			m.scrollDown()
+			return m, nil
+		case "home":
+			m.scrollTop()
+			return m, nil
+		case "end":
+			m.scrollBottom()
 			return m, nil
 		}
 		return m.handleKey(msg)
@@ -456,6 +463,48 @@ func renderUserLine(line string) string {
 	return ansiCyan + line + ansiReset
 }
 
+// loadHistoryInto preloads a resumed conversation's past messages into the
+// scrollback so the user sees the thread's context on launch. The model
+// already holds the context server-side; this is purely for display. On
+// failure a note is shown and the chat still works.
+func loadHistoryInto(ctx context.Context, m *tuiModel, client *deepseek.Client, conversation string) {
+	sess, _ := splitConversation(conversation)
+	if sess == "" {
+		return
+	}
+	hist, err := client.ChatHistory(ctx, sess)
+	if err != nil {
+		m.scroll = m.u.muted("note: could not load conversation history: "+err.Error()) + "\n"
+		return
+	}
+	m.scroll = renderHistory(hist)
+	m.trimScroll()
+}
+
+// renderHistory builds the scrollback text for a resumed conversation: user
+// lines styled violet, assistant replies plain, one blank line between turns,
+// in message-id order.
+func renderHistory(hist []deepseek.HistoryMessage) string {
+	sort.Slice(hist, func(i, j int) bool { return hist[i].MessageID < hist[j].MessageID })
+	var b strings.Builder
+	for _, msg := range hist {
+		text := strings.TrimSpace(msg.Text())
+		if text == "" {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		if msg.Role == "USER" {
+			b.WriteString(renderUserLine(text))
+		} else {
+			b.WriteString(text)
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
 // knownCommand reports whether line is a complete slash command (with or
 // without arguments), so Enter runs it instead of completing a suggestion.
 func knownCommand(line string) bool {
@@ -572,7 +621,7 @@ func (m *tuiModel) handleCommand(line string) (tea.Model, tea.Cmd) {
 	case "/help":
 		m.appendLine(m.u.dim("commands: /exit /quit /new /model /thinking /search /tools /files /clear /help"))
 		m.appendLine(m.u.dim("  /clear [--delete]  forget the persisted default session (--delete removes it server-side)"))
-		m.appendLine(m.u.dim("enter submits · ctrl+j / alt+enter newline · up/down cursor (history at first/last line) · tab completes /commands"))
+		m.appendLine(m.u.dim("enter submits · ctrl+j / alt+enter newline · up/down cursor (history at first/last line) · pgup/pgdn/home/end scroll · tab completes /commands"))
 		return m, nil
 	case "/model":
 		if arg == "" {
@@ -679,34 +728,65 @@ func (m *tuiModel) outputRows() int {
 	return rows
 }
 
+// wheelScrollLines is how many rows the mouse wheel moves per tick; PgUp/
+// PgDn and Home/End are coarser.
+const wheelScrollLines = 3
+
 func (m *tuiModel) scrollUp() {
+	m.scrollUpN(m.outputRows())
+}
+
+func (m *tuiModel) scrollDown() {
+	m.scrollDownN(m.outputRows())
+}
+
+// scrollUpN scrolls up by n rows (or to the top); scrolling away from the
+// bottom disables auto-follow.
+func (m *tuiModel) scrollUpN(n int) {
 	m.autoScroll = false
-	avail := m.outputRows()
-	if avail < 1 {
-		avail = 1
+	if n < 1 {
+		n = 1
 	}
-	if m.viewTop > 0 {
-		m.viewTop -= avail
-	}
+	m.viewTop -= n
 	if m.viewTop < 0 {
 		m.viewTop = 0
 	}
 }
 
-func (m *tuiModel) scrollDown() {
+// scrollDownN scrolls down by n rows (or to the bottom, re-enabling
+// auto-follow).
+func (m *tuiModel) scrollDownN(n int) {
 	total := m.scrollLines()
 	avail := m.outputRows()
-	if avail < 1 {
-		avail = 1
+	if n < 1 {
+		n = 1
 	}
-	if m.viewTop+avail < total {
-		m.viewTop += avail
-		if m.viewTop+avail >= total {
-			m.autoScroll = true
-		}
-	} else {
-		m.autoScroll = true
+	if m.viewTop+n < total-avail {
+		m.viewTop += n
+		return
 	}
+	m.viewTop = total - avail
+	if m.viewTop < 0 {
+		m.viewTop = 0
+	}
+	m.autoScroll = true
+}
+
+// scrollTop jumps to the first line of the scrollback.
+func (m *tuiModel) scrollTop() {
+	m.autoScroll = false
+	m.viewTop = 0
+}
+
+// scrollBottom jumps to the last line (auto-following new content).
+func (m *tuiModel) scrollBottom() {
+	total := m.scrollLines()
+	avail := m.outputRows()
+	m.viewTop = total - avail
+	if m.viewTop < 0 {
+		m.viewTop = 0
+	}
+	m.autoScroll = true
 }
 
 func (m *tuiModel) scrollLines() int {

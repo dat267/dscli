@@ -489,6 +489,57 @@ func TestTUIHistoryDraftPreserved(t *testing.T) {
 	}
 }
 
+// TestTUIRenderHistory: past messages render in message-id order, user lines
+// styled violet, assistant replies plain, empty messages skipped.
+func TestTUIRenderHistory(t *testing.T) {
+	hist := []deepseek.HistoryMessage{
+		{MessageID: 2, Role: "ASSISTANT", Content: "Hello back"},
+		{MessageID: 1, Role: "USER", Content: "Hi"},
+	}
+	got := renderHistory(hist)
+	u := strings.Index(got, "\x1b[38;2;107;80;255mHi\x1b[0m")
+	a := strings.Index(got, "Hello back")
+	if u < 0 || a < 0 || u > a {
+		t.Errorf("history rendered out of order (user=%d assistant=%d):\n%q", u, a, got)
+	}
+	if got2 := renderHistory([]deepseek.HistoryMessage{{MessageID: 1, Role: "USER", Content: ""}}); got2 != "" {
+		t.Errorf("empty history = %q, want empty", got2)
+	}
+}
+
+// TestTUIWheelAndHomeEndScroll: the mouse wheel scrolls a few lines, Home
+// jumps to the top, End returns to the bottom with auto-follow on.
+func TestTUIWheelAndHomeEndScroll(t *testing.T) {
+	m, _ := tuiHarness(t, nil, "")
+	m.height, m.width = 20, 60
+	var sb strings.Builder
+	for i := 0; i < 50; i++ {
+		fmt.Fprintf(&sb, "line %d\n", i)
+	}
+	m.scroll = sb.String()
+	m.clampView()
+	avail := m.outputRows()
+	bottom := 51 - avail
+
+	m.scrollUpN(wheelScrollLines)
+	if m.viewTop != bottom-wheelScrollLines {
+		t.Errorf("wheel up viewTop = %d, want %d", m.viewTop, bottom-wheelScrollLines)
+	}
+	m.scrollTop()
+	if m.viewTop != 0 {
+		t.Errorf("home viewTop = %d, want 0", m.viewTop)
+	}
+	m.scrollBottom()
+	if m.viewTop != bottom || !m.autoScroll {
+		t.Errorf("end viewTop = %d auto=%v, want %d true", m.viewTop, m.autoScroll, bottom)
+	}
+	m.scrollTop()
+	m.scrollDownN(wheelScrollLines)
+	if m.viewTop != wheelScrollLines {
+		t.Errorf("wheel down viewTop = %d, want %d", m.viewTop, wheelScrollLines)
+	}
+}
+
 // TestTUIFileToolsConfirmDenied: a file-tools edit that needs confirmation is
 // routed into the TUI; a deny leaves the file untouched and the model is told
 // not to retry.

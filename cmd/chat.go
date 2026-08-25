@@ -446,6 +446,9 @@ func (c *ChatCmd) repl(ctx context.Context) error {
 	// line-based loop (pipes, scripts, tests).
 	if isTerminal(os.Stdin) && isTerminal(os.Stdout) {
 		m := newTUIModel(c, client, sessionID, trusted)
+		if trusted {
+			loadHistoryInto(ctx, m, client, sessionID)
+		}
 		if err := runTUI(m); err != nil {
 			return err
 		}

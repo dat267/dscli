@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -21,6 +22,7 @@ const (
 	powChallengePath  = "/api/v0/chat/create_pow_challenge"
 	sessionCreatePath = "/api/v0/chat_session/create"
 	sessionDeletePath = "/api/v0/chat_session/delete"
+	historyPath       = "/api/v0/chat/history_messages"
 
 	// One-minute ceiling for the small JSON exchanges; the completion stream
 	// is bounded by the caller-supplied context instead.
@@ -237,6 +239,72 @@ func (c *Client) DeleteSessions(ctx context.Context, ids []string) error {
 		return fmt.Errorf("deepseek api error: %s", msg)
 	}
 	return nil
+}
+
+// HistoryMessage is one past message of a chat session, as returned by
+// ChatHistory. Role is "USER" or "ASSISTANT"; Content is the visible text.
+type HistoryMessage struct {
+	MessageID int64  `json:"message_id"`
+	ParentID  *int64 `json:"parent_id"`
+	Role      string `json:"role"`
+	Content   string `json:"content"`
+	Status    string `json:"status"`
+	Fragments []struct {
+		Type    string `json:"type"`
+		Content string `json:"content"`
+	} `json:"fragments"`
+}
+
+// Text returns the message's visible text: the content field when set, else
+// the fragments' content with thinking text excluded (assistant replies carry
+// the final text in the content field, but fragments are the authoritative
+// source and REQUEST/TOOL fragments hold it too).
+func (m HistoryMessage) Text() string {
+	if m.Content != "" {
+		return m.Content
+	}
+	var b strings.Builder
+	for _, f := range m.Fragments {
+		switch strings.ToUpper(f.Type) {
+		case "THINK", "THINKING", "":
+			continue
+		}
+		b.WriteString(f.Content)
+	}
+	return b.String()
+}
+
+// ChatHistory fetches a chat session's past messages for display. The model
+// already carries the thread's context server-side, so this is purely for the
+// UI (rendering the resume point); it needs no PoW challenge.
+func (c *Client) ChatHistory(ctx context.Context, sessionID string) ([]HistoryMessage, error) {
+	ctx, cancel := context.WithTimeout(ctx, shortTimeout)
+	defer cancel()
+	u := c.base + historyPath + "?chat_session_id=" + url.QueryEscape(sessionID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header = c.headers()
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, httpStatusError(historyPath, resp)
+	}
+	var env bizEnvelope
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+		return nil, fmt.Errorf("decode history: %w", err)
+	}
+	var data struct {
+		ChatMessages []HistoryMessage `json:"chat_messages"`
+	}
+	if err := env.biz(&data); err != nil {
+		return nil, err
+	}
+	return data.ChatMessages, nil
 }
 
 // fetchChallenge fetches a PoW challenge for the completion endpoint.

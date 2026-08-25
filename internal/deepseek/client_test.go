@@ -65,6 +65,53 @@ func TestCompletionRequestBody(t *testing.T) {
 		t.Errorf("resume body must not carry model_type: %v", body)
 	}
 }
+
+// TestChatHistory: GET /api/v0/chat/history_messages parses the triple
+// envelope and returns messages in order, with the visible text from either
+// the content field or RESPONSE fragments.
+func TestChatHistory(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != historyPath {
+			t.Errorf("path = %s, want %s", r.URL.Path, historyPath)
+		}
+		if r.Method != http.MethodGet {
+			t.Errorf("method = %s, want GET", r.Method)
+		}
+		if got := r.URL.Query().Get("chat_session_id"); got != "sess-1" {
+			t.Errorf("chat_session_id = %q, want sess-1", got)
+		}
+		_, _ = io.WriteString(w, `{"code":0,"msg":"","data":{"biz_data":{
+			"chat_session":{"id":"sess-1","title":"x"},
+			"chat_messages":[
+				{"message_id":1,"parent_id":null,"role":"USER","content":"hello"},
+				{"message_id":2,"parent_id":1,"role":"ASSISTANT","content":"hi back",
+				 "fragments":[{"type":"THINK","content":"hidden"},{"type":"RESPONSE","content":"hi back"}]},
+				{"message_id":3,"parent_id":2,"role":"USER","content":"",
+				 "fragments":[{"type":"REQUEST","content":"shown"}]}
+			]
+		}}}`)
+	}))
+	defer srv.Close()
+	c := NewClient(Session{Token: "tok"}, 0, srv.URL)
+	hist, err := c.ChatHistory(context.Background(), "sess-1")
+	if err != nil {
+		t.Fatalf("ChatHistory: %v", err)
+	}
+	if len(hist) != 3 {
+		t.Fatalf("messages = %d, want 3", len(hist))
+	}
+	if hist[0].Role != "USER" || hist[0].Text() != "hello" {
+		t.Errorf("msg0 = %+v", hist[0])
+	}
+	if hist[1].Role != "ASSISTANT" || hist[1].Text() != "hi back" {
+		t.Errorf("msg1 = %+v", hist[1])
+	}
+	// Empty content falls back to the fragments' visible text.
+	if hist[2].Text() != "shown" {
+		t.Errorf("msg2 text = %q, want %q (fragments fallback)", hist[2].Text(), "shown")
+	}
+}
+
 func TestDeleteSessions(t *testing.T) {
 	cases := []struct {
 		name    string
