@@ -225,3 +225,54 @@ func TestSessionTranscriptCommand(t *testing.T) {
 		t.Errorf("empty output = %q", empty)
 	}
 }
+
+// TestSessionTranscriptDelete: `session transcript --delete [session]` removes
+// the transcript file (and the transcripts folder when it becomes empty);
+// deleting a session with no saved texts says so without erroring.
+func TestSessionTranscriptDelete(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "dscli.json")
+	appendTranscript(cfgPath, "sess-9", "user", "why?")
+	appendTranscript(cfgPath, "sess-9", "assistant", "because")
+	app := &App{cfgPath: cfgPath}
+	p := transcriptPath(cfgPath, "sess-9")
+	if _, err := os.Stat(p); err != nil {
+		t.Fatalf("transcript should exist before delete: %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		cmd := &SessionTranscriptCmd{Session: "sess-9", Delete: true}
+		if err := cmd.Run(app); err != nil {
+			t.Fatalf("session transcript --delete: %v", err)
+		}
+	})
+	if !strings.Contains(out, "deleted transcript for session sess-9") {
+		t.Errorf("delete output = %q", out)
+	}
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Errorf("transcript should be gone after delete, err = %v", err)
+	}
+	// The empty transcripts folder was removed too.
+	if _, err := os.Stat(filepath.Dir(p)); !os.IsNotExist(err) {
+		t.Errorf("empty transcripts folder should be removed, err = %v", err)
+	}
+
+	again := captureStdout(t, func() {
+		cmd := &SessionTranscriptCmd{Session: "sess-9", Delete: true}
+		if err := cmd.Run(app); err != nil {
+			t.Fatalf("delete again: %v", err)
+		}
+	})
+	if !strings.Contains(again, "nothing to delete") {
+		t.Errorf("second delete output = %q, want nothing-to-delete", again)
+	}
+
+	noSession := captureStdout(t, func() {
+		cmd := &SessionTranscriptCmd{Delete: true}
+		if err := cmd.Run(app); err != nil {
+			t.Fatalf("delete with no session: %v", err)
+		}
+	})
+	if !strings.Contains(noSession, "no session to delete") {
+		t.Errorf("no-session delete output = %q", noSession)
+	}
+}

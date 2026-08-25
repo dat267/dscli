@@ -4,15 +4,16 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/dat267/dscli/internal/deepseek"
 )
 
 // SessionCmdGroup implements `dscli session`: show the persisted default
-// conversation, forget it, delete it server-side and forget it, or print the
+// conversation, forget it, delete it server-side and forget it, or inspect the
 // saved session texts. A bare `dscli session` prints the persisted value.
 type SessionCmdGroup struct {
-	Transcript SessionTranscriptCmd `cmd:"" help:"Print the saved session texts (transcript) for a session"`
+	Transcript SessionTranscriptCmd `cmd:"" help:"Print or delete the saved session texts (transcript) for a session"`
 	Delete     SessionDeleteCmd     `cmd:"" help:"Delete the persisted default session server-side and forget it"`
 	Forget     SessionForgetCmd     `cmd:"" help:"Forget the persisted default session (the thread is kept server-side)"`
 }
@@ -26,30 +27,61 @@ func (c *SessionCmdGroup) Run(app *App) error {
 	return nil
 }
 
+// resolveTranscriptSession returns the config path and bare session id for an
+// explicit session, or the persisted default when none is given. ok is false
+// when there is nothing to address.
+func resolveTranscriptSession(app *App, given string) (cfgPath, bare string, ok bool) {
+	cfgPath = app.CfgPath()
+	sess := given
+	if sess == "" {
+		sess = loadSavedSession(cfgPath)
+	}
+	bare, _ = splitConversation(sess)
+	if bare == "" {
+		return "", "", false
+	}
+	return cfgPath, bare, true
+}
+
 // SessionTranscriptCmd implements `dscli session transcript [session]`: print
 // the session texts saved by the chat (the JSONL transcript next to the
 // config file) for the persisted default session, or for an explicit session
-// id.
+// id. With --delete the transcript file is removed instead (plus the
+// transcripts folder when it becomes empty); the server-side thread, if any,
+// is untouched.
 type SessionTranscriptCmd struct {
 	Session string `arg:"" optional:"" help:"Session id (defaults to the persisted default session)"`
+	Delete  bool   `help:"Delete the transcript instead of printing it"`
 }
 
 func (c *SessionTranscriptCmd) Run(app *App) error {
-	path := app.CfgPath()
-	sess := c.Session
-	if sess == "" {
-		sess = loadSavedSession(path)
-	}
-	bare, _ := splitConversation(sess)
-	if bare == "" {
-		fmt.Println("no session to show")
+	cfgPath, bare, ok := resolveTranscriptSession(app, c.Session)
+	if !ok {
+		if c.Delete {
+			fmt.Println("no session to delete")
+		} else {
+			fmt.Println("no session to show")
+		}
 		return nil
 	}
-	entries, err := loadTranscript(path, bare)
+	p := transcriptPath(cfgPath, bare)
+	if c.Delete {
+		if err := os.Remove(p); err != nil {
+			if os.IsNotExist(err) {
+				fmt.Printf("no saved texts for session %s (nothing to delete)\n", bare)
+				return nil
+			}
+			return fmt.Errorf("delete transcript: %w", err)
+		}
+		// Drop the transcripts folder too when it is now empty.
+		_ = os.Remove(filepath.Dir(p))
+		fmt.Printf("deleted transcript for session %s\n", bare)
+		return nil
+	}
+	entries, err := loadTranscript(cfgPath, bare)
 	if err != nil {
 		return fmt.Errorf("read transcript: %w", err)
 	}
-	p := transcriptPath(path, bare)
 	if len(entries) == 0 {
 		fmt.Printf("no saved texts for session %s (%s does not exist)\n", bare, p)
 		return nil

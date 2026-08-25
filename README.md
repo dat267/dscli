@@ -25,7 +25,8 @@ Commands:
                         or stdin)
   translate             Translate a file (txt, md, lrc, srt, vtt, ass, ttml,
                         epub) via the model
-  session transcript    Print the saved session texts (transcript) for a session
+  session transcript    Print or delete the saved session texts (transcript) for
+                        a session
   session delete        Delete the persisted default session server-side and
                         forget it
   session forget        Forget the persisted default session (the thread is kept
@@ -180,11 +181,15 @@ Print a transcript with:
 ```bash
 dscli session transcript            # the persisted default session
 dscli session transcript <session>  # any session id
+dscli session transcript --delete   # delete the default session's transcript
 ```
 
 Ephemeral runs (`--no-persist`) leave no transcript, and `--no-transcript`
 (or `config set no-transcript true`) disables saving when you do not want the
-texts kept locally.
+texts kept locally. `--delete` removes the JSONL file (and the `transcripts/`
+folder when it becomes empty) without touching the server-side thread —
+`session delete`, on the other hand, removes the thread but leaves any saved
+texts alone.
 
 ## File naming & grouping
 
