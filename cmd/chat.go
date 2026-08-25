@@ -163,11 +163,11 @@ const maxMentionBytes = 1 << 20 // 1 MiB
 // path characters / . _ ~ + - (no spaces).
 var mentionRE = regexp.MustCompile(`@[A-Za-z0-9_./~+-]+`)
 
-// expandMentions replaces @<path> mentions in a prompt with the referenced
-// file's contents (relative to Workdir), wrapping each in a <file> block so
-// the model can tell the loaded content from the surrounding message. Used in
-// interactive chat so a file can be dropped into the message with @path.
-// Unresolvable or unreadable mentions (or files over maxMentionBytes) are
+// expandMentions replaces @<path> mentions in a prompt with what the path
+// refers to (relative to Workdir): a regular file becomes its contents in a
+// <file> block, a directory becomes a listing of its entries in a <dir>
+// block. Used in interactive chat so a path can be dropped into the message
+// with @path. Unresolvable mentions (or files over maxMentionBytes) are
 // left exactly as written.
 func (c *ChatCmd) expandMentions(prompt string) string {
 	return mentionRE.ReplaceAllStringFunc(prompt, func(m string) string {
@@ -177,7 +177,16 @@ func (c *ChatCmd) expandMentions(prompt string) string {
 			path = filepath.Join(c.Workdir, p)
 		}
 		info, err := os.Stat(path)
-		if err != nil || !info.Mode().IsRegular() || info.Size() > maxMentionBytes {
+		if err != nil {
+			return m
+		}
+		// A directory mention expands to a listing of its contents, so the
+		// model sees what is in the path instead of a literal "@dir/" that it
+		// may misread.
+		if info.IsDir() {
+			return fmt.Sprintf("\n<dir path=%q>\n%s\n</dir>\n", p, dirListing(path))
+		}
+		if !info.Mode().IsRegular() || info.Size() > maxMentionBytes {
 			return m
 		}
 		data, err := os.ReadFile(path)
@@ -186,6 +195,32 @@ func (c *ChatCmd) expandMentions(prompt string) string {
 		}
 		return fmt.Sprintf("\n<file path=%q>\n%s\n</file>\n", p, data)
 	})
+}
+
+// maxDirListingEntries caps how many directory entries a @dir mention lists.
+const maxDirListingEntries = 200
+
+// dirListing renders a directory's immediate entries (relative names, dirs
+// marked with a trailing "/"), bounded so a huge directory cannot flood the
+// prompt.
+func dirListing(dir string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "(could not read directory)"
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() {
+			name += "/"
+		}
+		names = append(names, name)
+	}
+	if len(names) > maxDirListingEntries {
+		names = append(names[:maxDirListingEntries],
+			fmt.Sprintf("… (%d more entries)", len(entries)-maxDirListingEntries))
+	}
+	return strings.Join(names, "\n")
 }
 
 // ask answers a single question and exits. By default it resumes the

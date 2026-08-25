@@ -549,9 +549,9 @@ func (m *tuiModel) updateSuggestions() {
 }
 
 // completeSuggestion fills in the highlighted suggestion and clears the menu.
-// Commands complete to "<command> " with the cursor after the space (ready for
-// an argument); @mentions replace the typed @path in place with the cursor at
-// its end.
+// Commands complete to "<command> " (cursor after the space) when they accept
+// an argument, or just "<command>" when they take none; @mentions replace the
+// typed @path in place with the cursor at its end.
 func (m *tuiModel) completeSuggestion() {
 	if len(m.suggestions) == 0 {
 		return
@@ -561,7 +561,10 @@ func (m *tuiModel) completeSuggestion() {
 	last := lines[len(lines)-1]
 	switch m.suggestKind {
 	case suggestCommand:
-		lines[len(lines)-1] = s + " "
+		if commandTakesArg(s) {
+			s += " "
+		}
+		lines[len(lines)-1] = s
 		m.input.SetValue(strings.Join(lines, "\n"))
 		m.input.End()
 	case suggestMention:
@@ -574,6 +577,18 @@ func (m *tuiModel) completeSuggestion() {
 	}
 	m.suggestions = nil
 	m.suggestIdx = 0
+}
+
+// noArgCommands are slash commands that take no parameters, so completing
+// them leaves no trailing space.
+var noArgCommands = map[string]bool{
+	"/exit": true, "/quit": true, "/new": true, "/help": true,
+}
+
+// commandTakesArg reports whether a completed command expects a parameter and
+// should get a trailing space.
+func commandTakesArg(s string) bool {
+	return !noArgCommands[s]
 }
 
 func (m *tuiModel) cycleSuggestion() {

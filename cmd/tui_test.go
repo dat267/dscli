@@ -424,6 +424,13 @@ func TestTUISuggestions(t *testing.T) {
 	if m.input.col != len([]rune("/model ")) {
 		t.Errorf("cursor col = %d, want %d", m.input.col, len([]rune("/model ")))
 	}
+	// A command that takes no parameter completes without a trailing space.
+	m.input.SetValue("/ne")
+	m.updateSuggestions()
+	m.Update(press(tea.KeyTab))
+	if got := m.input.Value(); got != "/new" {
+		t.Errorf("tab completed no-arg command to %q, want %q", got, "/new")
+	}
 	// Multiple suggestions cycle on Tab (no premature completion).
 	m.input.SetValue("/")
 	m.updateSuggestions()

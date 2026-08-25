@@ -215,6 +215,28 @@ func TestExpandMentions(t *testing.T) {
 	}
 }
 
+// TestExpandMentionsDir: a directory mention expands to a listing of its
+// entries (with a trailing "/" on subdirectories) instead of a literal that
+// could confuse the model.
+func TestExpandMentionsDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := &ChatCmd{Workdir: dir}
+
+	got := cmd.expandMentions("what's in @. please")
+	if !strings.Contains(got, "<dir path=\".\">") {
+		t.Errorf("expandMentions = %q, want a <dir> block", got)
+	}
+	if !strings.Contains(got, "a.txt") || !strings.Contains(got, "sub/") {
+		t.Errorf("dir listing missing entries: %q", got)
+	}
+}
+
 // TestReplUIStatelessEndToEnd drives the REPL against a fake server with the
 // real wasm PoW solver and checks the output layout: a dim hint header, the
 // streamed reply on stdout, a guaranteed blank line before the next prompt,
