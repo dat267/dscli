@@ -393,6 +393,59 @@ func TestTUISubmitStreamsReply(t *testing.T) {
 	}
 }
 
+// TestTUICommandFeedbackNoteStyle: slash-command feedback in the chat pane
+// renders in the dimmed-grey note style (distinct from the plain assistant
+// reply) and is separated from the next message by a blank line.
+func TestTUICommandFeedbackNoteStyle(t *testing.T) {
+	m, _ := tuiHarness(t, nil, "")
+	m.input.SetValue("/new")
+	m.Update(press(tea.KeyEnter))
+	if !strings.Contains(m.scroll, ansiDim) || !strings.Contains(m.scroll, ansiMuted) {
+		t.Errorf("command feedback not dimmed grey:\n%q", m.scroll)
+	}
+	if !strings.Contains(m.scroll, "new conversation") {
+		t.Errorf("missing note text:\n%q", m.scroll)
+	}
+	if !strings.HasSuffix(m.scroll, "\n\n") {
+		t.Errorf("no blank line after command feedback:\n%q", m.scroll)
+	}
+}
+
+// TestTUIHelpBlockSpacing: /help renders as a styled block with a trailing
+// blank line so the next message is separated from it.
+func TestTUIHelpBlockSpacing(t *testing.T) {
+	m, _ := tuiHarness(t, nil, "")
+	m.input.SetValue("/help")
+	m.Update(press(tea.KeyEnter))
+	if !strings.Contains(m.scroll, ansiDim) || !strings.Contains(m.scroll, ansiMuted) {
+		t.Errorf("help block not in note style:\n%q", m.scroll)
+	}
+	if !strings.Contains(m.scroll, "/resume") {
+		t.Errorf("help missing /resume:\n%q", m.scroll)
+	}
+	if !strings.HasSuffix(m.scroll, "\n\n") {
+		t.Errorf("help block missing trailing blank line:\n%q", m.scroll)
+	}
+}
+
+// TestTUITurnSpacing: after a reply there is a blank line before the next
+// user message, so turns read as separated blocks.
+func TestTUITurnSpacing(t *testing.T) {
+	m, _ := tuiHarness(t, []string{
+		completionSSE(t, 2, "Hello"),
+		completionSSE(t, 3, "Again"),
+	}, "")
+	m.input.SetValue("hi")
+	m.Update(press(tea.KeyEnter))
+	pumpTUI(m)
+	m.input.SetValue("go on")
+	m.Update(press(tea.KeyEnter))
+	pumpTUI(m)
+	if !strings.Contains(m.scroll, "Hello\n\n"+ansiCyan) {
+		t.Errorf("no blank line between reply and next user message:\n%q", m.scroll)
+	}
+}
+
 func TestTUISlashCommands(t *testing.T) {
 	m, rec := tuiHarness(t, nil, "")
 

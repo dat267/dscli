@@ -356,6 +356,17 @@ func (u ui) bold(s string) string  { return u.wrap(ansiBold, s) }
 func (u ui) cyan(s string) string  { return u.wrap(ansiCyan, s) }
 func (u ui) muted(s string) string { return u.wrap(ansiMuted, s) }
 func (u ui) red(s string) string   { return u.wrap(ansiRed, s) }
+
+// note renders chat-pane system text (slash-command feedback, hints, notes)
+// as dimmed grey: dim alone reads as normal text on terminals that ignore
+// SGR 2, and plain grey as the reply on terminals that ignore truecolour, so
+// both are combined to keep it visibly a side note on either.
+func (u ui) note(s string) string {
+	if !u.color {
+		return s
+	}
+	return ansiDim + ansiMuted + s + ansiReset
+}
 func (u ui) wrap(code, s string) string {
 	if !u.color {
 		return s
@@ -443,16 +454,17 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 			return nil
 		case line == "/new":
 			conversation = ""
-			fmt.Fprintln(os.Stderr, u.dim("new conversation"))
+			fmt.Fprintln(os.Stderr, u.note("new conversation"))
 			continue
 		case line == "/help":
 			printReplHelp(u)
+			fmt.Fprintln(os.Stderr) // blank line: help is a block, not chat text
 			continue
 		case line == "/model" || strings.HasPrefix(line, "/model "):
 			m := strings.TrimSpace(strings.TrimPrefix(line, "/model"))
 			if m == "" {
 				status()
-				fmt.Fprintln(os.Stderr, u.dim("model: "+model+" (fixed per thread; /model <default|expert> starts a new conversation)"))
+				fmt.Fprintln(os.Stderr, u.note("model: "+model+" (fixed per thread; /model <default|expert> starts a new conversation)"))
 				continue
 			}
 			if m != "default" && m != "expert" {
@@ -462,7 +474,7 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 			model = m
 			conversation = ""
 			status()
-			fmt.Fprintln(os.Stderr, u.dim("new conversation"))
+			fmt.Fprintln(os.Stderr, u.note("new conversation"))
 			continue
 		case line == "/thinking" || strings.HasPrefix(line, "/thinking "):
 			thinking = toggleState(line, "/thinking", thinking)
@@ -482,9 +494,9 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 			}
 			instruction := strings.TrimSpace(strings.TrimPrefix(line, "/resume"))
 			line = resumePrompt(lastPartial, instruction)
-			fmt.Fprintln(os.Stderr, u.dim("resuming from the filtered partial reply"))
+			fmt.Fprintln(os.Stderr, u.note("resuming from the filtered partial reply"))
 		case strings.HasPrefix(line, "/"):
-			fmt.Fprintln(os.Stderr, "unknown command (/help for commands)")
+			fmt.Fprintln(os.Stderr, u.red("unknown command (/help for commands)"))
 			continue
 		}
 
@@ -566,7 +578,7 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 			// seed for /resume.
 			if replyBuf.Len() > 0 {
 				lastPartial = replyBuf.String()
-				fmt.Fprintln(os.Stderr, u.dim("hint: /resume continues from the partial reply (kept as context)"))
+				fmt.Fprintln(os.Stderr, u.note("hint: /resume continues from the partial reply (kept as context)"))
 			} else {
 				lastPartial = ""
 			}

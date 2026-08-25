@@ -253,16 +253,16 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.appendText(msg.text)
 		return m, pump(m.streamCh)
 	case streamNote:
-		// System notes (e.g. the filtered reply note) render dim so they read
-		// as side notes rather than the assistant's reply.
-		m.appendLine(m.u.dim(msg.text))
+		// System notes (e.g. the filtered reply note) render dimmed grey so
+		// they read as side notes rather than the assistant's reply.
+		m.appendLine(m.u.note(msg.text))
 		return m, pump(m.streamCh)
 	case streamDone:
 		m.busy = false
 		if msg.err != nil {
 			// A cancelled turn (Ctrl+C) is not an error; keep the chat usable.
 			if m.interrupted {
-				m.appendLine(m.u.dim("interrupted"))
+				m.appendLine(m.u.note("interrupted"))
 			} else {
 				m.appendLine(m.u.red("error: " + msg.err.Error()))
 			}
@@ -278,7 +278,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// the seed for /resume (a fully-filtered reply offers nothing).
 				if m.reply.Len() > 0 {
 					m.lastPartial = m.reply.String()
-					m.appendLine(m.u.dim("hint: /resume continues from the partial reply above"))
+					m.appendLine(m.u.note("hint: /resume continues from the partial reply above"))
 				} else {
 					m.lastPartial = ""
 				}
@@ -519,10 +519,10 @@ func (m *tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 	return m, m.startTurn(prompt)
 }
 
-// appendSystem renders a system note (file loads, attachments) in a muted
-// style, distinct from the user and assistant text.
+// appendSystem renders a system note (file loads, attachments) in the dimmed
+// grey note style, distinct from the user and assistant text.
 func (m *tuiModel) appendSystem(text string) {
-	m.appendLine(m.u.muted(text))
+	m.appendLine(m.u.note(text))
 }
 
 // renderUserLine styles a submitted user message with a foreground colour so
@@ -543,7 +543,7 @@ func loadHistoryInto(ctx context.Context, m *tuiModel, client *deepseek.Client, 
 	}
 	hist, err := client.ChatHistory(ctx, sess)
 	if err != nil {
-		m.scroll = m.u.muted("note: could not load conversation history: "+err.Error()) + "\n"
+		m.scroll = m.u.note("note: could not load conversation history: "+err.Error()) + "\n"
 		return
 	}
 	m.scroll = renderHistory(hist)
@@ -719,7 +719,8 @@ func (m *tuiModel) handleCommand(line string) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "/new":
 		m.newSession()
-		m.appendLine(m.u.dim("new conversation"))
+		m.appendLine(m.u.note("new conversation"))
+		m.appendLine("")
 		m.refreshStatus()
 		return m, nil
 	case "/resume":
@@ -739,16 +740,18 @@ func (m *tuiModel) handleCommand(line string) (tea.Model, tea.Cmd) {
 		m.loaded = nil
 		return m, m.startTurn(resumePrompt(m.lastPartial, arg))
 	case "/help":
-		m.appendLine(m.u.dim("commands: /exit /quit /new /model /thinking /search /clear /file /resume /help"))
-		m.appendLine(m.u.dim("  /clear [--delete]  forget the persisted default session (--delete removes it server-side)"))
-		m.appendLine(m.u.dim("  /file <path>       load a file/directory into the message (repeat to stack files)"))
-		m.appendLine(m.u.dim("  /resume [hint]     continue a reply the filter cut off, from its partial text"))
-		m.appendLine(m.u.dim("enter submits · ctrl+j/alt+enter newline · up/down cursor (history at first/last row) · ctrl+left/right word · alt+backspace deletes a word · ctrl+a/e line start/end · tab completes /commands"))
-		m.appendLine(m.u.dim("pgup/pgdn/home/end scroll · ctrl+l clears the pane · ctrl+c interrupts a reply (tapped again when idle, quits) · esc dismisses the menu or clears the input"))
+		m.appendLine(m.u.note("commands: /exit /quit /new /model /thinking /search /clear /file /resume /help"))
+		m.appendLine(m.u.note("  /clear [--delete]  forget the persisted default session (--delete removes it server-side)"))
+		m.appendLine(m.u.note("  /file <path>       load a file/directory into the message (repeat to stack files)"))
+		m.appendLine(m.u.note("  /resume [hint]     continue a reply the filter cut off, from its partial text"))
+		m.appendLine(m.u.note("enter submits · ctrl+j/alt+enter newline · up/down cursor (history at first/last row) · ctrl+left/right word · alt+backspace deletes a word · ctrl+a/e line start/end · tab completes /commands"))
+		m.appendLine(m.u.note("pgup/pgdn/home/end scroll · ctrl+l clears the pane · ctrl+c interrupts a reply (tapped again when idle, quits) · esc dismisses the menu or clears the input"))
+		m.appendLine("")
 		return m, nil
 	case "/model":
 		if arg == "" {
-			m.appendLine(m.u.dim("model: " + m.model + " (fixed per thread; /model <default|expert> starts a new conversation)"))
+			m.appendLine(m.u.note("model: " + m.model + " (fixed per thread; /model <default|expert> starts a new conversation)"))
+			m.appendLine("")
 			return m, nil
 		}
 		if arg != "default" && arg != "expert" {
@@ -758,7 +761,8 @@ func (m *tuiModel) handleCommand(line string) (tea.Model, tea.Cmd) {
 		m.model = arg
 		m.chat.Model = arg
 		m.newSession()
-		m.appendLine(m.u.dim("new conversation"))
+		m.appendLine(m.u.note("new conversation"))
+		m.appendLine("")
 		m.refreshStatus()
 		return m, nil
 	case "/thinking":
@@ -812,13 +816,15 @@ func (m *tuiModel) handleFileCommand(path string) {
 func (m *tuiModel) handleClearCommand(arg string) (tea.Model, tea.Cmd) {
 	switch arg {
 	case "":
-		m.appendLine(m.u.dim("clearing persisted session"))
+		m.appendLine(m.u.note("clearing persisted session"))
+		m.appendLine("")
 	case "--delete":
 		sess, _ := splitConversation(m.conversation)
 		if err := m.client.DeleteSessions(context.Background(), []string{sess}); err != nil {
 			m.appendLine(m.u.red("error: delete server-side: " + err.Error()))
 		} else {
-			m.appendLine(m.u.dim("deleted session " + sess + " server-side"))
+			m.appendLine(m.u.note("deleted session " + sess + " server-side"))
+			m.appendLine("")
 		}
 	default:
 		m.appendLine(m.u.red(`unknown /clear arg (want "" or "--delete")`))
@@ -830,7 +836,8 @@ func (m *tuiModel) handleClearCommand(arg string) (tea.Model, tea.Cmd) {
 		}
 	}
 	m.newSession()
-	m.appendLine(m.u.dim("new conversation"))
+	m.appendLine(m.u.note("new conversation"))
+	m.appendLine("")
 	m.refreshStatus()
 	return m, nil
 }
@@ -962,17 +969,19 @@ func wrapScrollLine(line string, width int) []string {
 	return out
 }
 
-// splitStyled splits a line into a leading ANSI style (empty when plain) and
-// the visible text, stripping one trailing reset.
+// splitStyled splits a line into its leading ANSI styles (possibly stacked,
+// e.g. dim + a colour, as produced by ui.note) and the visible text, stripping
+// one trailing reset.
 func splitStyled(line string) (prefix, text string) {
-	if strings.HasPrefix(line, "\x1b[") {
+	for strings.HasPrefix(line, "\x1b[") {
 		if end := strings.IndexByte(line, 'm'); end > 0 {
-			prefix = line[:end+1]
-			text = strings.TrimSuffix(line[end+1:], ansiReset)
-			return prefix, text
+			prefix += line[:end+1]
+			line = line[end+1:]
+		} else {
+			break
 		}
 	}
-	return "", line
+	return prefix, strings.TrimSuffix(line, ansiReset)
 }
 
 // wrapTextRows word-wraps plain text into rows of at most width columns.
