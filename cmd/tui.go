@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -53,11 +55,22 @@ type tuiModel struct {
 
 	suggestions []string
 	suggestIdx  int
+	suggestKind suggestKind
 
 	turns int
 	quit  bool
 	err   error
 }
+
+// suggestKind distinguishes what the suggestion menu is completing, so Tab
+// completes it correctly (a command gets a trailing space, a @mention is
+// replaced in place).
+type suggestKind int
+
+const (
+	suggestCommand suggestKind = iota
+	suggestMention
+)
 
 // stream messages sent by the turn goroutine into the model.
 type streamDelta struct{ text string }
@@ -282,7 +295,11 @@ func (m *tuiModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.updateSuggestions()
 		return m, nil
 	case "tab":
-		m.cycleSuggestion()
+		if len(m.suggestions) == 1 {
+			m.completeSuggestion()
+		} else if len(m.suggestions) > 1 {
+			m.cycleSuggestion()
+		}
 		return m, nil
 	case "shift+tab":
 		m.suggestPrev()
@@ -388,18 +405,16 @@ func (m *tuiModel) quitCleanup() {
 // model message.
 func (m *tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 	line := strings.TrimSpace(m.input.Value())
-	if strings.HasPrefix(line, "/") {
-		if knownCommand(line) {
-			m.input.Clear()
-			m.updateSuggestions()
-			return m.handleCommand(line)
-		}
-		if len(m.suggestions) > 0 {
-			m.input.SetValue(m.suggestions[m.suggestIdx])
-			m.suggestions = nil
-			m.suggestIdx = 0
-			return m, nil
-		}
+	if strings.HasPrefix(line, "/") && knownCommand(line) {
+		m.input.Clear()
+		m.updateSuggestions()
+		return m.handleCommand(line)
+	}
+	// A partial command or @mention completes from the menu (Enter or Tab both
+	// land the cursor at the end, ready for an argument).
+	if len(m.suggestions) > 0 {
+		m.completeSuggestion()
+		return m, nil
 	}
 	if line == "" {
 		return m, nil
@@ -513,12 +528,51 @@ func (m *tuiModel) historyNext() {
 	}
 }
 
-// updateSuggestions recomputes the slash-command menu from the input's last
-// line.
+// updateSuggestions recomputes the completion menu from the input's last line:
+// slash commands first, then @file mentions.
 func (m *tuiModel) updateSuggestions() {
 	lines := strings.Split(m.input.Value(), "\n")
-	last := strings.TrimSpace(lines[len(lines)-1])
-	m.suggestions = suggestCommands(last)
+	last := lines[len(lines)-1]
+	if cmds := suggestCommands(last); len(cmds) > 0 {
+		m.suggestions = cmds
+		m.suggestIdx = 0
+		m.suggestKind = suggestCommand
+		return
+	}
+	if ms := suggestMentions(last, m.chat.Workdir); len(ms) > 0 {
+		m.suggestions = ms
+		m.suggestIdx = 0
+		m.suggestKind = suggestMention
+		return
+	}
+	m.suggestions = nil
+}
+
+// completeSuggestion fills in the highlighted suggestion and clears the menu.
+// Commands complete to "<command> " with the cursor after the space (ready for
+// an argument); @mentions replace the typed @path in place with the cursor at
+// its end.
+func (m *tuiModel) completeSuggestion() {
+	if len(m.suggestions) == 0 {
+		return
+	}
+	s := m.suggestions[m.suggestIdx]
+	lines := strings.Split(m.input.Value(), "\n")
+	last := lines[len(lines)-1]
+	switch m.suggestKind {
+	case suggestCommand:
+		lines[len(lines)-1] = s + " "
+		m.input.SetValue(strings.Join(lines, "\n"))
+		m.input.End()
+	case suggestMention:
+		if token := mentionToken(last); token != "" {
+			idx := strings.LastIndex(last, token)
+			lines[len(lines)-1] = last[:idx] + s + last[idx+len(token):]
+			m.input.SetValue(strings.Join(lines, "\n"))
+			m.input.End()
+		}
+	}
+	m.suggestions = nil
 	m.suggestIdx = 0
 }
 
@@ -542,6 +596,7 @@ func (m *tuiModel) suggestNext() {
 
 // suggestCommands returns command completions for a partial slash token.
 func suggestCommands(token string) []string {
+	token = strings.TrimSpace(token)
 	if !strings.HasPrefix(token, "/") {
 		return nil
 	}
@@ -557,6 +612,70 @@ func suggestCommands(token string) []string {
 				out = append(out, "/model "+o)
 			}
 		}
+	}
+	return out
+}
+
+// mentionTokenRE matches an @-mention path token being typed. Unlike the
+// expansion regex it also matches an empty path ("@"), so a bare @ offers the
+// workdir root.
+var mentionTokenRE = regexp.MustCompile(`@[A-Za-z0-9_./~+-]*`)
+
+// mentionToken returns the last @-mention token on a line, or "" when none.
+func mentionToken(line string) string {
+	all := mentionTokenRE.FindAllString(line, -1)
+	if len(all) == 0 {
+		return ""
+	}
+	return all[len(all)-1]
+}
+
+// maxMentionSuggestions caps how many @-mention completions are offered.
+const maxMentionSuggestions = 20
+
+// suggestMentions returns @file completions for a partial @path on the line,
+// listing entries under workdir whose names extend the typed path. An already
+// complete (existing) path yields no suggestions. Directories are marked with
+// a trailing "/" so Tab can keep descending.
+func suggestMentions(line, workdir string) []string {
+	token := mentionToken(line)
+	if token == "" {
+		return nil
+	}
+	partial := strings.TrimPrefix(token, "@")
+	dir, base := filepath.Split(partial)
+	dir = filepath.Clean(dir)
+	if dir == "." || dir == "" {
+		dir = "."
+	}
+	// A resolved file (or the empty-partial case where base is empty but the
+	// dir exists) needs no completion when the path already exists.
+	if base != "" {
+		if _, err := os.Stat(filepath.Join(workdir, partial)); err == nil {
+			return nil
+		}
+	}
+	entries, err := os.ReadDir(filepath.Join(workdir, dir))
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if len(out) >= maxMentionSuggestions {
+			break
+		}
+		name := e.Name()
+		if !strings.HasPrefix(name, base) {
+			continue
+		}
+		rel := name
+		if dir != "." {
+			rel = dir + "/" + name
+		}
+		if e.IsDir() {
+			rel += "/"
+		}
+		out = append(out, "@"+rel)
 	}
 	return out
 }

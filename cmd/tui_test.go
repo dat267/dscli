@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -412,16 +413,71 @@ func TestTUISuggestions(t *testing.T) {
 	if len(m.suggestions) != 1 || m.suggestions[0] != "/model" {
 		t.Errorf("suggestions = %v, want [/model]", m.suggestions)
 	}
-	// Tab cycles and Enter completes the highlighted suggestion.
+	// A single suggestion: Tab completes it with a trailing space and the
+	// cursor past it, ready for an argument.
 	m.input.SetValue("/mod")
 	m.updateSuggestions()
 	m.Update(press(tea.KeyTab))
-	if got := m.suggestions[m.suggestIdx]; got != "/model" {
-		t.Errorf("tab selected %q, want /model", got)
+	if got := m.input.Value(); got != "/model " {
+		t.Errorf("tab completed to %q, want %q", got, "/model ")
 	}
-	m.Update(press(tea.KeyEnter))
-	if got := m.input.Value(); got != "/model" {
-		t.Errorf("enter completed to %q, want /model", got)
+	if m.input.col != len([]rune("/model ")) {
+		t.Errorf("cursor col = %d, want %d", m.input.col, len([]rune("/model ")))
+	}
+	// Multiple suggestions cycle on Tab (no premature completion).
+	m.input.SetValue("/")
+	m.updateSuggestions()
+	if len(m.suggestions) < 2 {
+		t.Fatalf("bare / should offer several commands, got %v", m.suggestions)
+	}
+	first := m.suggestions[m.suggestIdx]
+	m.Update(press(tea.KeyTab))
+	if m.suggestions[m.suggestIdx] == first {
+		t.Errorf("tab did not cycle through multiple suggestions")
+	}
+}
+
+// TestTUIMentionSuggestions: an @path on the line completes against files in
+// the workdir, replaced in place with the cursor at its end.
+func TestTUIMentionSuggestions(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "src"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	m, _ := tuiHarness(t, nil, dir)
+
+	m.input.SetValue("summarize @READ")
+	m.updateSuggestions()
+	if len(m.suggestions) != 1 || m.suggestions[0] != "@README.md" {
+		t.Errorf("mentions = %v, want [@README.md]", m.suggestions)
+	}
+	// Tab replaces the typed mention in place; no trailing space for paths.
+	m.input.SetValue("summarize @READ")
+	m.updateSuggestions()
+	m.Update(press(tea.KeyTab))
+	if got := m.input.Value(); got != "summarize @README.md" {
+		t.Errorf("tab mention = %q, want %q", got, "summarize @README.md")
+	}
+	if m.input.col != len([]rune("summarize @README.md")) {
+		t.Errorf("cursor col = %d, want %d", m.input.col, len([]rune("summarize @README.md")))
+	}
+	// A complete existing path yields no suggestions.
+	m.input.SetValue("read @README.md")
+	m.updateSuggestions()
+	if len(m.suggestions) != 0 {
+		t.Errorf("complete path suggested %v, want none", m.suggestions)
+	}
+	// A directory mention is marked with a trailing slash.
+	m.input.SetValue("list @sr")
+	m.updateSuggestions()
+	if len(m.suggestions) != 1 || m.suggestions[0] != "@src/" {
+		t.Errorf("dir mention = %v, want [@src/]", m.suggestions)
 	}
 }
 

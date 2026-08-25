@@ -109,8 +109,9 @@ conversation: 0123456789:42
 
 Keys: **Enter** submits, **Ctrl+J / Alt+Enter** inserts a newline, **Up/Down**
 move the cursor through multiline input (at the first/last line they recall
-history), **Tab** cycles the slash-command menu (Enter completes it),
-**Esc** clears the input, **Ctrl+C** quits. The layout is a scrollable chat pane on top, a 2-line input
+history), **Tab** completes a command or `@file` mention (cycling through the
+candidates when several match; Enter also completes), **Esc** clears the
+input, **Ctrl+C** quits. The layout is a scrollable chat pane on top, a 2-line input
 with a `::: ` prompt (text wraps inside it) at the bottom, and the status line
 below it. PgUp/PgDn scroll a page, the mouse wheel scrolls a few lines, and
 Home / End jump to the top/bottom. When a persisted conversation is resumed
@@ -121,7 +122,7 @@ persisted default session and starts a fresh one (`/clear --delete` also
 removes the old thread server-side). An **`@file` mention** in a message loads
 that file's contents (relative to `--workdir`, defaulting to `.`) into the
 prompt inside a `<file>` block, so you can drop a file into the chat with
-`@path/to/file`.
+`@path/to/file` — Tab completes the path against the workdir as you type.
 
 **Censorship.** Prompts are sent exactly as written — no hidden instructions.
 If DeepSeek's content filter rejects a reply, the CLI just prints a short
