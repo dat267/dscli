@@ -22,6 +22,7 @@ type TranslateCmd struct {
 	Force        bool          `short:"f" help:"Overwrite the output file if it exists"`
 	ChunkBytes   int           `help:"Upper bound on chunk size in bytes; 0 uses a 1 MiB cap. Chunks are sized adaptively to fit the model's output limit, so this is a maximum, not a fixed size" default:"0"`
 	Instructions string        `help:"File with custom translation instructions for this run (default: translate/<from>-<to>.md, then a built-in general style)"`
+	Glossary     string        `help:"File with a project-specific name/term glossary (appended to every chunk prompt)"`
 	Timeout      time.Duration `help:"Overall budget per file (0 = no limit)" default:"15m"`
 
 	Token     string `env:"DS_TOKEN" help:"DeepSeek user token (localStorage.userToken). Alternatively: config set token"`
@@ -65,6 +66,13 @@ func (c *TranslateCmd) Run(app *App, ctx context.Context) error {
 	style, err := translate.ResolveStyle(c.Instructions, c.From, c.To)
 	if err != nil {
 		return err
+	}
+	if c.Glossary != "" {
+		gloss, err := os.ReadFile(c.Glossary)
+		if err != nil {
+			return fmt.Errorf("read glossary: %w", err)
+		}
+		style = style + "\n\n## Project glossary\n" + string(gloss)
 	}
 
 	if c.Parallel {
