@@ -278,23 +278,77 @@ func Translate(ctx context.Context, client *deepseek.Client, sessionID string, c
 		model = "default"
 	}
 	src := string(content)
-	// The probe is only for learning the output density so chunks can be sized
-	// to fill the cap; in think mode the chunk size is a fixed target, so the
-	// first chunk starts there directly (a small file stays a single chunk).
-	chunkBytes := initialChunkBytes
-	if opts.Thinking {
-		chunkBytes = thinkingChunkBytes
-	}
-	if chunkBytes > maxChunk {
-		chunkBytes = maxChunk
-	}
 
 	conversation := sessionID
 	var translated []string
-	capBytes := defaultCapBytes
+
 	if opts.Thinking {
-		capBytes = thinkingCapBytes
+		// Think mode: fixed chunk size, no probe, no grow/shrink. The
+		// expert model's output budget is ~300K tokens, so a 256 KB input
+		// per chunk is safe. If the reply is still truncated the chunk
+		// halves once as a safety net, but that should never happen.
+		chunkBytes := thinkingChunkBytes
+		if chunkBytes > maxChunk {
+			chunkBytes = maxChunk
+		}
+		offset := 0
+		for offset < len(src) {
+			chunk := FirstChunk(src[offset:], chunkBytes)
+			if chunk == "" {
+				break
+			}
+			text, convID, truncated, err := translateChunk(ctx, client, conversation, Prompt(format, opts.From, opts.To, false, opts.Style)+chunk, model, opts.Thinking)
+			if err != nil {
+				if !truncated {
+					return "", conversation, fmt.Errorf("chunk (%d bytes): %w", len(chunk), err)
+				}
+				// Truncated at the output limit: halve the chunk and retry.
+				if chunkBytes <= minChunkBytes {
+					return "", conversation, fmt.Errorf("chunk (%d bytes): the reply hits the output limit even at the minimum chunk size", len(chunk))
+				}
+				chunkBytes /= 2
+				continue
+			}
+			conversation = convID
+
+			// Structural formats must keep their timestamps/header markup
+			// byte-for-byte (ProtectedLines is empty for text/markdown, so the
+			// verification passes trivially there).
+			if err := filetools.VerifyProtected(format, chunk, text); err != nil {
+				strict := Prompt(format, opts.From, opts.To, true, opts.Style) +
+					"The previous attempt changed a protected (timestamps/header) line.\n" +
+					"Keep every line with a timestamp or the WEBVTT/header syntax EXACTLY as in the original. Retry the chunk:\n\n" + chunk
+				text2, convID2, _, err2 := translateChunk(ctx, client, conversation, strict, model, opts.Thinking)
+				if err2 != nil {
+					return "", conversation, fmt.Errorf("chunk (%d bytes): %w", len(chunk), err2)
+				}
+				conversation = convID2
+				if err := filetools.VerifyProtected(format, chunk, text2); err != nil {
+					return "", conversation, fmt.Errorf("chunk (%d bytes): %w", len(chunk), err)
+				}
+				text = text2
+			}
+
+			translated = append(translated, text)
+			offset += len(chunk)
+			if opts.OnChunk != nil {
+				remaining := len(src) - offset
+				total := len(translated)
+				if remaining > 0 {
+					total += (remaining + chunkBytes - 1) / chunkBytes
+				}
+				opts.OnChunk(len(translated), total)
+			}
+		}
+		return strings.TrimSpace(strings.Join(translated, "\n")) + "\n", conversation, nil
 	}
+
+	// Non-think mode: adaptive chunk sizing with probe + grow + shrink.
+	chunkBytes := initialChunkBytes
+	if chunkBytes > maxChunk {
+		chunkBytes = maxChunk
+	}
+	capBytes := defaultCapBytes
 	inOutRatio := 0.0 // output/input byte ratio, learned from the first complete chunk
 	growOK := true    // allow growing the chunk size only until the first truncation
 	offset := 0
@@ -345,14 +399,6 @@ func Translate(ctx context.Context, client *deepseek.Client, sessionID string, c
 		}
 		if inOutRatio > 0 {
 			n := idealChunk(capBytes, inOutRatio, maxChunk)
-			if opts.Thinking {
-				// DeepThink: use a fixed large chunk (bounded by the user's
-				// --chunk-bytes cap); the truncation shrink still guards it.
-				n = thinkingChunkBytes
-				if n > maxChunk {
-					n = maxChunk
-				}
-			}
 			if growOK || n < chunkBytes {
 				chunkBytes = n
 			}
