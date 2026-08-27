@@ -204,7 +204,7 @@ func TestTUIUserLineStyled(t *testing.T) {
 	}
 }
 
-// TestTUIInputWrap: long input text wraps inside the fixed 2-row textarea and
+// TestTUIInputWrap: long input text wraps inside the fixed 5-row textarea and
 // the cursor stays visible; the top row marks content clipped above with "…".
 func TestTUIInputWrap(t *testing.T) {
 	m, _ := tuiHarness(t, nil, "")
@@ -217,11 +217,10 @@ func TestTUIInputWrap(t *testing.T) {
 		t.Fatalf("box rows = %d, want %d", len(rows), maxInputLines)
 	}
 	// 60 chars at boxW=26 (width minus the 4-col "::: " prompt) wrap into
-	// 26+26+8; the window shows the last two rows, and the first visible row
-	// is full, so its last cell becomes the "…" clip marker.
-	wantTop := strings.Repeat("x", 25) + "…"
-	if !strings.Contains(rows[0], wantTop) {
-		t.Errorf("row 0 not wrapped with clip marker, want %q in %q", wantTop, rows[0])
+	// 26+26+8 = 3 rows; the 5-row window shows all 3 rows plus 2 padding
+	// rows, so no clip marker is needed.
+	if strings.Contains(box, "…") {
+		t.Errorf("unexpected clip marker (all rows fit in the 5-row window):\n%s", box)
 	}
 	if !strings.Contains(box, "█") {
 		t.Errorf("end-of-text block cursor missing:\n%s", box)
@@ -520,6 +519,26 @@ func TestReplSessionCommands(t *testing.T) {
 	prompt, _ := completionBody(t, rec, 0)
 	if !strings.Contains(prompt, "hello") {
 		t.Errorf("prompt = %q", prompt)
+	}
+}
+
+// TestTUICopyCommand: /copy with no clipboard tool falls back to the error
+// message; with an empty chat it says nothing to copy.
+func TestTUICopyCommand(t *testing.T) {
+	m, _ := tuiHarness(t, nil, "")
+	// Empty chat: /copy shows "nothing to copy".
+	m.input.SetValue("/copy")
+	m.Update(press(tea.KeyEnter))
+	if !strings.Contains(m.scroll, "nothing to copy") {
+		t.Errorf("empty chat copy = %q, want nothing-to-copy note", m.scroll)
+	}
+	// With some content, /copy should show the no-clipboard-tool error
+	// (no real clipboard tool in CI/test sandbox).
+	m.scroll = "hello world\n"
+	m.input.SetValue("/copy")
+	m.Update(press(tea.KeyEnter))
+	if !strings.Contains(m.scroll, "no clipboard tool found") {
+		t.Errorf("no-tool copy = %q, want a clipboard-not-found note", m.scroll)
 	}
 }
 
@@ -840,32 +859,14 @@ func TestTUIInputWideRowsRenderInsideBox(t *testing.T) {
 			t.Errorf("box row overflows %d columns (%d): %q", 10, w, row)
 		}
 	}
-	// 20 columns of text in a 6-column box window: content above is clipped,
-	// so the first visible row carries the clip marker.
-	if !strings.Contains(box, "…") {
-		t.Errorf("wide wrapped box missing clip marker:\n%s", box)
+	// 20 columns of text in a 6-column box wraps to 4 rows; the 5-row window
+	// shows all rows and 1 padding row, so no clip marker is needed.
+	if strings.Contains(box, "…") {
+		t.Errorf("unexpected clip marker (all rows fit in the 5-row window):\n%s", box)
 	}
 }
 
 // stripANSI removes colour/reset escape sequences so display widths can be
-// measured on rendered rows.
-func stripANSI(s string) string {
-	var b strings.Builder
-	for {
-		i := strings.IndexByte(s, 0x1b)
-		if i < 0 {
-			b.WriteString(s)
-			break
-		}
-		b.WriteString(s[:i])
-		if j := strings.IndexByte(s[i:], 'm'); j >= 0 {
-			s = s[i+j+1:]
-		} else {
-			break
-		}
-	}
-	return b.String()
-}
 
 // TestTUIWordMovement: ctrl/alt+left/right move by word (across line
 // boundaries), alt+backspace deletes the word before the cursor.

@@ -674,6 +674,7 @@ func printReplHelp(u ui) {
   /resume [instruction]       continue a reply the filter cut off, from its partial text
   /session [id]               show the current conversation; select a saved session to resume
   /sessions                   list sessions with saved texts
+  /copy                       copy the chat text to the system clipboard (TUI only)
   /help                       this help
 
 multiline: end a line with \ to continue it on the next line; a lone \ line

@@ -138,7 +138,9 @@ default session and starts a fresh one
 `--workdir`, defaulting to `.`) into a buffer that is prepended to the next
 submitted message inside a `<file>`/`<dir>` block — repeat it to stack several
 files, and a system note in the chat shows each load and the final
-attachments.
+attachments. **`/copy`** copies the entire chat pane's text (colours stripped)
+to the system clipboard via xclip, wl-copy, pbcopy, or clip.exe.
+**`/resume`** (see the Censorship section below) continues a filtered reply.
 
 **Censorship.** Prompts are sent exactly as written — no hidden instructions.
 If DeepSeek's content filter rejects a reply, the CLI prints a short dim note

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"sort"
 	"strings"
 
@@ -112,10 +113,27 @@ func (m *tuiModel) refreshStatus() {
 	} else if !m.noPersist && m.cfgPath != "" {
 		mode = "persisted"
 	}
+	conv := ""
+	if m.conversation != "" {
+		sess, _ := splitConversation(m.conversation)
+		if sess != "" {
+			if len(sess) > 8 {
+				conv = sess[:8] + "…"
+			} else {
+				conv = sess
+			}
+		}
+	}
 	m.status = m.u.muted(fmt.Sprintf(
-		"DeepSeek · model %s · thinking %s · search %s · %s",
-		m.model, onoff(m.thinking), onoff(m.search), mode,
+		"DeepSeek · model %s · %s · turn %d",
+		m.model, mode, m.turns,
 	))
+	if conv != "" {
+		m.status = m.u.muted(fmt.Sprintf(
+			"DeepSeek · model %s · %s · turn %d · %s",
+			m.model, mode, m.turns, conv,
+		))
+	}
 }
 
 // appendText streams reply text onto the current (last) line, so consecutive
@@ -579,7 +597,7 @@ func renderHistory(hist []deepseek.HistoryMessage) string {
 func knownCommand(line string) bool {
 	cmd, _, _ := strings.Cut(line, " ")
 	switch cmd {
-	case "/exit", "/quit", "/new", "/help", "/model", "/thinking", "/search", "/clear", "/file", "/resume", "/session", "/sessions":
+	case "/exit", "/quit", "/new", "/help", "/model", "/thinking", "/search", "/clear", "/file", "/resume", "/session", "/sessions", "/copy":
 		return true
 	}
 	return false
@@ -695,7 +713,7 @@ func suggestCommands(token string) []string {
 		return nil
 	}
 	var out []string
-	for _, c := range []string{"/exit", "/quit", "/new", "/help", "/model", "/thinking", "/search", "/clear", "/file", "/resume", "/session", "/sessions"} {
+	for _, c := range []string{"/exit", "/quit", "/new", "/help", "/model", "/thinking", "/search", "/clear", "/file", "/resume", "/session", "/sessions", "/copy"} {
 		if strings.HasPrefix(c, token) {
 			out = append(out, c)
 		}
@@ -730,6 +748,9 @@ func (m *tuiModel) handleCommand(line string) (tea.Model, tea.Cmd) {
 	case "/session":
 		m.handleSessionCommand(arg)
 		return m, nil
+	case "/copy":
+		m.handleCopyCommand()
+		return m, nil
 	case "/resume":
 		// Continue a reply the content filter cut off: the partial text is
 		// sent back as context with a continue instruction. Nothing is
@@ -753,6 +774,7 @@ func (m *tuiModel) handleCommand(line string) (tea.Model, tea.Cmd) {
 		m.appendLine(m.u.note("  /resume [hint]     continue a reply the filter cut off, from its partial text"))
 		m.appendLine(m.u.note("  /session [id]     show the current conversation; select a saved session to resume"))
 		m.appendLine(m.u.note("  /sessions          list sessions with saved texts"))
+		m.appendLine(m.u.note("  /copy              copy the chat text to the system clipboard"))
 		m.appendLine(m.u.note("enter submits · ctrl+j/alt+enter newline · up/down cursor (history at first/last row) · ctrl+left/right word · alt+backspace deletes a word · ctrl+a/e line start/end · tab completes /commands"))
 		m.appendLine(m.u.note("pgup/pgdn/home/end scroll · ctrl+l clears the pane · ctrl+c interrupts a reply (tapped again when idle, quits) · esc dismisses the menu or clears the input"))
 		m.appendLine("")
@@ -912,6 +934,55 @@ func (m *tuiModel) handleSessionCommand(arg string) {
 	m.refreshStatus()
 }
 
+// handleCopyCommand implements `/copy`: copies the visible chat text
+// (stripped of ANSI styling) to the system clipboard via the platform-native
+// clipboard tool (xclip, wl-copy, pbcopy, clip.exe, or a plain tee fallback).
+func (m *tuiModel) handleCopyCommand() {
+	plain := stripANSI(m.scroll)
+	if plain == "" {
+		m.appendLine(m.u.note("nothing to copy (the chat is empty)"))
+		return
+	}
+	tool := clipboardTool()
+	if len(tool) == 0 {
+		m.appendLine(m.u.red("no clipboard tool found; install xclip, wl-copy, pbcopy, or clip.exe"))
+		return
+	}
+	cmd := exec.Command(tool[0], tool[1:]...)
+	cmd.Stdin = strings.NewReader(plain)
+	if err := cmd.Run(); err != nil {
+		m.appendLine(m.u.red("clipboard copy failed: " + err.Error()))
+		return
+	}
+	m.appendLine(m.u.note(fmt.Sprintf("copied %d bytes of chat text to clipboard", len(plain))))
+}
+
+// clipboardTool returns the platform-native clipboard command, or "".
+func clipboardTool() []string {
+	// $WAYLAND_DISPLAY checked first so wl-copy is preferred over xclip
+	// when both are present on a Wayland session.
+	if os.Getenv("WAYLAND_DISPLAY") != "" {
+		if _, err := exec.LookPath("wl-copy"); err == nil {
+			return []string{"wl-copy"}
+		}
+	}
+	for _, c := range []string{"xclip", "xsel"} {
+		if _, err := exec.LookPath(c); err == nil {
+			if c == "xclip" {
+				return []string{"xclip", "-selection", "clipboard"}
+			}
+			return []string{"xsel", "--clipboard", "--input"}
+		}
+	}
+	if _, err := exec.LookPath("pbcopy"); err == nil {
+		return []string{"pbcopy"}
+	}
+	if _, err := exec.LookPath("clip.exe"); err == nil {
+		return []string{"clip.exe"}
+	}
+	return nil
+}
+
 // newSession starts a fresh thread: persisted (saved as the new default) or,
 // with --no-persist, tracked for deletion on quit. The thread changes mean any
 // filtered partial belongs to the old conversation, so it is dropped.
@@ -932,10 +1003,10 @@ func (m *tuiModel) newSession() {
 }
 
 // outputRows returns how many scrollback lines fit between the status line
-// and the input (plus any suggestion rows).
+// and the separator+input (plus any suggestion rows).
 func (m *tuiModel) outputRows() int {
-	inputH := m.inputHeight()
-	rows := m.height - 1 - inputH - m.suggestionRows() // 1 = status line
+	// +1 for the separator row between scrollback and input
+	rows := m.height - 1 - 1 - m.inputHeight() - m.suggestionRows() // 1 = status line, 1 = separator
 	if rows < 0 {
 		return 0
 	}
@@ -1108,17 +1179,25 @@ func (m *tuiModel) render() string {
 		b.WriteString("\n")
 	}
 
-	// 2. Slash-command menu sits just above the input.
+	// 2. Separator: a dimmed line between the scrollback and the input area.
+	if m.width > 0 {
+		sep := strings.Repeat("─", m.width)
+		sep = m.u.dim(sep)
+		b.WriteString(sep)
+		b.WriteString("\n")
+	}
+
+	// 3. Slash-command menu sits just above the input.
 	if len(m.suggestions) > 0 {
 		b.WriteString(m.renderSuggestions())
 		b.WriteString("\n")
 	}
 
-	// 3. Input at the bottom (open textarea with a "::: " prompt).
+	// 4. Input at the bottom (open textarea with a "::: " prompt).
 	b.WriteString(m.input.render(max(0, m.width)))
 	b.WriteString("\n")
 
-	// 4. Status line below the input (m.status is already dimmed; only
+	// 5. Status line below the input (m.status is already dimmed; only
 	// truncate to the terminal width so it never wraps). While a turn streams
 	// a live suffix tells the user it can be interrupted.
 	status := m.status
@@ -1137,7 +1216,7 @@ func (m *tuiModel) inputHeight() int { return maxInputLines }
 
 // maxInputLines is the fixed height (in rows) of the input box; text wraps
 // within it.
-const maxInputLines = 2
+const maxInputLines = 5
 
 // maxSuggestionRows caps how many completion entries the menu shows; when the
 // list is longer the menu scrolls, marking any entries above/below the window.
@@ -1702,6 +1781,26 @@ func clipMarker(s string, boxW int) string {
 	r := []rune(s)
 	r[runeIndexAt(r, boxW-1)] = '…'
 	return string(r)
+}
+
+// stripANSI removes colour/reset escape sequences so display widths can be
+// measured on rendered rows, and for clipboard copy.
+func stripANSI(s string) string {
+	var b strings.Builder
+	for {
+		i := strings.IndexByte(s, 0x1b)
+		if i < 0 {
+			b.WriteString(s)
+			break
+		}
+		b.WriteString(s[:i])
+		if j := strings.IndexByte(s[i:], 'm'); j >= 0 {
+			s = s[i+j+1:]
+		} else {
+			break
+		}
+	}
+	return b.String()
 }
 
 // runTUI runs the interactive bubbletea session. It must only be called when
