@@ -15,14 +15,14 @@ import (
 // translation driven by the DeepSeek session. The heavy lifting lives in
 // internal/translate.
 type TranslateCmd struct {
-	File         string        `arg:"" help:"File to translate (txt, md, lrc, srt, vtt, ass, ttml, epub)"`
+	File         []string      `arg:"" optional:"" help:"File(s) to translate (txt, md, lrc, srt, vtt, ass, ttml, epub); omit to read from stdin"`
 	From         string        `help:"Source language (defaults to auto-detect)" default:"auto"`
 	To           string        `help:"Target language" default:"English"`
 	Output       string        `short:"o" help:"Output path (default: <input>.translated.<ext>, .txt for epub)"`
 	Force        bool          `short:"f" help:"Overwrite the output file if it exists"`
 	ChunkBytes   int           `help:"Upper bound on chunk size in bytes; 0 uses a 1 MiB cap. Chunks are sized adaptively to fit the model's output limit, so this is a maximum, not a fixed size" default:"0"`
 	Instructions string        `help:"File with custom translation instructions for this run (default: translate/<from>-<to>.md, then a built-in general style)"`
-	Timeout      time.Duration `help:"Overall budget (0 = no limit)" default:"15m"`
+	Timeout      time.Duration `help:"Overall budget per file (0 = no limit)" default:"15m"`
 
 	Token     string `env:"DS_TOKEN" help:"DeepSeek user token (localStorage.userToken). Alternatively: config set token"`
 	Cookie    string `env:"DS_COOKIE" help:"DeepSeek ds_session_id cookie value. Alternatively: config set cookie"`
@@ -31,6 +31,8 @@ type TranslateCmd struct {
 	Model string `short:"m" help:"Model: default (Instant) or expert" default:""`
 
 	Thinking bool `short:"t" help:"Enable DeepThink reasoning for each chunk (the reasoning model allows longer replies, so chunks are sized bigger and fewer are needed)"`
+
+	Parallel bool `short:"p" help:"Translate multiple files concurrently (each in its own session). No shared context between files — terminology may drift"`
 
 	NoPersist bool `help:"Do not persist or reuse the default session; the session is deleted when the run ends (default: on)" default:"true"`
 
@@ -49,46 +51,55 @@ func (c *TranslateCmd) Run(app *App, ctx context.Context) error {
 	if c.Token == "" {
 		return errors.New("no DeepSeek session configured: pass --token/--cookie (or DS_TOKEN/DS_COOKIE) or run 'dscli login' and save the values with 'dscli config set'")
 	}
-	if c.Output != "" && !c.Force {
-		if _, err := os.Stat(c.Output); err == nil {
-			return fmt.Errorf("output file %s already exists (use -f to overwrite)", c.Output)
-		}
+	if c.Output != "" && len(c.File) > 1 {
+		return errors.New("-o (output path) cannot be used with multiple files; each file gets its own default path")
 	}
 	if c.Model != "" && c.Model != "default" && c.Model != "expert" {
 		return fmt.Errorf("unknown model %q (want default or expert)", c.Model)
 	}
-
-	content, format, err := translate.Load(c.File, translate.MaxInputBytes)
-	if err != nil {
-		return err
-	}
-	out := c.Output
-	if out == "" {
-		out = translate.DefaultOutput(c.File, c.To)
-	}
-
-	client := deepseek.NewClient(deepseek.Session{
-		Token:     c.Token,
-		Cookie:    c.Cookie,
-		UserAgent: c.UserAgent,
-	}, c.Timeout, c.clientBase)
-
-	// By default the persisted default session is resumed (created + saved on
-	// first use); --no-persist runs in a fresh session deleted afterwards.
-	sessionID, trusted, cleanup, err := resolveDefaultSession(ctx, client, c.cfgPath, c.NoPersist)
-	if err != nil {
-		return fmt.Errorf("create chat session: %w", err)
-	}
-	if cleanup != nil {
-		defer cleanup()
+	if len(c.File) == 0 {
+		// TODO: stdin reading for single-file mode
+		return errors.New("give at least one file to translate")
 	}
 
 	style, err := translate.ResolveStyle(c.Instructions, c.From, c.To)
 	if err != nil {
 		return err
 	}
+
+	if c.Parallel {
+		return c.translateParallel(ctx, style)
+	}
+	return c.translateSequential(ctx, style)
+}
+
+// translateFile translates one file and writes the output.
+func (c *TranslateCmd) translateFile(ctx context.Context, client *deepseek.Client, file, style string) error {
+	content, format, err := translate.Load(file, translate.MaxInputBytes)
+	if err != nil {
+		return fmt.Errorf("load %s: %w", file, err)
+	}
+
+	out := c.Output
+	if out == "" {
+		out = translate.DefaultOutput(file, c.To)
+	}
+	if !c.Force {
+		if _, err := os.Stat(out); err == nil {
+			return fmt.Errorf("output %s already exists (use -f to overwrite)", out)
+		}
+	}
+
+	sessionID, trusted, cleanup, err := resolveDefaultSession(ctx, client, c.cfgPath, c.NoPersist)
+	if err != nil {
+		return fmt.Errorf("create session: %w", err)
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+
 	fmt.Fprintf(os.Stderr, "translating %s → %s (%s from %s to %s)\n",
-		c.File, out, format, c.From, c.To)
+		file, out, format, c.From, c.To)
 
 	var result, convID string
 	_, err = recoverStaleSession(ctx, client, c.cfgPath, sessionID, trusted, func(sid string) error {
@@ -118,4 +129,50 @@ func (c *TranslateCmd) Run(app *App, ctx context.Context) error {
 	}
 	fmt.Fprintf(os.Stderr, "done → %s (%d bytes)\n", out, len(result))
 	return nil
+}
+
+// translateSequential translates files one at a time, reusing the session.
+func (c *TranslateCmd) translateSequential(ctx context.Context, style string) error {
+	client := deepseek.NewClient(deepseek.Session{
+		Token:     c.Token,
+		Cookie:    c.Cookie,
+		UserAgent: c.UserAgent,
+	}, c.Timeout, c.clientBase)
+
+	for _, file := range c.File {
+		if err := c.translateFile(ctx, client, file, style); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// translateParallel translates all files concurrently, each in its own session.
+func (c *TranslateCmd) translateParallel(ctx context.Context, style string) error {
+	type fileResult struct {
+		file string
+		err  error
+	}
+	results := make(chan fileResult, len(c.File))
+
+	for _, file := range c.File {
+		go func(file string) {
+			client := deepseek.NewClient(deepseek.Session{
+				Token:     c.Token,
+				Cookie:    c.Cookie,
+				UserAgent: c.UserAgent,
+			}, c.Timeout, c.clientBase)
+			err := c.translateFile(ctx, client, file, style)
+			results <- fileResult{file, err}
+		}(file)
+	}
+
+	var firstErr error
+	for range c.File {
+		r := <-results
+		if r.err != nil && firstErr == nil {
+			firstErr = r.err
+		}
+	}
+	return firstErr
 }
