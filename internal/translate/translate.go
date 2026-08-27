@@ -26,13 +26,15 @@ const (
 	// tokens/char at ~3 bytes/char, so 4 bytes/token never underestimates
 	// the token count of typical text.
 	bytesPerToken = 4
-	// DefaultChunkBytes is the UPPER BOUND on a single chunk (1 MiB). The
-	// binding constraint on translation is the model's per-response OUTPUT
-	// limit — the site cuts replies around 36 KiB (~9k tokens) and flags them
-	// INCOMPLETE — so the engine does not just slice the file at this size.
-	// Instead it probes a small first chunk, learns the real output/input byte
-	// ratio, and sizes the rest to fill the output budget (see Translate).
-	// Tune with --chunk-bytes.
+	// DefaultChunkBytes is the UPPER BOUND on a single chunk (1 MiB) for
+	// non-think mode. The binding constraint on translation is the model's
+	// per-response OUTPUT limit — the site cuts replies around 36 KiB (~9k
+	// tokens) and flags them INCOMPLETE — so the engine does not just slice
+	// the file at this size. Instead it probes a small first chunk, learns the
+	// real output/input byte ratio, and sizes the rest to fill the output
+	// budget (see Translate). In think mode, chunking uses a fixed 256 KB
+	// input size (see thinkingChunkBytes) to match the expert model's ~300K
+	// output token limit.
 	DefaultChunkBytes = 1 << 20 // 1 MiB
 	// initialChunkBytes is the probe chunk: small enough to almost always fit
 	// within the output budget even for verbose models, so the engine can
@@ -44,15 +46,15 @@ const (
 	// truncation is observed (the site cuts replies around 36 KiB).
 	defaultCapBytes = 36 * 1024
 	// thinkingCapBytes is the per-reply output cap assumed when DeepThink
-	// reasoning is enabled, used until a real truncation is observed: the
-	// reasoning model allows far longer replies than Instant. The real cap is
-	// still learned from the first truncation either way.
-	thinkingCapBytes = 3 * defaultCapBytes
-	// thinkingChunkBytes is the fixed chunk size used when DeepThink is
+	// reasoning is enabled, used until a real truncation is observed. The
+	// expert model's output limit is ~300K tokens (~1.2 MiB at 4 bytes/token).
+	// The real cap is still learned from the first truncation either way.
+	thinkingCapBytes = 300_000 * bytesPerToken // 1.2 MiB
+	// thinkingChunkBytes is the fixed input chunk size used when DeepThink is
 	// enabled: the reasoning model handles long output, so chunks can be
 	// large (bounded by --chunk-bytes); the truncation shrink still guards
 	// against a reply that is cut off.
-	thinkingChunkBytes = 512 * 1024
+	thinkingChunkBytes = 256 * 1024 // 256 KB
 	// outputCapMargin keeps a sized chunk's expected output safely short of
 	// the cap, so it stops generating before the cut-off point.
 	outputCapMargin = 0.85
