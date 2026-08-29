@@ -120,7 +120,7 @@ move by word, **Alt+Backspace** deletes the word before the cursor, **Ctrl+A /**
 **Esc** first dismisses the completion menu without losing what you typed, then
 clears the input, and **Ctrl+C** interrupts a reply while it streams — the chat
 stays open — or quits when idle. The layout is a scrollable chat pane on top, a
-2-line input at the bottom, and the status line below it.
+3-line input at the bottom, and the status line below it.
 Text wraps inside the box by *display* width (so line breaks land correctly for
 CJK/wide characters too), and a `…` in the rightmost cell marks content
 scrolled out of the box. PgUp/PgDn scroll a page, the mouse wheel scrolls a few
