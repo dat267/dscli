@@ -14,7 +14,6 @@ import (
 type ConfigCmdGroup struct {
 	Init  ConfigInitCmd  `cmd:"" help:"Generate a default configuration file"`
 	Path  ConfigPathCmd  `cmd:"" help:"Show configuration file path"`
-	Show  ConfigShowCmd  `cmd:"" help:"Print current configuration values"`
 	Set   ConfigSetCmd   `cmd:"" help:"Set a config value"`
 	Unset ConfigUnsetCmd `cmd:"" help:"Unset a config value"`
 }
@@ -51,25 +50,6 @@ func (cmd *ConfigPathCmd) Run(app *App) error {
 		return nil
 	}
 	fmt.Println(p)
-	return nil
-}
-
-type ConfigShowCmd struct{}
-
-func (cmd *ConfigShowCmd) Run(app *App) error {
-	p := app.CfgPath()
-	data, err := os.ReadFile(p)
-	if err != nil {
-		if os.IsNotExist(err) {
-			fmt.Printf("%s (does not exist)\n", p)
-			return nil
-		}
-		return fmt.Errorf("failed to read configuration file: %w", err)
-	}
-	data = bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
-	out := strings.TrimSuffix(string(data), "\n")
-	out = strings.TrimSuffix(out, "\r")
-	fmt.Println(out)
 	return nil
 }
 

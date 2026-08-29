@@ -68,28 +68,6 @@ func TestConfigPathCmd_Run(t *testing.T) {
 	}
 }
 
-func TestConfigShowCmd_Run(t *testing.T) {
-	app := setupTestApp(t)
-
-	// Test missing file
-	out := captureStdout(t, func() {
-		_ = (&ConfigShowCmd{}).Run(app)
-	})
-	if !strings.Contains(out, "(does not exist)") {
-		t.Errorf("expected '(does not exist)', got: %s", out)
-	}
-
-	// Test existing file with data
-	_ = (&ConfigInitCmd{}).Run(app)
-	_ = (&ConfigSetCmd{Key: "server.port", Value: "8080"}).Run(app)
-	out = captureStdout(t, func() {
-		_ = (&ConfigShowCmd{}).Run(app)
-	})
-	if !strings.Contains(out, `"server"`) || !strings.Contains(out, `"port": 8080`) {
-		t.Errorf("expected JSON output containing server.port=8080, got: %s", out)
-	}
-}
-
 func TestConfigSetCmd_Types(t *testing.T) {
 	app := setupTestApp(t)
 	p := app.CfgPath()
@@ -123,51 +101,6 @@ func TestConfigSetCmd_Types(t *testing.T) {
 		} else if val != tc.expected {
 			t.Errorf("key %s: expected %v (%T), got %v (%T)", tc.key, tc.expected, tc.expected, val, val)
 		}
-	}
-}
-
-func TestConfigShowCmd_BOMPrefix(t *testing.T) {
-	app := setupTestApp(t)
-	p := app.CfgPath()
-	bom := append([]byte{0xEF, 0xBB, 0xBF}, []byte("{\"a\":1}")...)
-	if err := os.WriteFile(p, bom, 0600); err != nil {
-		t.Fatal(err)
-	}
-	out := captureStdout(t, func() {
-		_ = (&ConfigShowCmd{}).Run(app)
-	})
-	if strings.Contains(out, "\xef") || strings.Contains(out, "\uFFFD") {
-		t.Errorf("expected BOM stripped from display, got %q", out)
-	}
-	if !strings.Contains(out, `"a":1`) {
-		t.Errorf("expected config content, got %q", out)
-	}
-}
-
-func TestConfigShowCmd_SingleTrailingNewline(t *testing.T) {
-	app := setupTestApp(t)
-	if err := (&ConfigSetCmd{Key: "a", Value: "b"}).Run(app); err != nil {
-		t.Fatal(err)
-	}
-	out := captureStdout(t, func() {
-		_ = (&ConfigShowCmd{}).Run(app)
-	})
-	if !strings.HasSuffix(out, "}\n") {
-		t.Errorf("expected single trailing newline, got %q", out)
-	}
-	if strings.HasSuffix(out, "\n\n") {
-		t.Errorf("expected no extra blank line after config, got %q", out)
-	}
-
-	// CRLF-edited configs must not leak a stray carriage return.
-	if err := os.WriteFile(app.CfgPath(), []byte("{\"x\":1}\r\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	out = captureStdout(t, func() {
-		_ = (&ConfigShowCmd{}).Run(app)
-	})
-	if strings.Contains(out, "\r") {
-		t.Errorf("expected CRLF handled, got %q", out)
 	}
 }
 

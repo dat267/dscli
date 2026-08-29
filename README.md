@@ -39,7 +39,6 @@ Commands:
   version               Show version
   config init           Generate a default configuration file
   config path           Show configuration file path
-  config show           Print current configuration values
   config set            Set a config value
   config unset          Unset a config value
 
@@ -339,7 +338,6 @@ Config is a JSON file, managed exactly like the `min` CLI toolkit:
 ```bash
 dscli config path        # e.g. ~/.config/dscli/dscli.json
 dscli config init
-dscli config show
 dscli config set token <token>
 dscli config unset token
 dscli --config-file /path/to/dscli.json config set token <token>
