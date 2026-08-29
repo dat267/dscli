@@ -207,7 +207,7 @@ func TestTUIUserLineStyled(t *testing.T) {
 	}
 }
 
-// TestTUIInputWrap: long input text wraps inside the fixed 5-row textarea and
+// TestTUIInputWrap: long input text wraps inside the fixed 3-row textarea and
 // the cursor stays visible; the top row marks content clipped above with "…".
 func TestTUIInputWrap(t *testing.T) {
 	m, _ := tuiHarness(t, nil, "")
@@ -220,10 +220,10 @@ func TestTUIInputWrap(t *testing.T) {
 		t.Fatalf("box rows = %d, want %d", len(rows), maxInputLines)
 	}
 	// 60 chars at boxW=30 (full terminal width, no prompt) wrap into
-	// 30+30 = 2 rows; the 5-row window shows both rows plus 3 padding
-	// rows, so no clip marker is needed.
+	// 30+30 = 2 rows; the 3-row window shows both rows plus 1 padding
+	// row, so no clip marker is needed.
 	if strings.Contains(box, "…") {
-		t.Errorf("unexpected clip marker (all rows fit in the 5-row window):\n%s", box)
+		t.Errorf("unexpected clip marker (all rows fit in the 3-row window):\n%s", box)
 	}
 	if !strings.Contains(box, "█") {
 		t.Errorf("end-of-text block cursor missing:\n%s", box)
@@ -854,7 +854,7 @@ func TestWrapWordsWideChars(t *testing.T) {
 func TestTUIInputWideRowsRenderInsideBox(t *testing.T) {
 	m, _ := tuiHarness(t, nil, "")
 	m.width = 10
-	m.input.SetValue("あいうえおかきくけこ")
+	m.input.SetValue("あいうえおか")
 	m.input.End()
 	box := m.input.render(m.width)
 	for _, row := range strings.Split(box, "\n") {
@@ -862,10 +862,10 @@ func TestTUIInputWideRowsRenderInsideBox(t *testing.T) {
 			t.Errorf("box row overflows %d columns (%d): %q", 10, w, row)
 		}
 	}
-	// 20 columns of text in a 6-column box wraps to 4 rows; the 5-row window
-	// shows all rows and 1 padding row, so no clip marker is needed.
+	// 12 columns of text in a 10-column box wraps to 2 rows; the 3-row window
+	// shows both rows and 1 padding row, so no clip marker is needed.
 	if strings.Contains(box, "…") {
-		t.Errorf("unexpected clip marker (all rows fit in the 5-row window):\n%s", box)
+		t.Errorf("unexpected clip marker (all rows fit in the 3-row window):\n%s", box)
 	}
 }
 

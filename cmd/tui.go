@@ -1216,7 +1216,7 @@ func (m *tuiModel) inputHeight() int { return maxInputLines }
 
 // maxInputLines is the fixed height (in rows) of the input box; text wraps
 // within it.
-const maxInputLines = 5
+const maxInputLines = 3
 
 // maxSuggestionRows caps how many completion entries the menu shows; when the
 // list is longer the menu scrolls, marking any entries above/below the window.
