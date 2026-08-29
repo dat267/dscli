@@ -104,14 +104,17 @@ func TestTUIViewLayout(t *testing.T) {
 	m.appendLine(renderUserLine("hi"))
 	m.Update(streamDelta{text: "Hello"})
 	v := m.View().Content
-	for _, want := range []string{"hi", "Hello", ":::"} {
+	for _, want := range []string{"hi", "Hello"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("view missing %q:\n%s", want, v)
 		}
 	}
+	if strings.Contains(v, ":::") {
+		t.Errorf("view should not contain a prompt glyph:\n%s", v)
+	}
 	// The chat pane renders above the input, and the status line below it.
 	chatIdx := strings.Index(v, "Hello")
-	boxIdx := strings.Index(v, ":::")
+	boxIdx := strings.Index(v, "█")
 	statusIdx := strings.Index(v, "DeepSeek · model")
 	if !(chatIdx >= 0 && boxIdx >= 0 && statusIdx >= 0 && chatIdx < boxIdx && boxIdx < statusIdx) {
 		t.Errorf("layout order wrong (chat=%d box=%d status=%d):\n%s", chatIdx, boxIdx, statusIdx, v)
@@ -152,8 +155,8 @@ func TestTUIViewPinnedToBottom(t *testing.T) {
 			if !strings.Contains(rows[statusRow], "DeepSeek") {
 				t.Errorf("last row is not the status line: %q", rows[statusRow])
 			}
-			if !strings.Contains(rows[inputTop], ":::") {
-				t.Errorf("row %d is not the input prompt row: %q", inputTop, rows[inputTop])
+			if strings.Contains(rows[inputTop], ":::") {
+				t.Errorf("row %d should not contain a prompt glyph: %q", inputTop, rows[inputTop])
 			}
 			for _, cl := range strings.Split(tc.content, "\n") {
 				found := false
@@ -216,8 +219,8 @@ func TestTUIInputWrap(t *testing.T) {
 	if len(rows) != maxInputLines {
 		t.Fatalf("box rows = %d, want %d", len(rows), maxInputLines)
 	}
-	// 60 chars at boxW=26 (width minus the 4-col "::: " prompt) wrap into
-	// 26+26+8 = 3 rows; the 5-row window shows all 3 rows plus 2 padding
+	// 60 chars at boxW=30 (full terminal width, no prompt) wrap into
+	// 30+30 = 2 rows; the 5-row window shows both rows plus 3 padding
 	// rows, so no clip marker is needed.
 	if strings.Contains(box, "…") {
 		t.Errorf("unexpected clip marker (all rows fit in the 5-row window):\n%s", box)
@@ -232,7 +235,7 @@ func TestTUIInputWrap(t *testing.T) {
 // a block.
 func TestTUICursorAtExactWidth(t *testing.T) {
 	m, _ := tuiHarness(t, nil, "")
-	m.width = 30 // text width = 26
+	m.width = 30 // box width = 30 (no prompt)
 	m.input.SetValue(strings.Repeat("x", 26))
 	m.input.End() // col = 26 = text width
 	box := m.input.render(m.width)
@@ -932,7 +935,7 @@ func TestTUIWordMovement(t *testing.T) {
 // and the display column is preserved (clamped to the target row).
 func TestTUIVisualUpDown(t *testing.T) {
 	m, _ := tuiHarness(t, nil, "")
-	m.width = 20 // boxW 16: "aa bb cc dd ee ff" wraps to [15][2]
+	m.width = 16 // boxW 16: "aa bb cc dd ee ff" wraps to [15][2]
 	m.input.SetValue("aa bb cc dd ee ff")
 	m.input.End() // (0,17): after the last visual row
 	m.Update(press(tea.KeyUp))

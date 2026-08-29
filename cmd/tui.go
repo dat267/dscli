@@ -1193,7 +1193,7 @@ func (m *tuiModel) render() string {
 		b.WriteString("\n")
 	}
 
-	// 4. Input at the bottom (open textarea with a "::: " prompt).
+	// 4. Input at the bottom (open textarea, no leading prompt glyph).
 	b.WriteString(m.input.render(max(0, m.width)))
 	b.WriteString("\n")
 
@@ -1405,7 +1405,7 @@ func (in *tuiInput) MoveDown() {
 }
 
 // boxWidth is the text width of the input box: the terminal width minus the
-// "::: " prompt. It returns 0 until a real terminal width is known, in which
+// prompt. It returns 0 until a real terminal width is known, in which
 // case callers fall back to logical (line-based) movement — a degenerate
 // sub-prompt width is not something a user navigates.
 func (in *tuiInput) boxWidth(width int) int {
@@ -1582,17 +1582,17 @@ func (in *tuiInput) Home() { in.col = 0 }
 func (in *tuiInput) End() { in.col = len(in.lines[in.row]) }
 
 // inputPrompt is the prompt glyph shown in front of the input text, styled in
-// the mint accent (Guac).
-const inputPrompt = "::: "
+// the mint accent (Guac). Empty means no prompt is drawn and the input text
+// starts at the left edge of the terminal.
+const inputPrompt = ""
 const inputPromptAnsi = "\x1b[38;2;18;199;143m"
 
 // render draws the input into a fixed-height (maxInputLines) textarea: the
-// text wraps at width-promptW display columns, short lines are padded so the
-// input spans the terminal, and the cursor is marked with a block character.
-// The prompt ("::: ") sits at the left of the first visible row and the window
-// follows the cursor, so earlier content scrolls out of view; a dim "…" in the
-// rightmost cell of the first/last visible row marks content clipped above or
-// below the window.
+// text wraps at boxW display columns, short lines are padded so the input
+// spans the terminal, and the cursor is marked with a block character. The
+// window follows the cursor, so earlier content scrolls out of view; a dim
+// "…" in the rightmost cell of the first/last visible row marks content
+// clipped above or below the window.
 func (in *tuiInput) render(width int) string {
 	promptW := len(inputPrompt)
 	boxW := width - promptW
@@ -1650,7 +1650,7 @@ func (in *tuiInput) render(width int) string {
 			overChar := cursorCol < runesWidth(rows[i])
 			s = applyCursor(s, cursorCol, overChar)
 		}
-		if i == start {
+		if i == start && inputPrompt != "" {
 			s = inputPromptAnsi + inputPrompt + ansiReset + s
 		} else {
 			s = strings.Repeat(" ", promptW) + s
