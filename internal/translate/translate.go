@@ -73,6 +73,10 @@ type Options struct {
 	// the per-reply output budget (the site still cuts replies around 36 KiB),
 	// but some prefer it for complex prose.
 	Thinking bool
+	// Improve switches the task from translation to writing improvement: the
+	// prompt preserves meaning and tone instead of changing language, and
+	// From/To are ignored.
+	Improve bool
 	// OnChunk, when set, reports progress: chunks done and a live estimate
 	// of the total (the total changes as the engine re-sizes chunks).
 	OnChunk func(chunk, total int)
@@ -226,22 +230,7 @@ func Prompt(format, from, to string, reminder bool, style string) string {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "Translate the following %s from %s to %s.\n", formatName(format), from, to)
-	switch format {
-	case "lrc":
-		b.WriteString("This is an LRC lyrics file. Translate ONLY the lyric text after the [mm:ss.xx] timestamps; keep every timestamp and the [ti:][ar:][al:] metadata tags EXACTLY as they are (character for character). Never merge, drop or alter timestamp lines.\n")
-	case "srt":
-		b.WriteString("This is an SRT subtitle file. Translate ONLY the cue text lines; keep the cue index numbers and every 'HH:MM:SS,mmm --> HH:MM:SS,mmm' timing line EXACTLY as they are. Never merge, drop or alter timing lines.\n")
-	case "vtt":
-		b.WriteString("This is a WebVTT subtitle file. Translate ONLY the cue text lines; keep the WEBVTT header, NOTE blocks, cue identifiers and every 'hh:mm:ss.mmm --> hh:mm:ss.mmm' timing line EXACTLY as they are. Never merge, drop or alter timing lines.\n")
-	case "ass":
-		b.WriteString("This is an ASS/SSA subtitle file. Translate ONLY the text after the 9th comma (the text field) of each Dialogue:/Comment: line. Keep ALL other lines (Script Info, Style headers, Format:, Style:) and every Dialogue: line's prefix fields (layer, start, end, style, name, margins, effect) EXACTLY as they are — byte for byte, including punctuation. Keep \\N and \\h override tags inside the translated text.\n")
-	case "ttml":
-		b.WriteString("This is a TTML XML subtitle file. Translate ONLY the text content inside the <p> elements. Keep every XML tag and its attributes (begin/end/dur etc.) EXACTLY as they are; never add, remove or reorder elements; the result must remain valid XML.\n")
-	case "markdown":
-		b.WriteString("This is a Markdown file. Translate the prose; keep code blocks, URLs, link/image syntax, heading and list markers intact (translate their visible text where appropriate).\n")
-	default:
-		b.WriteString("Plain text.\n")
-	}
+	b.WriteString(formatPreserveRules(format))
 	if reminder {
 		b.WriteString("TRANSLATION VERIFICATION FAILED LAST TIME because structural lines were altered. They must stay byte-for-byte identical.\n")
 	}
@@ -252,6 +241,49 @@ func Prompt(format, from, to string, reminder bool, style string) string {
 		}
 	}
 	b.WriteString("Reply with ONLY the translated content — no preamble, no commentary, no code fences.\n\n")
+	return b.String()
+}
+
+// formatPreserveRules returns the format-specific instruction telling the model
+// which structural lines (timestamps, headers, markup) must stay byte-for-byte
+// identical. Shared by the translation and improvement prompts.
+func formatPreserveRules(format string) string {
+	switch format {
+	case "lrc":
+		return "This is an LRC lyrics file. Preserve every timestamp and the [ti:][ar:][al:] metadata tags EXACTLY as they are (character for character). Never merge, drop or alter timestamp lines.\n"
+	case "srt":
+		return "This is an SRT subtitle file. Preserve the cue index numbers and every 'HH:MM:SS,mmm --> HH:MM:SS,mmm' timing line EXACTLY as they are. Never merge, drop or alter timing lines.\n"
+	case "vtt":
+		return "This is a WebVTT subtitle file. Preserve the WEBVTT header, NOTE blocks, cue identifiers and every 'hh:mm:ss.mmm --> hh:mm:ss.mmm' timing line EXACTLY as they are. Never merge, drop or alter timing lines.\n"
+	case "ass":
+		return "This is an ASS/SSA subtitle file. Preserve ALL other lines (Script Info, Style headers, Format:, Style:) and every Dialogue: line's prefix fields (layer, start, end, style, name, margins, effect) EXACTLY as they are — byte for byte, including punctuation. Keep \\N and \\h override tags inside the text.\n"
+	case "ttml":
+		return "This is a TTML XML subtitle file. Preserve every XML tag and its attributes (begin/end/dur etc.) EXACTLY as they are; never add, remove or reorder elements; the result must remain valid XML.\n"
+	case "markdown":
+		return "This is a Markdown file. Preserve code blocks, URLs, link/image syntax, heading and list markers; change only the visible prose text.\n"
+	default:
+		return "Plain text.\n"
+	}
+}
+
+// improvePrompt builds the per-chunk instruction for writing improvement: fix
+// grammar/flow/clarity while preserving meaning, tone, register, facts and
+// names, and never translate. It reuses formatPreserveRules so structural
+// formats keep their timestamps/markup intact.
+func improvePrompt(format string, reminder bool, style string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Improve the writing of the following %s. Fix grammar, spelling, punctuation, clarity, flow and word choice; preserve meaning, tone, register, facts and names. Do not translate.\n", formatName(format))
+	b.WriteString(formatPreserveRules(format))
+	if reminder {
+		b.WriteString("IMPROVEMENT VERIFICATION FAILED LAST TIME because structural lines were altered. They must stay byte-for-byte identical.\n")
+	}
+	if style != "" {
+		b.WriteString(style)
+		if !strings.HasSuffix(style, "\n") {
+			b.WriteString("\n")
+		}
+	}
+	b.WriteString("Reply with ONLY the improved content — no preamble, no commentary, no code fences.\n\n")
 	return b.String()
 }
 
@@ -282,6 +314,16 @@ func Translate(ctx context.Context, client *deepseek.Client, sessionID string, c
 	conversation := sessionID
 	var translated []string
 
+	// promptFor builds the per-chunk instruction. In improve-writing mode it
+	// preserves meaning and tone instead of switching language, and From/To
+	// are ignored.
+	promptFor := func(reminder bool) string {
+		if opts.Improve {
+			return improvePrompt(format, reminder, opts.Style)
+		}
+		return Prompt(format, opts.From, opts.To, reminder, opts.Style)
+	}
+
 	if opts.Thinking {
 		// Think mode: fixed chunk size, no probe, no grow/shrink. The
 		// expert model's output budget is ~300K tokens, so a 256 KB input
@@ -297,7 +339,7 @@ func Translate(ctx context.Context, client *deepseek.Client, sessionID string, c
 			if chunk == "" {
 				break
 			}
-			text, convID, truncated, err := translateChunk(ctx, client, conversation, Prompt(format, opts.From, opts.To, false, opts.Style)+chunk, model, opts.Thinking)
+			text, convID, truncated, err := translateChunk(ctx, client, conversation, promptFor(false)+chunk, model, opts.Thinking)
 			if err != nil {
 				if !truncated {
 					return "", conversation, fmt.Errorf("chunk (%d bytes): %w", len(chunk), err)
@@ -315,7 +357,7 @@ func Translate(ctx context.Context, client *deepseek.Client, sessionID string, c
 			// byte-for-byte (ProtectedLines is empty for text/markdown, so the
 			// verification passes trivially there).
 			if err := filetools.VerifyProtected(format, chunk, text); err != nil {
-				strict := Prompt(format, opts.From, opts.To, true, opts.Style) +
+				strict := promptFor(true) +
 					"The previous attempt changed a protected (timestamps/header) line.\n" +
 					"Keep every line with a timestamp or the WEBVTT/header syntax EXACTLY as in the original. Retry the chunk:\n\n" + chunk
 				text2, convID2, _, err2 := translateChunk(ctx, client, conversation, strict, model, opts.Thinking)
@@ -357,7 +399,7 @@ func Translate(ctx context.Context, client *deepseek.Client, sessionID string, c
 		if chunk == "" {
 			break
 		}
-		text, convID, truncated, err := translateChunk(ctx, client, conversation, Prompt(format, opts.From, opts.To, false, opts.Style)+chunk, model, opts.Thinking)
+		text, convID, truncated, err := translateChunk(ctx, client, conversation, promptFor(false)+chunk, model, opts.Thinking)
 		if err != nil {
 			if !truncated {
 				return "", conversation, fmt.Errorf("chunk (%d bytes): %w", len(chunk), err)
@@ -380,7 +422,7 @@ func Translate(ctx context.Context, client *deepseek.Client, sessionID string, c
 		// byte-for-byte (ProtectedLines is empty for text/markdown, so the
 		// verification passes trivially there).
 		if err := filetools.VerifyProtected(format, chunk, text); err != nil {
-			strict := Prompt(format, opts.From, opts.To, true, opts.Style) +
+			strict := promptFor(true) +
 				"The previous attempt changed a protected (timestamps/header) line.\n" +
 				"Keep every line with a timestamp or the WEBVTT/header syntax EXACTLY as in the original. Retry the chunk:\n\n" + chunk
 			text2, convID2, _, err2 := translateChunk(ctx, client, conversation, strict, model, opts.Thinking)
@@ -616,4 +658,51 @@ func ResolveStyle(explicit, from, to string) (string, error) {
 		return strings.TrimSpace(string(data)), nil
 	}
 	return strings.TrimSpace(DefaultStyle()), nil
+}
+
+// DefaultImproveStyle returns the built-in writing-improvement instructions,
+// used when neither --instructions nor improve-writing/default.md is found.
+func DefaultImproveStyle() string {
+	return `[STYLE: IMPROVE WRITING]
+Improve the prose without changing its meaning, tone, register or facts.
+1. Fix grammar, spelling, punctuation and awkward phrasing.
+2. Tighten wordy sentences; prefer active voice and concrete nouns.
+3. Vary sentence rhythm; cut filler ("very", "really", "in order to", "that of").
+4. Keep names, terms, numbers and all formatting exactly as given.
+5. Do not translate or localise; keep the source language.
+6. Output only the improved text — no commentary, no meta text, no code fences.
+`
+}
+
+// improveStyleDirs lists directories searched for improve-writing instruction
+// files, in order: ./improve-writing, then <config>/dscli/improve-writing.
+var improveStyleDirs = func() []string {
+	dirs := []string{"improve-writing"}
+	if cd, err := os.UserConfigDir(); err == nil {
+		dirs = append(dirs, filepath.Join(cd, "dscli", "improve-writing"))
+	}
+	return dirs
+}()
+
+// ResolveImproveStyle returns the writing-improvement instructions: an explicit
+// file when given, else improve-writing/default.md, else the built-in default.
+func ResolveImproveStyle(explicit string) (string, error) {
+	if explicit != "" {
+		data, err := os.ReadFile(explicit)
+		if err != nil {
+			return "", fmt.Errorf("read instructions file: %w", err)
+		}
+		return strings.TrimSpace(string(data)), nil
+	}
+	for _, dir := range improveStyleDirs {
+		p := filepath.Join(dir, "default.md")
+		if _, err := os.Stat(p); err == nil {
+			data, err := os.ReadFile(p)
+			if err != nil {
+				return "", fmt.Errorf("read instructions file: %w", err)
+			}
+			return strings.TrimSpace(string(data)), nil
+		}
+	}
+	return strings.TrimSpace(DefaultImproveStyle()), nil
 }

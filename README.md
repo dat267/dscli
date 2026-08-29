@@ -25,6 +25,8 @@ Commands:
                         or stdin)
   translate             Translate a file (txt, md, lrc, srt, vtt, ass, ttml,
                         epub) via the model
+  improve-writing       Improve the writing of a file in place (txt, md, lrc,
+                        srt, vtt, ass, ttml) via the model
   session list          List sessions with saved texts
   session select        Select a session to resume as the default
   session transcript    Print or delete the saved session texts (transcript) for
@@ -421,3 +423,29 @@ dscli translate -f lyrics.lrc -o lyrics.lrc    # overwrite the source in place
   partial translation produced before the filter is kept instead of the run
   retrying (a smaller chunk cannot un-censor content); a reply with no
   content at all fails loudly.
+
+## Improve writing
+
+`dscli improve-writing` polishes an already written file **in place** — it runs
+`translate`'s same engine (adaptive chunking, structural-line protection, format
+awareness) but with a writing-improvement prompt that fixes grammar, flow and
+clarity without changing meaning, tone or language. It is meant for files you
+have already translated (or drafted) and want to read better.
+
+```bash
+dscli improve-writing -i notes.translated.md   # → notes.translated.md (rewritten)
+dscli improve-writing -i song.lrc               # LRC timestamps preserved
+dscli improve-writing -i movie.srt              # SRT timing lines preserved
+dscli improve-writing -i sub.ass               # ASS dialogue fields preserved
+```
+
+- **`--in-place`/`-i` is required.** improve-writing rewrites the original file
+  (there is no separate output path); the previous content is replaced, so keep
+a backup if you want one. EPUB is not supported in place — `Load` returns
+extracted text, which cannot be written back as a binary epub; improve the
+extracted `.txt` instead.
+- The same flags as `translate` apply: `--chunk-bytes`, `--model`/`-m`,
+  `--thinking`/`-t`, `--parallel`/`-p`, `--no-persist`, `--timeout`, and
+  `--instructions` / `--glossary` for per-run guidance. Improvement instructions
+  are read from `improve-writing/default.md` (`./improve-writing/`, then
+  `~/.config/dscli/improve-writing/`) or the built-in general style.
