@@ -143,13 +143,13 @@ func (m *tuiModel) refreshStatus() {
 		}
 	}
 	m.status = m.u.muted(fmt.Sprintf(
-		"DeepSeek · model %s · %s · turn %d",
-		m.model, mode, m.turns,
+		"DeepSeek · model %s · thinking %s · search %s · %s · turn %d",
+		m.model, onoff(m.thinking), onoff(m.search), mode, m.turns,
 	))
 	if conv != "" {
 		m.status = m.u.muted(fmt.Sprintf(
-			"DeepSeek · model %s · %s · turn %d · %s",
-			m.model, mode, m.turns, conv,
+			"DeepSeek · model %s · thinking %s · search %s · %s · turn %d · %s",
+			m.model, onoff(m.thinking), onoff(m.search), mode, m.turns, conv,
 		))
 	}
 }

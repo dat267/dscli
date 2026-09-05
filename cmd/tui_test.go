@@ -313,6 +313,23 @@ func TestTUIViewLayout(t *testing.T) {
 	}
 }
 
+// TestTUIStatusThinking: the status line always shows whether DeepThink
+// reasoning (and search) are on — the REPL prints the same states, and the
+// user should never have to guess the mode.
+func TestTUIStatusThinking(t *testing.T) {
+	m, _ := tuiHarness(t, nil, "")
+	m.height, m.width = 24, 80
+	m.refreshStatus()
+	if !strings.Contains(m.status, "thinking off") || !strings.Contains(m.status, "search off") {
+		t.Errorf("status should show both modes when off:\n%s", m.status)
+	}
+	m.handleCommand("/thinking on")
+	m.handleCommand("/search on")
+	if !strings.Contains(m.status, "thinking on") || !strings.Contains(m.status, "search on") {
+		t.Errorf("status should show both modes after /thinking on and /search on:\n%s", m.status)
+	}
+}
+
 // TestTUIViewPinnedToBottom: the rendered view always fills the full terminal
 // height — the input box sits directly above the status line at the very
 // bottom, even when the conversation is short (the chat pane pads with blank
