@@ -133,6 +133,31 @@ func paneRowIndex(view, needle string) int {
 	return -1
 }
 
+// TestTUIScrollReflowsMarkdown: after the terminal narrows, committed
+// markdown rows re-wrap to the full new width — ANSI-aware (no mid-line code
+// miscounted as columns, no leaked escape text), with styling intact.
+func TestTUIScrollReflowsMarkdown(t *testing.T) {
+	m, _ := tuiHarness(t, nil, "")
+	m.height, m.width = 24, 120
+	m.busy = true
+	m.Update(streamDelta{text: "**bold** move\n\n```go\nx := 1\n```\n"})
+	m.Update(streamDone{convID: "sess-1:2"})
+	m.width = 80
+	rows := m.wrappedRows()
+	for i, r := range rows {
+		if w := textWidth(stripANSI(r)); w > 80 {
+			t.Errorf("row %d overflows 80 cols (%d)", i, w)
+		}
+		if plain := stripANSI(r); strings.Contains(plain, "[2m") || strings.Contains(plain, "[0m") || strings.Contains(plain, "[1m") {
+			t.Errorf("row %d leaks escape text: %q", i, plain)
+		}
+	}
+	joined := strings.Join(rows, "\n")
+	if !strings.Contains(joined, "x := 1") || !strings.Contains(joined, "bold") {
+		t.Errorf("content lost on reflow:\n%q", joined)
+	}
+}
+
 // TestTUIStreamMarkdownLive: while a turn streams, the reply renders as
 // markdown below the committed scrollback — a partial fenced block already
 // shows as a code box, so the live view never looks broken.
@@ -932,18 +957,18 @@ func TestTUIRenderHistory(t *testing.T) {
 		{MessageID: 2, Role: "ASSISTANT", Content: "Hello back"},
 		{MessageID: 1, Role: "USER", Content: "Hi"},
 	}
-	got := renderHistory(ui{color: true}, hist)
+	got := renderHistory(ui{color: true}, hist, 80)
 	u := strings.Index(got, "\x1b[38;2;107;80;255mHi\x1b[0m")
 	a := strings.Index(got, "Hello back")
 	if u < 0 || a < 0 || u > a {
 		t.Errorf("history rendered out of order (user=%d assistant=%d):\n%q", u, a, got)
 	}
 	// Assistant history renders as markdown (a heading picks up the accent).
-	md := renderHistory(ui{color: true}, []deepseek.HistoryMessage{{MessageID: 1, Role: "ASSISTANT", Content: "## Section"}})
+	md := renderHistory(ui{color: true}, []deepseek.HistoryMessage{{MessageID: 1, Role: "ASSISTANT", Content: "## Section"}}, 80)
 	if !strings.Contains(md, ansiBold+ansiAccent+"Section"+ansiReset) {
 		t.Errorf("assistant history not markdown-rendered:\n%q", md)
 	}
-	if got2 := renderHistory(ui{color: true}, []deepseek.HistoryMessage{{MessageID: 1, Role: "USER", Content: ""}}); got2 != "" {
+	if got2 := renderHistory(ui{color: true}, []deepseek.HistoryMessage{{MessageID: 1, Role: "USER", Content: ""}}, 80); got2 != "" {
 		t.Errorf("empty history = %q, want empty", got2)
 	}
 }

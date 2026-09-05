@@ -591,7 +591,7 @@ func loadHistoryInto(ctx context.Context, m *tuiModel, client *deepseek.Client, 
 		m.scroll = m.u.note("note: could not load conversation history: "+err.Error()) + "\n"
 		return
 	}
-	m.scroll = renderHistory(m.u, hist)
+	m.scroll = renderHistory(m.u, hist, m.width)
 	m.trimScroll()
 }
 
@@ -600,10 +600,13 @@ func loadHistoryInto(ctx context.Context, m *tuiModel, client *deepseek.Client, 
 // in message-id order.
 // renderHistory builds the scrollback text for a resumed conversation: user
 // lines styled violet, assistant replies rendered as markdown, one blank
-// line between turns, in message-id order. The width is fixed at 80 (a
-// fallback for the pre-resize window); the committed rows are re-wrapped by
-// the scroll renderer once a real terminal width is known.
-func renderHistory(u ui, hist []deepseek.HistoryMessage) string {
+// line between turns, in message-id order. width is the terminal width (80
+// as a fallback when no resize has arrived yet); committed rows are
+// re-wrapped ANSI-aware by the scroll renderer after a resize.
+func renderHistory(u ui, hist []deepseek.HistoryMessage, width int) string {
+	if width < 1 {
+		width = 80
+	}
 	sort.Slice(hist, func(i, j int) bool { return hist[i].MessageID < hist[j].MessageID })
 	var b strings.Builder
 	for _, msg := range hist {
@@ -1161,28 +1164,11 @@ func (m *tuiModel) wrappedRows() []string {
 			rows = append(rows, line)
 			continue
 		}
-		rows = append(rows, wrapScrollLine(line, m.width)...)
+		// Overflowing (e.g. after a resize): wrap ANSI-aware so mid-line
+		// styles survive and the text still spans the full pane width.
+		rows = append(rows, wrapStyled(line, m.width, "")...)
 	}
 	return rows
-}
-
-// wrapScrollLine word-wraps a scrollback line (which may carry a single ANSI
-// style wrapping its visible text, as produced by the ui helpers and
-// renderUserLine) to width columns, re-applying the style to each row.
-func wrapScrollLine(line string, width int) []string {
-	if width < 1 {
-		return []string{line}
-	}
-	prefix, text := splitStyled(line)
-	rows := wrapTextRows(text, width)
-	if prefix == "" {
-		return rows
-	}
-	out := make([]string, len(rows))
-	for i, r := range rows {
-		out[i] = prefix + r + ansiReset
-	}
-	return out
 }
 
 // splitStyled splits a line into its leading ANSI styles (possibly stacked,
