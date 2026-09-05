@@ -7,6 +7,7 @@ type CLI struct {
 	Ask            AskCmd            `cmd:"" help:"Ask the model once and print the answer (input from args or stdin)"`
 	Translate      TranslateCmd      `cmd:"" help:"Translate a file (txt, md, lrc, srt, vtt, ass, ttml, epub) via the model"`
 	ImproveWriting ImproveWritingCmd `cmd:"" help:"Improve the writing of a file in place (txt, md, lrc, srt, vtt, ass, ttml) via the model"`
+	Summarize      SummarizeCmd      `cmd:"" help:"Summarize a file (txt, md, lrc, srt, vtt, ass, ttml, epub) via the model"`
 	Session        SessionCmdGroup   `cmd:"" help:"Inspect, forget or delete the persisted default session"`
 	Login          LoginCmd          `cmd:"" help:"Show how to capture your DeepSeek login (token + cookie)"`
 	Version        VersionCmd        `cmd:"" help:"Show version"`

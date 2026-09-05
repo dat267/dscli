@@ -5,26 +5,23 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/dat267/dscli/internal/deepseek"
 	"github.com/dat267/dscli/internal/translate"
 )
 
-// ImproveWritingCmd implements `dscli improve-writing`: it runs an already
-// written file (typically a translation) back through the model to polish the
-// prose in place — fixing grammar, flow and clarity without changing meaning
-// or language. The engine is shared with `translate` (format-aware chunking,
-// structural-line protection, adaptive sizing); only the prompt and the
-// write-back differ.
-type ImproveWritingCmd struct {
-	File         []string      `arg:"" optional:"" help:"File(s) to improve (txt, md, lrc, srt, vtt, ass, ttml); omit to read from stdin"`
-	InPlace      bool          `short:"i" help:"Rewrite each file in place with the improved text. Required: improve-writing replaces the original instead of writing a separate output file"`
+// SummarizeCmd implements `dscli summarize`: a format-aware, chunked summary
+// of a file, printed to stdout (or saved with -o). It shares the translation
+// engine (adaptive chunking, style files); each chunk is summarized, and when
+// the document needed more than one chunk the per-chunk summaries are
+// combined into one final summary.
+type SummarizeCmd struct {
+	File         []string      `arg:"" optional:"" help:"File(s) to summarize (txt, md, lrc, srt, vtt, ass, ttml, epub); omit to read from stdin"`
+	Output       string        `short:"o" help:"Output path (default: print to stdout)"`
+	Force        bool          `short:"f" help:"Overwrite the output file if it exists"`
 	ChunkBytes   int           `help:"Upper bound on chunk size in bytes; 0 uses a 1 MiB cap. Chunks are sized adaptively to fit the model's output limit, so this is a maximum, not a fixed size" default:"0"`
-	Instructions string        `help:"File with custom improvement instructions for this run (default: improve-writing/default.md, then a built-in general style)"`
-	Glossary     string        `help:"File with a project-specific name/term glossary (appended to every chunk prompt)"`
+	Instructions string        `help:"File with custom summarization instructions for this run (default: summarize/default.md, then a built-in general style)"`
 	Timeout      time.Duration `help:"Overall budget per file (0 = no limit)" default:"15m"`
 
 	Token     string `env:"DS_TOKEN" help:"DeepSeek user token (localStorage.userToken). Alternatively: config set token"`
@@ -35,7 +32,7 @@ type ImproveWritingCmd struct {
 
 	Thinking bool `short:"t" help:"Enable DeepThink reasoning for each chunk (the reasoning model allows longer replies, so chunks are sized bigger and fewer are needed)"`
 
-	Parallel bool `short:"p" help:"Improve multiple files concurrently (each in its own session). No shared context between files — terminology may drift"`
+	Parallel bool `short:"p" help:"Summarize multiple files concurrently (each in its own session). Summaries print as they finish, so they may interleave"`
 
 	NoPersist bool `help:"Do not persist or reuse the default session; the session is deleted when the run ends (default: on)" default:"true"`
 
@@ -47,51 +44,46 @@ type ImproveWritingCmd struct {
 	cfgPath string
 }
 
-func (c *ImproveWritingCmd) Run(app *App, ctx context.Context) error {
+func (c *SummarizeCmd) Run(app *App, ctx context.Context) error {
 	if app != nil {
 		c.cfgPath = app.CfgPath()
 	}
 	if c.Token == "" {
 		return errors.New("no DeepSeek session configured: pass --token/--cookie (or DS_TOKEN/DS_COOKIE) or run 'dscli login' and save the values with 'dscli config set'")
 	}
-	if !c.InPlace {
-		return errors.New("use --in-place to rewrite files; improve-writing does not write a separate output file")
+	if c.Output != "" && len(c.File) > 1 {
+		return errors.New("-o (output path) cannot be used with multiple files; each file gets its own summary on stdout")
 	}
 	if c.Model != "" && c.Model != "default" && c.Model != "expert" {
 		return fmt.Errorf("unknown model %q (want default or expert)", c.Model)
 	}
 	if len(c.File) == 0 {
 		// TODO: stdin reading for single-file mode
-		return errors.New("give at least one file to improve")
+		return errors.New("give at least one file to summarize")
 	}
 
-	style, err := translate.ResolveImproveStyle(c.Instructions)
+	style, err := translate.ResolveSummarizeStyle(c.Instructions)
 	if err != nil {
 		return err
 	}
-	if c.Glossary != "" {
-		gloss, err := os.ReadFile(c.Glossary)
-		if err != nil {
-			return fmt.Errorf("read glossary: %w", err)
-		}
-		style = style + "\n\n## Project glossary\n" + string(gloss)
-	}
 
 	if c.Parallel {
-		return c.improveParallel(ctx, style)
+		return c.summarizeParallel(ctx, style)
 	}
-	return c.improveSequential(ctx, style)
+	return c.summarizeSequential(ctx, style)
 }
 
-// improveFile improves one file and rewrites it in place.
-func (c *ImproveWritingCmd) improveFile(ctx context.Context, client *deepseek.Client, file, style string) error {
-	if strings.EqualFold(filepath.Ext(file), ".epub") {
-		return fmt.Errorf("improve-writing --in-place does not support epub (Load returns extracted text, which cannot be written back as a binary epub); improve the extracted .txt instead")
-	}
-
+// summarizeFile summarizes one file and prints (or writes) the result.
+func (c *SummarizeCmd) summarizeFile(ctx context.Context, client *deepseek.Client, file, style string) error {
 	content, format, err := translate.Load(file, translate.MaxInputBytes)
 	if err != nil {
 		return fmt.Errorf("load %s: %w", file, err)
+	}
+
+	if c.Output != "" && !c.Force {
+		if _, err := os.Stat(c.Output); err == nil {
+			return fmt.Errorf("output %s already exists (use -f to overwrite)", c.Output)
+		}
 	}
 
 	sessionID, trusted, cleanup, err := resolveDefaultSession(ctx, client, c.cfgPath, c.NoPersist)
@@ -102,16 +94,22 @@ func (c *ImproveWritingCmd) improveFile(ctx context.Context, client *deepseek.Cl
 		defer cleanup()
 	}
 
-	fmt.Fprintf(os.Stderr, "improving %s → %s (%s)\n", file, file, format)
+	if c.Output != "" {
+		fmt.Fprintf(os.Stderr, "summarizing %s → %s (%s)\n", file, c.Output, format)
+	} else {
+		fmt.Fprintf(os.Stderr, "summarizing %s (%s)\n", file, format)
+	}
 
 	var result, convID string
 	_, err = recoverStaleSession(ctx, client, c.cfgPath, sessionID, trusted, func(sid string) error {
-		r, cid, e := translate.Translate(ctx, client, sid, content, format, translate.Options{
+		r, cid, e := translate.Summarize(ctx, client, sid, content, format, translate.Options{
 			Model:      effectiveModel(c.Model),
 			ChunkBytes: c.ChunkBytes,
 			Style:      style,
 			Thinking:   c.Thinking,
-			Task:       translate.TaskImprove,
+			OnChunk: func(chunk, total int) {
+				fmt.Fprintf(os.Stderr, "  chunk %d/%d ok\n", chunk, total)
+			},
 		})
 		if e == nil {
 			result = r
@@ -123,15 +121,20 @@ func (c *ImproveWritingCmd) improveFile(ctx context.Context, client *deepseek.Cl
 		return err
 	}
 	persistConversation(c.cfgPath, c.NoPersist, convID)
-	if err := os.WriteFile(file, []byte(result), 0644); err != nil {
-		return fmt.Errorf("write %s: %w", file, err)
+
+	if c.Output != "" {
+		if err := os.WriteFile(c.Output, []byte(result), 0644); err != nil {
+			return fmt.Errorf("write output: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "done → %s (%d bytes)\n", c.Output, len(result))
+		return nil
 	}
-	fmt.Fprintf(os.Stderr, "done → %s (%d bytes)\n", file, len(result))
+	fmt.Print(result)
 	return nil
 }
 
-// improveSequential improves files one at a time, reusing the session.
-func (c *ImproveWritingCmd) improveSequential(ctx context.Context, style string) error {
+// summarizeSequential summarizes files one at a time, reusing the session.
+func (c *SummarizeCmd) summarizeSequential(ctx context.Context, style string) error {
 	client := deepseek.NewClient(deepseek.Session{
 		Token:     c.Token,
 		Cookie:    c.Cookie,
@@ -139,15 +142,15 @@ func (c *ImproveWritingCmd) improveSequential(ctx context.Context, style string)
 	}, c.Timeout, c.clientBase)
 
 	for _, file := range c.File {
-		if err := c.improveFile(ctx, client, file, style); err != nil {
+		if err := c.summarizeFile(ctx, client, file, style); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// improveParallel improves all files concurrently, each in its own session.
-func (c *ImproveWritingCmd) improveParallel(ctx context.Context, style string) error {
+// summarizeParallel summarizes all files concurrently, each in its own session.
+func (c *SummarizeCmd) summarizeParallel(ctx context.Context, style string) error {
 	type fileResult struct {
 		file string
 		err  error
@@ -161,7 +164,7 @@ func (c *ImproveWritingCmd) improveParallel(ctx context.Context, style string) e
 				Cookie:    c.Cookie,
 				UserAgent: c.UserAgent,
 			}, c.Timeout, c.clientBase)
-			err := c.improveFile(ctx, client, file, style)
+			err := c.summarizeFile(ctx, client, file, style)
 			results <- fileResult{file, err}
 		}(file)
 	}

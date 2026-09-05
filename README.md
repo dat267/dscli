@@ -27,6 +27,8 @@ Commands:
                         epub) via the model
   improve-writing       Improve the writing of a file in place (txt, md, lrc,
                         srt, vtt, ass, ttml) via the model
+  summarize             Summarize a file (txt, md, lrc, srt, vtt, ass, ttml,
+                        epub) via the model
   session list          List sessions with saved texts
   session select        Select a session to resume as the default
   session transcript    Print or delete the saved session texts (transcript) for
@@ -447,3 +449,29 @@ extracted `.txt` instead.
   `--instructions` / `--glossary` for per-run guidance. Improvement instructions
   are read from `improve-writing/default.md` (`./improve-writing/`, then
   `~/.config/dscli/improve-writing/`) or the built-in general style.
+
+## Summarize
+
+`dscli summarize` condenses a file into a summary, printed to stdout (or saved
+with `-o`). It runs on `translate`'s engine — adaptive chunking, style files,
+EPUB extraction — but each chunk is *summarized* instead of translated, and when
+the file needed more than one chunk the per-chunk summaries are combined into
+one final summary in a last pass.
+
+```bash
+dscli summarize book.epub                 # → summary on stdout
+dscli summarize chapter-012.translated.en.md
+dscli summarize notes.md -o notes.summary.md
+dscli summarize movie.srt                  # dialogue summarized, timings read not preserved
+```
+
+- The summary goes to stdout by default; `-o` writes it to a file (never
+  overwritten without `-f`), and `-p` summarizes several files concurrently
+  (summaries print as they finish, so they may interleave).
+- Structural verification is intentionally **skipped**: a summary never
+  reproduces timestamps or markup, it only reads them. Subtitle/lyric formats
+  work — the model reads the cues and summarizes the dialogue.
+- The same flags as `translate` apply: `--chunk-bytes`, `--model`/`-m`,
+  `--thinking`/`-t`, `--no-persist`, `--timeout`, and `--instructions`.
+  Summarization instructions are read from `summarize/default.md`
+  (`./summarize/`, then `~/.config/dscli/summarize/`) or the built-in style.

@@ -119,7 +119,7 @@ func TestTranslateImprovePromptWiring(t *testing.T) {
 	t.Cleanup(srv.Close)
 	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
 
-	_, _, err := Translate(context.Background(), client, "sess-1", []byte("hello"), "text", Options{Improve: true})
+	_, _, err := Translate(context.Background(), client, "sess-1", []byte("hello"), "text", Options{Task: TaskImprove})
 	if err != nil {
 		t.Fatalf("Translate improve: %v", err)
 	}

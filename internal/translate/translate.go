@@ -60,6 +60,17 @@ const (
 	outputCapMargin = 0.85
 )
 
+// Task values for Options.Task, selecting what the model does with each
+// chunk.
+const (
+	// TaskTranslate is the default: translate from From to To.
+	TaskTranslate = ""
+	// TaskImprove polishes the writing in place, preserving language.
+	TaskImprove = "improve"
+	// TaskSummarize condenses the text into a summary.
+	TaskSummarize = "summarize"
+)
+
 // Options configures one translation run over an existing session.
 type Options struct {
 	From       string // source language label ("" → "auto")
@@ -73,10 +84,10 @@ type Options struct {
 	// the per-reply output budget (the site still cuts replies around 36 KiB),
 	// but some prefer it for complex prose.
 	Thinking bool
-	// Improve switches the task from translation to writing improvement: the
-	// prompt preserves meaning and tone instead of changing language, and
-	// From/To are ignored.
-	Improve bool
+	// Task selects the per-chunk instruction: TaskTranslate (the default)
+	// translates, TaskImprove polishes the writing in place, TaskSummarize
+	// condenses the text. Improve/summarize ignore From and To.
+	Task string
 	// OnChunk, when set, reports progress: chunks done and a live estimate
 	// of the total (the total changes as the engine re-sizes chunks).
 	OnChunk func(chunk, total int)
@@ -287,6 +298,27 @@ func improvePrompt(format string, reminder bool, style string) string {
 	return b.String()
 }
 
+// summarizePrompt builds the per-chunk instruction for summarization: capture
+// the main points concisely, without translating, rewriting or reproducing the
+// file's structural markup. It deliberately omits formatPreserveRules — a
+// summary never reproduces the structural lines, so the chunk engine skips
+// structural verification for this task (see Translate).
+func summarizePrompt(format string, reminder bool, style string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Summarize the following %s. Capture the main points, events, names and conclusions; be concise; do not translate or rewrite the text.\n", formatName(format))
+	if reminder {
+		b.WriteString("THE PREVIOUS ATTEMPT FAILED. Retry the chunk.\n")
+	}
+	if style != "" {
+		b.WriteString(style)
+		if !strings.HasSuffix(style, "\n") {
+			b.WriteString("\n")
+		}
+	}
+	b.WriteString("Reply with ONLY the summary — no preamble, no commentary, no code fences.\n\n")
+	return b.String()
+}
+
 // Translate runs the chunked translation over sessionID (which must already
 // exist), carrying the conversation id turn by turn. Structural formats are
 // verified per chunk and retried once when corrupted. Returns the assembled
@@ -318,10 +350,14 @@ func Translate(ctx context.Context, client *deepseek.Client, sessionID string, c
 	// preserves meaning and tone instead of switching language, and From/To
 	// are ignored.
 	promptFor := func(reminder bool) string {
-		if opts.Improve {
+		switch opts.Task {
+		case TaskImprove:
 			return improvePrompt(format, reminder, opts.Style)
+		case TaskSummarize:
+			return summarizePrompt(format, reminder, opts.Style)
+		default:
+			return Prompt(format, opts.From, opts.To, reminder, opts.Style)
 		}
-		return Prompt(format, opts.From, opts.To, reminder, opts.Style)
 	}
 
 	if opts.Thinking {
@@ -355,20 +391,23 @@ func Translate(ctx context.Context, client *deepseek.Client, sessionID string, c
 
 			// Structural formats must keep their timestamps/header markup
 			// byte-for-byte (ProtectedLines is empty for text/markdown, so the
-			// verification passes trivially there).
-			if err := filetools.VerifyProtected(format, chunk, text); err != nil {
-				strict := promptFor(true) +
-					"The previous attempt changed a protected (timestamps/header) line.\n" +
-					"Keep every line with a timestamp or the WEBVTT/header syntax EXACTLY as in the original. Retry the chunk:\n\n" + chunk
-				text2, convID2, _, err2 := translateChunk(ctx, client, conversation, strict, model, opts.Thinking)
-				if err2 != nil {
-					return "", conversation, fmt.Errorf("chunk (%d bytes): %w", len(chunk), err2)
+			// verification passes trivially there). A summary never reproduces
+			// the structural lines, so it skips verification entirely.
+			if opts.Task != TaskSummarize {
+				if err := filetools.VerifyProtected(format, chunk, text); err != nil {
+					strict := promptFor(true) +
+						"The previous attempt changed a protected (timestamps/header) line.\n" +
+						"Keep every line with a timestamp or the WEBVTT/header syntax EXACTLY as in the original. Retry the chunk:\n\n" + chunk
+					text2, convID2, _, err2 := translateChunk(ctx, client, conversation, strict, model, opts.Thinking)
+					if err2 != nil {
+						return "", conversation, fmt.Errorf("chunk (%d bytes): %w", len(chunk), err2)
+					}
+					conversation = convID2
+					if err := filetools.VerifyProtected(format, chunk, text2); err != nil {
+						return "", conversation, fmt.Errorf("chunk (%d bytes): %w", len(chunk), err)
+					}
+					text = text2
 				}
-				conversation = convID2
-				if err := filetools.VerifyProtected(format, chunk, text2); err != nil {
-					return "", conversation, fmt.Errorf("chunk (%d bytes): %w", len(chunk), err)
-				}
-				text = text2
 			}
 
 			translated = append(translated, text)
@@ -420,20 +459,23 @@ func Translate(ctx context.Context, client *deepseek.Client, sessionID string, c
 
 		// Structural formats must keep their timestamps/header markup
 		// byte-for-byte (ProtectedLines is empty for text/markdown, so the
-		// verification passes trivially there).
-		if err := filetools.VerifyProtected(format, chunk, text); err != nil {
-			strict := promptFor(true) +
-				"The previous attempt changed a protected (timestamps/header) line.\n" +
-				"Keep every line with a timestamp or the WEBVTT/header syntax EXACTLY as in the original. Retry the chunk:\n\n" + chunk
-			text2, convID2, _, err2 := translateChunk(ctx, client, conversation, strict, model, opts.Thinking)
-			if err2 != nil {
-				return "", conversation, fmt.Errorf("chunk (%d bytes): %w", len(chunk), err2)
+		// verification passes trivially there). A summary never reproduces
+		// the structural lines, so it skips verification entirely.
+		if opts.Task != TaskSummarize {
+			if err := filetools.VerifyProtected(format, chunk, text); err != nil {
+				strict := promptFor(true) +
+					"The previous attempt changed a protected (timestamps/header) line.\n" +
+					"Keep every line with a timestamp or the WEBVTT/header syntax EXACTLY as in the original. Retry the chunk:\n\n" + chunk
+				text2, convID2, _, err2 := translateChunk(ctx, client, conversation, strict, model, opts.Thinking)
+				if err2 != nil {
+					return "", conversation, fmt.Errorf("chunk (%d bytes): %w", len(chunk), err2)
+				}
+				conversation = convID2
+				if err := filetools.VerifyProtected(format, chunk, text2); err != nil {
+					return "", conversation, fmt.Errorf("chunk (%d bytes): %w", len(chunk), err)
+				}
+				text = text2
 			}
-			conversation = convID2
-			if err := filetools.VerifyProtected(format, chunk, text2); err != nil {
-				return "", conversation, fmt.Errorf("chunk (%d bytes): %w", len(chunk), err)
-			}
-			text = text2
 		}
 
 		if inOutRatio == 0 && len(chunk) > 0 && len(text) > 0 {
@@ -705,4 +747,89 @@ func ResolveImproveStyle(explicit string) (string, error) {
 		}
 	}
 	return strings.TrimSpace(DefaultImproveStyle()), nil
+}
+
+// DefaultSummarizeStyle returns the built-in summarization instructions, used
+// when neither --instructions nor summarize/default.md is found.
+func DefaultSummarizeStyle() string {
+	return `[STYLE: SUMMARIZE]
+Write a compact, readable summary of the text.
+1. Open with what the text is about and its main outcome or conclusion.
+2. Cover key events, arguments, names and numbers; skip minor detail.
+3. Keep the source language; do not translate.
+4. Use flowing prose or short paragraphs, not lists, unless the source is a list.
+5. Output only the summary — no commentary, no meta text, no code fences.
+`
+}
+
+// summarizeStyleDirs lists directories searched for summarize instruction
+// files, in order: ./summarize, then <config>/dscli/summarize.
+var summarizeStyleDirs = func() []string {
+	dirs := []string{"summarize"}
+	if cd, err := os.UserConfigDir(); err == nil {
+		dirs = append(dirs, filepath.Join(cd, "dscli", "summarize"))
+	}
+	return dirs
+}()
+
+// ResolveSummarizeStyle returns the summarization instructions: an explicit
+// file when given, else summarize/default.md, else the built-in default.
+func ResolveSummarizeStyle(explicit string) (string, error) {
+	if explicit != "" {
+		data, err := os.ReadFile(explicit)
+		if err != nil {
+			return "", fmt.Errorf("read instructions file: %w", err)
+		}
+		return strings.TrimSpace(string(data)), nil
+	}
+	for _, dir := range summarizeStyleDirs {
+		p := filepath.Join(dir, "default.md")
+		if _, err := os.Stat(p); err == nil {
+			data, err := os.ReadFile(p)
+			if err != nil {
+				return "", fmt.Errorf("read instructions file: %w", err)
+			}
+			return strings.TrimSpace(string(data)), nil
+		}
+	}
+	return strings.TrimSpace(DefaultSummarizeStyle()), nil
+}
+
+// Summarize condenses content into a summary using the chunk engine with
+// TaskSummarize: the adaptive sizing and per-chunk prompts of Translate apply
+// unchanged, but structural verification is skipped (a summary never
+// reproduces timestamps/markup). When the document needed more than one chunk,
+// the per-chunk summaries are combined into one coherent summary in a final
+// pass. Returns the summary (newline-terminated), the final conversation id
+// and any error.
+func Summarize(ctx context.Context, client *deepseek.Client, sessionID string, content []byte, format string, opts Options) (string, string, error) {
+	chunks := 0
+	prev := opts.OnChunk
+	opts.Task = TaskSummarize
+	opts.OnChunk = func(done, total int) {
+		chunks = done
+		if prev != nil {
+			prev(done, total)
+		}
+	}
+	text, convID, err := Translate(ctx, client, sessionID, content, format, opts)
+	if err != nil {
+		return "", convID, err
+	}
+	if chunks <= 1 {
+		return text, convID, nil
+	}
+
+	model := opts.Model
+	if model == "" {
+		model = "default"
+	}
+	prompt := "The sections below are summaries of consecutive parts of one document, in order. " +
+		"Combine them into a single coherent summary that keeps every key point, name and conclusion; " +
+		"drop repetition; keep the ordering. Reply with ONLY the combined summary — no preamble, no commentary.\n\n" + text
+	combined, convID2, _, err := translateChunk(ctx, client, convID, prompt, model, opts.Thinking)
+	if err != nil {
+		return "", convID2, err
+	}
+	return strings.TrimSpace(combined) + "\n", convID2, nil
 }
