@@ -1124,7 +1124,11 @@ func (m *tuiModel) activeTurnRows() []string {
 	if !m.busy || m.reply.Len() == 0 || m.width < 1 {
 		return nil
 	}
-	return renderMarkdown(m.u, m.reply.String(), m.width)
+	rows := renderMarkdown(m.u, m.reply.String(), m.width)
+	// streamDone commits these rows plus a trailing blank separator, and
+	// frees the working-indicator row (outputRows grows by one); render both
+	// live so the visible text does not move when the turn finishes.
+	return append(rows, "", "")
 }
 
 // commitReply moves the finished turn's reply from the live markdown view
@@ -1150,6 +1154,13 @@ func (m *tuiModel) wrappedRows() []string {
 	}
 	var rows []string
 	for _, line := range strings.Split(m.scroll, "\n") {
+		if textWidth(stripANSI(line)) <= m.width {
+			// Already fits: markdown rows are rendered to width at commit.
+			// Re-wrapping would miscount their mid-line ANSI codes as visible
+			// columns and re-split them, shifting the committed text.
+			rows = append(rows, line)
+			continue
+		}
 		rows = append(rows, wrapScrollLine(line, m.width)...)
 	}
 	return rows

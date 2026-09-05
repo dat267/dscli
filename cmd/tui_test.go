@@ -87,6 +87,52 @@ func TestTUIStreamConcatsOnOneLine(t *testing.T) {
 	}
 }
 
+// TestTUIStreamCommitNoShift: the rows rendered live while a turn streams
+// must be byte-identical to what the scrollback shows after streamDone —
+// re-wrapping committed markdown rows (whose mid-line ANSI codes would be
+// miscounted as columns) used to re-split them, visibly shifting the text up.
+func TestTUIStreamCommitNoShift(t *testing.T) {
+	m, _ := tuiHarness(t, nil, "")
+	m.height, m.width = 24, 80
+	m.busy = true
+	m.Update(streamDelta{text: "**bold** move\n\n```go\nx := 1\n```\n"})
+	live := m.activeTurnRows()
+	before := m.render()
+	m.Update(streamDone{convID: "sess-1:2"})
+	committed := m.wrappedRows()
+	if len(committed) < len(live) {
+		t.Fatalf("committed rows = %d, fewer than the %d live rows", len(committed), len(live))
+	}
+	// The scrollback was empty before the turn, so the committed reply sits
+	// at the top (wrappedRows yields a trailing "" for the final newline).
+	head := committed[:len(live)]
+	for i := range live {
+		if stripANSI(live[i]) != stripANSI(head[i]) {
+			t.Errorf("row %d shifted or mangled at commit:\n live=%q\n comm=%q", i, stripANSI(live[i]), stripANSI(head[i]))
+		}
+		if len(live[i]) != len(head[i]) {
+			t.Errorf("row %d re-wrapped at commit (styling changed):\n live=%q\n comm=%q", i, live[i], head[i])
+		}
+	}
+	// The rendered pane position of the content must not move either: the
+	// live view reserves the trailing separator row and the row the spinner
+	// frees, so commit is visually a no-op.
+	if row := paneRowIndex(m.render(), "x := 1"); row != paneRowIndex(before, "x := 1") {
+		t.Errorf("content moved at commit: pane row %d -> %d", paneRowIndex(before, "x := 1"), row)
+	}
+}
+
+// paneRowIndex returns the rendered pane row containing needle.
+func paneRowIndex(view, needle string) int {
+	rows := strings.Split(strings.TrimSuffix(view, "\n"), "\n")
+	for i, r := range rows {
+		if strings.Contains(stripANSI(r), needle) {
+			return i
+		}
+	}
+	return -1
+}
+
 // TestTUIStreamMarkdownLive: while a turn streams, the reply renders as
 // markdown below the committed scrollback — a partial fenced block already
 // shows as a code box, so the live view never looks broken.
