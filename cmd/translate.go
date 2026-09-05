@@ -75,10 +75,17 @@ func (c *TranslateCmd) Run(app *App, ctx context.Context) error {
 		style = style + "\n\n## Project glossary\n" + string(gloss)
 	}
 
-	if c.Parallel {
-		return c.translateParallel(ctx, style)
-	}
-	return c.translateSequential(ctx, style)
+	return runFiles(ctx, c.File, c.Parallel,
+		func() *deepseek.Client {
+			return deepseek.NewClient(deepseek.Session{
+				Token:     c.Token,
+				Cookie:    c.Cookie,
+				UserAgent: c.UserAgent,
+			}, c.Timeout, c.clientBase)
+		},
+		func(ctx context.Context, client *deepseek.Client, file string) error {
+			return c.translateFile(ctx, client, file, style)
+		})
 }
 
 // translateFile translates one file and writes the output.
@@ -137,50 +144,4 @@ func (c *TranslateCmd) translateFile(ctx context.Context, client *deepseek.Clien
 	}
 	fmt.Fprintf(os.Stderr, "done → %s (%d bytes)\n", out, len(result))
 	return nil
-}
-
-// translateSequential translates files one at a time, reusing the session.
-func (c *TranslateCmd) translateSequential(ctx context.Context, style string) error {
-	client := deepseek.NewClient(deepseek.Session{
-		Token:     c.Token,
-		Cookie:    c.Cookie,
-		UserAgent: c.UserAgent,
-	}, c.Timeout, c.clientBase)
-
-	for _, file := range c.File {
-		if err := c.translateFile(ctx, client, file, style); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// translateParallel translates all files concurrently, each in its own session.
-func (c *TranslateCmd) translateParallel(ctx context.Context, style string) error {
-	type fileResult struct {
-		file string
-		err  error
-	}
-	results := make(chan fileResult, len(c.File))
-
-	for _, file := range c.File {
-		go func(file string) {
-			client := deepseek.NewClient(deepseek.Session{
-				Token:     c.Token,
-				Cookie:    c.Cookie,
-				UserAgent: c.UserAgent,
-			}, c.Timeout, c.clientBase)
-			err := c.translateFile(ctx, client, file, style)
-			results <- fileResult{file, err}
-		}(file)
-	}
-
-	var firstErr error
-	for range c.File {
-		r := <-results
-		if r.err != nil && firstErr == nil {
-			firstErr = r.err
-		}
-	}
-	return firstErr
 }

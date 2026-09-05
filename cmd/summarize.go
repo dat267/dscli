@@ -67,10 +67,17 @@ func (c *SummarizeCmd) Run(app *App, ctx context.Context) error {
 		return err
 	}
 
-	if c.Parallel {
-		return c.summarizeParallel(ctx, style)
-	}
-	return c.summarizeSequential(ctx, style)
+	return runFiles(ctx, c.File, c.Parallel,
+		func() *deepseek.Client {
+			return deepseek.NewClient(deepseek.Session{
+				Token:     c.Token,
+				Cookie:    c.Cookie,
+				UserAgent: c.UserAgent,
+			}, c.Timeout, c.clientBase)
+		},
+		func(ctx context.Context, client *deepseek.Client, file string) error {
+			return c.summarizeFile(ctx, client, file, style)
+		})
 }
 
 // summarizeFile summarizes one file and prints (or writes) the result.
@@ -131,50 +138,4 @@ func (c *SummarizeCmd) summarizeFile(ctx context.Context, client *deepseek.Clien
 	}
 	fmt.Print(result)
 	return nil
-}
-
-// summarizeSequential summarizes files one at a time, reusing the session.
-func (c *SummarizeCmd) summarizeSequential(ctx context.Context, style string) error {
-	client := deepseek.NewClient(deepseek.Session{
-		Token:     c.Token,
-		Cookie:    c.Cookie,
-		UserAgent: c.UserAgent,
-	}, c.Timeout, c.clientBase)
-
-	for _, file := range c.File {
-		if err := c.summarizeFile(ctx, client, file, style); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// summarizeParallel summarizes all files concurrently, each in its own session.
-func (c *SummarizeCmd) summarizeParallel(ctx context.Context, style string) error {
-	type fileResult struct {
-		file string
-		err  error
-	}
-	results := make(chan fileResult, len(c.File))
-
-	for _, file := range c.File {
-		go func(file string) {
-			client := deepseek.NewClient(deepseek.Session{
-				Token:     c.Token,
-				Cookie:    c.Cookie,
-				UserAgent: c.UserAgent,
-			}, c.Timeout, c.clientBase)
-			err := c.summarizeFile(ctx, client, file, style)
-			results <- fileResult{file, err}
-		}(file)
-	}
-
-	var firstErr error
-	for range c.File {
-		r := <-results
-		if r.err != nil && firstErr == nil {
-			firstErr = r.err
-		}
-	}
-	return firstErr
 }

@@ -77,10 +77,17 @@ func (c *ImproveWritingCmd) Run(app *App, ctx context.Context) error {
 		style = style + "\n\n## Project glossary\n" + string(gloss)
 	}
 
-	if c.Parallel {
-		return c.improveParallel(ctx, style)
-	}
-	return c.improveSequential(ctx, style)
+	return runFiles(ctx, c.File, c.Parallel,
+		func() *deepseek.Client {
+			return deepseek.NewClient(deepseek.Session{
+				Token:     c.Token,
+				Cookie:    c.Cookie,
+				UserAgent: c.UserAgent,
+			}, c.Timeout, c.clientBase)
+		},
+		func(ctx context.Context, client *deepseek.Client, file string) error {
+			return c.improveFile(ctx, client, file, style)
+		})
 }
 
 // improveFile improves one file and rewrites it in place.
@@ -128,50 +135,4 @@ func (c *ImproveWritingCmd) improveFile(ctx context.Context, client *deepseek.Cl
 	}
 	fmt.Fprintf(os.Stderr, "done → %s (%d bytes)\n", file, len(result))
 	return nil
-}
-
-// improveSequential improves files one at a time, reusing the session.
-func (c *ImproveWritingCmd) improveSequential(ctx context.Context, style string) error {
-	client := deepseek.NewClient(deepseek.Session{
-		Token:     c.Token,
-		Cookie:    c.Cookie,
-		UserAgent: c.UserAgent,
-	}, c.Timeout, c.clientBase)
-
-	for _, file := range c.File {
-		if err := c.improveFile(ctx, client, file, style); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// improveParallel improves all files concurrently, each in its own session.
-func (c *ImproveWritingCmd) improveParallel(ctx context.Context, style string) error {
-	type fileResult struct {
-		file string
-		err  error
-	}
-	results := make(chan fileResult, len(c.File))
-
-	for _, file := range c.File {
-		go func(file string) {
-			client := deepseek.NewClient(deepseek.Session{
-				Token:     c.Token,
-				Cookie:    c.Cookie,
-				UserAgent: c.UserAgent,
-			}, c.Timeout, c.clientBase)
-			err := c.improveFile(ctx, client, file, style)
-			results <- fileResult{file, err}
-		}(file)
-	}
-
-	var firstErr error
-	for range c.File {
-		r := <-results
-		if r.err != nil && firstErr == nil {
-			firstErr = r.err
-		}
-	}
-	return firstErr
 }
