@@ -360,81 +360,18 @@ func Translate(ctx context.Context, client *deepseek.Client, sessionID string, c
 		}
 	}
 
+	// The chunk-sizing strategy is the only difference between the modes:
+	// adaptive probe/grow/shrink for Instant, one fixed size for DeepThink.
+	var sizer chunkSizer
 	if opts.Thinking {
-		// Think mode: fixed chunk size, no probe, no grow/shrink. The
-		// expert model's output budget is ~300K tokens, so a 256 KB input
-		// per chunk is safe. If the reply is still truncated the chunk
-		// halves once as a safety net, but that should never happen.
-		chunkBytes := thinkingChunkBytes
-		if chunkBytes > maxChunk {
-			chunkBytes = maxChunk
-		}
-		offset := 0
-		for offset < len(src) {
-			chunk := FirstChunk(src[offset:], chunkBytes)
-			if chunk == "" {
-				break
-			}
-			text, convID, truncated, err := translateChunk(ctx, client, conversation, promptFor(false)+chunk, model, opts.Thinking)
-			if err != nil {
-				if !truncated {
-					return "", conversation, fmt.Errorf("chunk (%d bytes): %w", len(chunk), err)
-				}
-				// Truncated at the output limit: halve the chunk and retry.
-				if chunkBytes <= minChunkBytes {
-					return "", conversation, fmt.Errorf("chunk (%d bytes): the reply hits the output limit even at the minimum chunk size", len(chunk))
-				}
-				chunkBytes /= 2
-				continue
-			}
-			conversation = convID
-
-			// Structural formats must keep their timestamps/header markup
-			// byte-for-byte (ProtectedLines is empty for text/markdown, so the
-			// verification passes trivially there). A summary never reproduces
-			// the structural lines, so it skips verification entirely.
-			if opts.Task != TaskSummarize {
-				if err := filetools.VerifyProtected(format, chunk, text); err != nil {
-					strict := promptFor(true) +
-						"The previous attempt changed a protected (timestamps/header) line.\n" +
-						"Keep every line with a timestamp or the WEBVTT/header syntax EXACTLY as in the original. Retry the chunk:\n\n" + chunk
-					text2, convID2, _, err2 := translateChunk(ctx, client, conversation, strict, model, opts.Thinking)
-					if err2 != nil {
-						return "", conversation, fmt.Errorf("chunk (%d bytes): %w", len(chunk), err2)
-					}
-					conversation = convID2
-					if err := filetools.VerifyProtected(format, chunk, text2); err != nil {
-						return "", conversation, fmt.Errorf("chunk (%d bytes): %w", len(chunk), err)
-					}
-					text = text2
-				}
-			}
-
-			translated = append(translated, text)
-			offset += len(chunk)
-			if opts.OnChunk != nil {
-				remaining := len(src) - offset
-				total := len(translated)
-				if remaining > 0 {
-					total += (remaining + chunkBytes - 1) / chunkBytes
-				}
-				opts.OnChunk(len(translated), total)
-			}
-		}
-		return strings.TrimSpace(strings.Join(translated, "\n")) + "\n", conversation, nil
+		sizer = newFixedSizer(maxChunk)
+	} else {
+		sizer = newAdaptiveSizer(maxChunk)
 	}
 
-	// Non-think mode: adaptive chunk sizing with probe + grow + shrink.
-	chunkBytes := initialChunkBytes
-	if chunkBytes > maxChunk {
-		chunkBytes = maxChunk
-	}
-	capBytes := defaultCapBytes
-	inOutRatio := 0.0 // output/input byte ratio, learned from the first complete chunk
-	growOK := true    // allow growing the chunk size only until the first truncation
 	offset := 0
 	for offset < len(src) {
-		chunk := FirstChunk(src[offset:], chunkBytes)
+		chunk := FirstChunk(src[offset:], sizer.size())
 		if chunk == "" {
 			break
 		}
@@ -443,16 +380,12 @@ func Translate(ctx context.Context, client *deepseek.Client, sessionID string, c
 			if !truncated {
 				return "", conversation, fmt.Errorf("chunk (%d bytes): %w", len(chunk), err)
 			}
-			// Reply hit the output cap: learn the cap, stop growing, shrink
-			// the chunk size and re-split the remaining text from this offset.
-			growOK = false
-			if len(text) > capBytes {
-				capBytes = len(text)
-			}
-			if chunkBytes <= minChunkBytes {
+			// Reply hit the output limit: learn from the partial text, shrink
+			// the chunk, and re-split the remaining text from this offset.
+			// The sizer gives up (false) at the minimum chunk size.
+			if !sizer.truncated(len(text)) {
 				return "", conversation, fmt.Errorf("chunk (%d bytes): the reply hits the output limit even at the minimum chunk size", len(chunk))
 			}
-			chunkBytes = shrinkChunk(chunkBytes, capBytes, inOutRatio)
 			continue
 		}
 		conversation = convID
@@ -478,22 +411,14 @@ func Translate(ctx context.Context, client *deepseek.Client, sessionID string, c
 			}
 		}
 
-		if inOutRatio == 0 && len(chunk) > 0 && len(text) > 0 {
-			inOutRatio = float64(len(text)) / float64(len(chunk))
-		}
-		if inOutRatio > 0 {
-			n := idealChunk(capBytes, inOutRatio, maxChunk)
-			if growOK || n < chunkBytes {
-				chunkBytes = n
-			}
-		}
+		sizer.success(len(chunk), len(text))
 		translated = append(translated, text)
 		offset += len(chunk)
 		if opts.OnChunk != nil {
 			remaining := len(src) - offset
 			total := len(translated)
 			if remaining > 0 {
-				total += (remaining + chunkBytes - 1) / chunkBytes
+				total += (remaining + sizer.size() - 1) / sizer.size()
 			}
 			opts.OnChunk(len(translated), total)
 		}
