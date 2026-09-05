@@ -95,12 +95,12 @@ type streamDone struct {
 // between deltas).
 type spinnerTickMsg struct{}
 
-// spinnerFrames is the working indicator's pulse.
-var spinnerFrames = [...]string{"·", "•", "●", "•"}
+// spinnerFrames is pi's braille pulse.
+var spinnerFrames = [...]string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 // spinnerTick schedules the next working-indicator frame.
 func spinnerTick() tea.Cmd {
-	return tea.Tick(130*time.Millisecond, func(time.Time) tea.Msg { return spinnerTickMsg{} })
+	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg { return spinnerTickMsg{} })
 }
 
 func newTUIModel(chat *ChatCmd, client *deepseek.Client, conversation string, trusted bool) *tuiModel {
@@ -1045,13 +1045,11 @@ func (m *tuiModel) newSession() {
 }
 
 // outputRows returns how many scrollback lines fit between the status line
-// and the separator+input (plus any suggestion or working-indicator rows).
+// and the separator+input (plus any suggestion rows). Streaming does not
+// change the layout: the working indicator lives on the status line.
 func (m *tuiModel) outputRows() int {
 	// +1 for the separator row between scrollback and input
 	rows := m.height - 1 - 1 - m.inputHeight() - m.suggestionRows() // 1 = status line, 1 = separator
-	if m.busy {
-		rows-- // the working-indicator row
-	}
 	if rows < 0 {
 		return 0
 	}
@@ -1131,7 +1129,11 @@ func (m *tuiModel) activeTurnRows() []string {
 	if !m.busy || m.reply.Len() == 0 || m.width < 1 {
 		return nil
 	}
-	return renderMarkdown(m.u, m.reply.String(), m.width)
+	rows := renderMarkdown(m.u, m.reply.String(), m.width)
+	// streamDone commits these rows plus a trailing blank separator; render
+	// the blank live too so the visible text does not move when the turn
+	// finishes.
+	return append(rows, "")
 }
 
 // commitReply moves the finished turn's reply from the live markdown view
@@ -1248,36 +1250,34 @@ func (m *tuiModel) render() string {
 	}
 
 	// 2. Separator: a dimmed line between the scrollback and the input area.
+	// While a turn runs the rule doubles as the working indicator — pi-style
+	// "── ⠋ Working ───" — so streaming never changes the pane layout.
 	if m.width > 0 {
-		sep := strings.Repeat("─", m.width)
-		sep = m.u.dim(sep)
-		b.WriteString(sep)
+		if m.busy {
+			head := "── " + spinnerFrames[m.spin] + " Working "
+			b.WriteString(m.u.dim("──") + " " + m.u.accent(spinnerFrames[m.spin]) + " " +
+				m.u.muted("Working") + " " +
+				m.u.dim(strings.Repeat("─", max(0, m.width-textWidth(head)))))
+		} else {
+			b.WriteString(m.u.dim(strings.Repeat("─", m.width)))
+		}
 		b.WriteString("\n")
 	}
 
-	// 3. Working indicator: a pulsing dot while a turn runs.
-	if m.busy {
-		b.WriteString(m.u.accent(spinnerFrames[m.spin]))
-		b.WriteString("\n")
-	}
-
-	// 4. Slash-command menu sits just above the input.
+	// 3. Slash-command menu sits just above the input.
 	if len(m.suggestions) > 0 {
 		b.WriteString(m.renderSuggestions())
 		b.WriteString("\n")
 	}
 
-	// 5. Input at the bottom (open textarea, no leading prompt glyph).
+	// 4. Input at the bottom (open textarea, no leading prompt glyph).
 	b.WriteString(m.input.render(max(0, m.width)))
 	b.WriteString("\n")
 
-	// 6. Status line below the input (m.status is already dimmed; only
-	// truncate to the terminal width so it never wraps). While a turn streams
-	// a live suffix tells the user it can be interrupted.
+	// 5. Status line below the input (m.status is already dimmed; only
+	// truncate to the terminal width so it never wraps). The working
+	// indicator lives on the separator rule, so the status never mentions it.
 	status := m.status
-	if m.busy {
-		status = status + " " + m.u.muted("· streaming (ctrl+c interrupts)")
-	}
 	if m.width > 0 {
 		b.WriteString(lipgloss.NewStyle().MaxWidth(m.width).Render(status))
 	} else {

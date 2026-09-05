@@ -202,17 +202,21 @@ func TestTUIStreamCommitOnDone(t *testing.T) {
 	}
 }
 
-// TestTUISpinner: while busy a pulsing accent dot renders on its own row and
-// advances on spinner ticks; idle views show no spinner.
+// TestTUISpinner: while a turn runs the separator rule doubles as the
+// working indicator — pi-style "── ⠋ Working ───" — so the pane layout never
+// changes for streaming; idle views show the plain rule.
 func TestTUISpinner(t *testing.T) {
 	m, _ := tuiHarness(t, nil, "")
 	m.height, m.width = 24, 80
-	m.busy = true
-	if got, want := m.outputRows(), m.height-1-1-m.inputHeight()-1; got != want {
-		t.Errorf("busy outputRows = %d, want %d (one row reserved for the spinner)", got, want)
+	// The row budget is identical busy or idle: streaming never resizes the
+	// chat pane.
+	if got, want := m.outputRows(), m.height-1-1-m.inputHeight(); got != want {
+		t.Errorf("busy outputRows = %d, want %d (no row reserved for streaming)", got, want)
 	}
-	if !strings.Contains(m.render(), ansiAccent+spinnerFrames[0]+ansiReset) {
-		t.Errorf("busy view missing the spinner frame:\n%s", m.render())
+	m.busy = true
+	v := m.render()
+	if !strings.Contains(v, ansiAccent+spinnerFrames[0]+ansiReset) || !strings.Contains(v, "Working") {
+		t.Errorf("busy view missing the working indicator on the rule:\n%s", v)
 	}
 	m.Update(spinnerTickMsg{})
 	if m.spin != 1 {
@@ -221,12 +225,15 @@ func TestTUISpinner(t *testing.T) {
 	if !strings.Contains(m.render(), ansiAccent+spinnerFrames[1]+ansiReset) {
 		t.Errorf("busy view missing the advanced frame:\n%s", m.render())
 	}
-	// A tick for a finished turn stops the animation.
+	// A tick for a finished turn stops the animation: the rule is plain again.
 	m.busy = false
 	m.Update(spinnerTickMsg{})
 	idle := m.render()
+	if strings.Contains(idle, "Working") {
+		t.Errorf("idle view should not show the working indicator:\n%s", idle)
+	}
 	for _, f := range spinnerFrames {
-		if strings.Contains(idle, ansiAccent+f+ansiReset) {
+		if strings.Contains(idle, ansiAccent+f) {
 			t.Errorf("idle view should not show a spinner:\n%s", idle)
 		}
 	}

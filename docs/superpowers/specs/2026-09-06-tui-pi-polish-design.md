@@ -58,10 +58,12 @@ resize; box rows degrade gracefully on narrowing, as in Pi).
 
 ## 3. Spinner
 
-While `busy`, a pulsing `·`→`•`→`●`→`•` accent dot on its own line between
-the separator and the input. `startTurn` schedules a self-rescheduling
-`tea.Tick` (~130ms); the tick advances the frame and re-renders; `streamDone`
-stops it. Deltas alone cannot animate it (thinking pauses).
+While `busy`, the separator rule doubles as the working indicator — pi-style
+`── ⠋ Working ───` (pi's braille frames, ~120ms, accent dot, muted label) —
+so streaming never changes the pane layout: `outputRows` is identical busy
+or idle. `startTurn` schedules a self-rescheduling `tea.Tick`; the tick
+advances the frame and re-renders; `streamDone` stops it. Deltas alone
+cannot animate it (thinking pauses).
 
 ## 4. Turn spacing
 
