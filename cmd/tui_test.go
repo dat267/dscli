@@ -266,7 +266,7 @@ func TestTUIScroll(t *testing.T) {
 	m.scroll = sb.String()
 	m.clampView()
 	avail := m.outputRows()
-	bottom := 51 - avail // 50 lines + trailing empty
+	bottom := 50 - avail // 50 lines (the trailing newline is not a row)
 	if m.viewTop != bottom {
 		t.Errorf("auto-scroll viewTop = %d, want %d", m.viewTop, bottom)
 	}
@@ -985,7 +985,7 @@ func TestTUIWheelAndHomeEndScroll(t *testing.T) {
 	m.scroll = sb.String()
 	m.clampView()
 	avail := m.outputRows()
-	bottom := 51 - avail
+	bottom := 50 - avail
 
 	m.scrollUpN(wheelScrollLines)
 	if m.viewTop != bottom-wheelScrollLines {
