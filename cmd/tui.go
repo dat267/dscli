@@ -622,10 +622,15 @@ func renderHistory(u ui, hist []deepseek.HistoryMessage, width int) string {
 			b.WriteString("\n")
 			continue
 		}
-		for _, row := range renderMarkdown(u, text, 80) {
+		for _, row := range renderMarkdown(u, text, width) {
 			b.WriteString(row)
 			b.WriteString("\n")
 		}
+	}
+	// End on a blank line, so the first message sent after a resume keeps
+	// the breathing room every later turn gets from streamDone.
+	if b.Len() > 0 {
+		b.WriteString("\n")
 	}
 	return b.String()
 }

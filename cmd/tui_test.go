@@ -992,6 +992,11 @@ func TestTUIRenderHistory(t *testing.T) {
 	if got2 := renderHistory(ui{color: true}, []deepseek.HistoryMessage{{MessageID: 1, Role: "USER", Content: ""}}, 80); got2 != "" {
 		t.Errorf("empty history = %q, want empty", got2)
 	}
+	// The history ends with a blank line, so the first message sent after a
+	// resume keeps the breathing room every later turn has.
+	if !strings.HasSuffix(got, "\n\n") {
+		t.Errorf("history should end with a blank line, got %q", got)
+	}
 }
 
 // TestTUIWheelAndHomeEndScroll: the mouse wheel scrolls a few lines, Home
