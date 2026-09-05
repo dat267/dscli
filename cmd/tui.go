@@ -995,8 +995,12 @@ func (m *tuiModel) handleCopyCommand() {
 	m.appendLine(m.u.note(fmt.Sprintf("copied %d bytes of chat text to clipboard", len(plain))))
 }
 
-// clipboardTool returns the platform-native clipboard command, or "".
-func clipboardTool() []string {
+// clipboardTool is a var so tests can pin the platform detection instead of
+// depending on which clipboard tools happen to be installed on the host.
+var clipboardTool = findClipboardTool
+
+// findClipboardTool returns the platform-native clipboard command, or "".
+func findClipboardTool() []string {
 	// $WAYLAND_DISPLAY checked first so wl-copy is preferred over xclip
 	// when both are present on a Wayland session.
 	if os.Getenv("WAYLAND_DISPLAY") != "" {

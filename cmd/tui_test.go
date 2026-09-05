@@ -720,13 +720,27 @@ func TestTUICopyCommand(t *testing.T) {
 	if !strings.Contains(m.scroll, "nothing to copy") {
 		t.Errorf("empty chat copy = %q, want nothing-to-copy note", m.scroll)
 	}
-	// With some content, /copy should show the no-clipboard-tool error
-	// (no real clipboard tool in CI/test sandbox).
+	// Pin the platform detection so both paths are deterministic on any host.
+	orig := clipboardTool
+	t.Cleanup(func() { clipboardTool = orig })
+
+	// No clipboard tool: /copy reports it instead of copying.
+	clipboardTool = func() []string { return nil }
 	m.scroll = "hello world\n"
 	m.input.SetValue("/copy")
 	m.Update(press(tea.KeyEnter))
 	if !strings.Contains(m.scroll, "no clipboard tool found") {
 		t.Errorf("no-tool copy = %q, want a clipboard-not-found note", m.scroll)
+	}
+
+	// A working tool (go version ignores stdin and exits 0): the copy
+	// succeeds and reports the byte count.
+	clipboardTool = func() []string { return []string{"go", "version"} }
+	m.scroll = "hello world\n"
+	m.input.SetValue("/copy")
+	m.Update(press(tea.KeyEnter))
+	if !strings.Contains(m.scroll, "copied 12 bytes of chat text to clipboard") {
+		t.Errorf("successful copy = %q, want a copied-bytes note", m.scroll)
 	}
 }
 
