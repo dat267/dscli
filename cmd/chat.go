@@ -329,7 +329,7 @@ func (c *ChatCmd) repl(ctx context.Context) error {
 			return err
 		}
 		if m.turns > 0 {
-			fmt.Fprintf(os.Stderr, "\nconversation: %s\n", m.conversation)
+			fmt.Fprintf(os.Stderr, "conversation: %s\n", m.conversation)
 		}
 		return nil
 	}
