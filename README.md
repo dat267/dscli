@@ -97,7 +97,10 @@ dscli chat --thinking --search   # DeepThink + web search
 
 When stdin and stdout are terminals, `dscli chat` runs a terminal-agent TUI
 (open-code/Claude Code style): the conversation scrolls in a pane above a
-bottom-pinned, multi-line input. Slash commands get a suggestion menu as you
+bottom-pinned, multi-line input. Replies render as **markdown** — styled
+headings, bordered code boxes with a language label, bullets, quote bars and
+rules — live while the reply streams, with a pulsing working indicator. Slash
+commands get a suggestion menu as you
 type; replies, tool notes and file-write previews render inside the pane
 instead of stdout:
 

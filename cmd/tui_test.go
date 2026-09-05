@@ -57,16 +57,129 @@ func pumpTUI(m *tuiModel) {
 	}
 }
 
-// TestTUIStreamConcatsOnOneLine: streaming reply deltas must concatenate on
-// the current line, not each start a new line (the visual-break regression).
+// TestTUIStreamConcatsOnOneLine: streaming reply deltas must concatenate in
+// the turn's reply buffer, which renders live as one paragraph row below the
+// committed scrollback — not one row per delta (the visual-break regression).
 func TestTUIStreamConcatsOnOneLine(t *testing.T) {
 	m, _ := tuiHarness(t, nil, "")
+	m.height, m.width = 24, 80
 	m.appendLine("hi")
+	m.busy = true
 	m.Update(streamDelta{text: "Hel"})
 	m.Update(streamDelta{text: "lo "})
 	m.Update(streamDelta{text: "world"})
-	if got := m.scroll; !strings.Contains(got, "hi\nHello world") {
-		t.Errorf("scroll = %q, want streamed tokens on one line", got)
+	if got := m.reply.String(); got != "Hello world" {
+		t.Errorf("reply = %q, want streamed tokens concatenated", got)
+	}
+	v := m.render()
+	if !strings.Contains(v, "Hello world") {
+		t.Errorf("live view missing the streaming reply:\n%s", v)
+	}
+	rows := strings.Split(strings.TrimSuffix(v, "\n"), "\n")
+	hits := 0
+	for _, r := range rows {
+		if strings.Contains(stripANSI(r), "Hello world") {
+			hits++
+		}
+	}
+	if hits != 1 {
+		t.Errorf("streamed reply spans %d rows, want 1 (one paragraph row)", hits)
+	}
+}
+
+// TestTUIStreamMarkdownLive: while a turn streams, the reply renders as
+// markdown below the committed scrollback — a partial fenced block already
+// shows as a code box, so the live view never looks broken.
+func TestTUIStreamMarkdownLive(t *testing.T) {
+	m, _ := tuiHarness(t, nil, "")
+	m.height, m.width = 24, 80
+	m.appendLine(renderUserLine("hi"))
+	m.busy = true
+	m.Update(streamDelta{text: "```go\nfmt.Println"})
+	v := m.View().Content
+	for _, want := range []string{"─ go ", "fmt.Println", "│"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("live markdown view missing %q:\n%s", want, v)
+		}
+	}
+}
+
+// TestTUIStreamCommitOnDone: on streamDone the live markdown view is
+// committed to the scrollback as rendered rows (bold styled, code boxed) and
+// the live view empties.
+func TestTUIStreamCommitOnDone(t *testing.T) {
+	m, _ := tuiHarness(t, nil, "")
+	m.height, m.width = 24, 80
+	m.busy = true
+	m.Update(streamDelta{text: "**bold** move\n\n```go\nfoo\n```\n"})
+	m.Update(streamDone{convID: "sess-1:2"})
+	if m.busy {
+		t.Error("turn should finish after streamDone")
+	}
+	if !strings.Contains(m.scroll, ansiBold+"bold"+ansiReset) {
+		t.Errorf("committed scrollback missing rendered markdown:\n%q", m.scroll)
+	}
+	if !strings.Contains(m.scroll, "─ go ") {
+		t.Errorf("committed scrollback missing the code box:\n%q", m.scroll)
+	}
+	if len(m.activeTurnRows()) != 0 {
+		t.Error("live view should be empty after commit")
+	}
+	// The raw reply is what a transcript would save; the scroll got rows.
+	if !strings.Contains(m.reply.String(), "**bold** move") {
+		t.Errorf("reply buffer should keep the raw markdown:\n%q", m.reply.String())
+	}
+}
+
+// TestTUISpinner: while busy a pulsing accent dot renders on its own row and
+// advances on spinner ticks; idle views show no spinner.
+func TestTUISpinner(t *testing.T) {
+	m, _ := tuiHarness(t, nil, "")
+	m.height, m.width = 24, 80
+	m.busy = true
+	if got, want := m.outputRows(), m.height-1-1-m.inputHeight()-1; got != want {
+		t.Errorf("busy outputRows = %d, want %d (one row reserved for the spinner)", got, want)
+	}
+	if !strings.Contains(m.render(), ansiAccent+spinnerFrames[0]+ansiReset) {
+		t.Errorf("busy view missing the spinner frame:\n%s", m.render())
+	}
+	m.Update(spinnerTickMsg{})
+	if m.spin != 1 {
+		t.Errorf("spinner frame = %d, want 1 after a tick", m.spin)
+	}
+	if !strings.Contains(m.render(), ansiAccent+spinnerFrames[1]+ansiReset) {
+		t.Errorf("busy view missing the advanced frame:\n%s", m.render())
+	}
+	// A tick for a finished turn stops the animation.
+	m.busy = false
+	m.Update(spinnerTickMsg{})
+	idle := m.render()
+	for _, f := range spinnerFrames {
+		if strings.Contains(idle, ansiAccent+f+ansiReset) {
+			t.Errorf("idle view should not show a spinner:\n%s", idle)
+		}
+	}
+}
+
+// TestTUITurnMarkdownEndToEnd: a real turn's reply (bold, fenced code) is
+// committed to the scrollback as rendered markdown rows.
+func TestTUITurnMarkdownEndToEnd(t *testing.T) {
+	m, _ := tuiHarness(t, []string{completionSSE(t, 2, "**done**\n\n```go\nx := 1\n```\n")}, "")
+	m.height, m.width = 24, 80
+	m.input.SetValue("hi")
+	m.Update(press(tea.KeyEnter))
+	if !m.busy {
+		t.Fatal("submit should start a turn")
+	}
+	pumpTUI(m)
+	if m.busy {
+		t.Fatal("turn should finish")
+	}
+	if !strings.Contains(m.scroll, ansiBold+"done"+ansiReset) {
+		t.Errorf("scroll missing styled reply:\n%q", m.scroll)
+	}
+	if !strings.Contains(m.scroll, "─ go ") || !strings.Contains(m.scroll, "x := 1") {
+		t.Errorf("scroll missing the code box:\n%q", m.scroll)
 	}
 }
 
@@ -102,6 +215,7 @@ func TestTUIViewLayout(t *testing.T) {
 	m, _ := tuiHarness(t, nil, "")
 	m.height, m.width = 24, 80
 	m.appendLine(renderUserLine("hi"))
+	m.busy = true // a live turn renders from m.reply
 	m.Update(streamDelta{text: "Hello"})
 	v := m.View().Content
 	for _, want := range []string{"hi", "Hello"} {
@@ -766,19 +880,24 @@ func TestTUIHistoryDraftPreserved(t *testing.T) {
 }
 
 // TestTUIRenderHistory: past messages render in message-id order, user lines
-// styled violet, assistant replies plain, empty messages skipped.
+// styled violet, assistant replies as markdown, empty messages skipped.
 func TestTUIRenderHistory(t *testing.T) {
 	hist := []deepseek.HistoryMessage{
 		{MessageID: 2, Role: "ASSISTANT", Content: "Hello back"},
 		{MessageID: 1, Role: "USER", Content: "Hi"},
 	}
-	got := renderHistory(hist)
+	got := renderHistory(ui{color: true}, hist)
 	u := strings.Index(got, "\x1b[38;2;107;80;255mHi\x1b[0m")
 	a := strings.Index(got, "Hello back")
 	if u < 0 || a < 0 || u > a {
 		t.Errorf("history rendered out of order (user=%d assistant=%d):\n%q", u, a, got)
 	}
-	if got2 := renderHistory([]deepseek.HistoryMessage{{MessageID: 1, Role: "USER", Content: ""}}); got2 != "" {
+	// Assistant history renders as markdown (a heading picks up the accent).
+	md := renderHistory(ui{color: true}, []deepseek.HistoryMessage{{MessageID: 1, Role: "ASSISTANT", Content: "## Section"}})
+	if !strings.Contains(md, ansiBold+ansiAccent+"Section"+ansiReset) {
+		t.Errorf("assistant history not markdown-rendered:\n%q", md)
+	}
+	if got2 := renderHistory(ui{color: true}, []deepseek.HistoryMessage{{MessageID: 1, Role: "USER", Content: ""}}); got2 != "" {
 		t.Errorf("empty history = %q, want empty", got2)
 	}
 }

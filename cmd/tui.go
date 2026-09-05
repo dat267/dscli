@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -50,10 +51,11 @@ type tuiModel struct {
 	draft      string       // input stashed while recalling history
 	loaded     []loadedFile // <file>/<dir> blocks stacked by /file, sent with the next message
 
-	// reply accumulates the streamed assistant text of the current turn so it
-	// can be saved to the session transcript when the turn finishes. It is
-	// written from the turn goroutine and read only after streamDone (the
-	// channel send establishes the happens-before edge).
+	// reply accumulates the streamed assistant text of the current turn: it
+	// is rendered live as markdown while the turn runs (activeTurnRows),
+	// committed to the scrollback on streamDone, and saved raw to the session
+	// transcript. It is written only from Update (the streamDelta case), so
+	// no cross-goroutine handoff is needed.
 	reply strings.Builder
 	// lastPartial keeps the text of the most recent filtered reply so /resume
 	// can continue it; cleared by later successful turns and /new.
@@ -62,6 +64,9 @@ type tuiModel struct {
 	busy     bool
 	cancel   context.CancelFunc
 	streamCh chan tea.Msg
+	// spin is the current frame of the working indicator shown while a turn
+	// runs; spinnerTickMsg advances it.
+	spin int
 	// interrupted is true from the moment Ctrl+C cancels an in-flight turn
 	// until that turn's streamDone arrives; it selects the "interrupted" note
 	// over the error line.
@@ -83,6 +88,19 @@ type streamDone struct {
 	convID   string
 	sources  []deepseek.Source
 	filtered bool
+}
+
+// spinnerTickMsg advances the pulsing working indicator while a turn runs;
+// stream deltas alone cannot animate it (the model may think for seconds
+// between deltas).
+type spinnerTickMsg struct{}
+
+// spinnerFrames is the working indicator's pulse.
+var spinnerFrames = [...]string{"·", "•", "●", "•"}
+
+// spinnerTick schedules the next working-indicator frame.
+func spinnerTick() tea.Cmd {
+	return tea.Tick(130*time.Millisecond, func(time.Time) tea.Msg { return spinnerTickMsg{} })
 }
 
 func newTUIModel(chat *ChatCmd, client *deepseek.Client, conversation string, trusted bool) *tuiModel {
@@ -184,7 +202,6 @@ func (m *tuiModel) startTurn(prompt string) tea.Cmd {
 	m.streamCh = make(chan tea.Msg, 128)
 	ch := m.chat
 	ch.answer = func(d string) error {
-		m.reply.WriteString(d)
 		m.streamCh <- streamDelta{d}
 		return nil
 	}
@@ -215,7 +232,7 @@ func (m *tuiModel) startTurn(prompt string) tea.Cmd {
 		}
 		m.streamCh <- streamDone{err: err, convID: convID, sources: sources, filtered: filtered}
 	}()
-	return pump(m.streamCh)
+	return tea.Batch(pump(m.streamCh), spinnerTick())
 }
 
 // doTurn runs one user message, mirroring the scanner REPL.
@@ -268,8 +285,17 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.handleKey(msg)
 	case streamDelta:
-		m.appendText(msg.text)
+		// The turn's reply accumulates in m.reply and is rendered live as
+		// markdown below the committed scrollback (activeTurnRows); it is
+		// committed to the scroll on streamDone.
+		m.reply.WriteString(msg.text)
 		return m, pump(m.streamCh)
+	case spinnerTickMsg:
+		if !m.busy {
+			return m, nil
+		}
+		m.spin = (m.spin + 1) % len(spinnerFrames)
+		return m, spinnerTick()
 	case streamNote:
 		// System notes (e.g. the filtered reply note) render dimmed grey so
 		// they read as side notes rather than the assistant's reply.
@@ -303,6 +329,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.lastPartial = ""
 			}
+			m.commitReply()
 			m.renderSources(msg.sources)
 			m.appendLine("")
 		}
@@ -564,14 +591,19 @@ func loadHistoryInto(ctx context.Context, m *tuiModel, client *deepseek.Client, 
 		m.scroll = m.u.note("note: could not load conversation history: "+err.Error()) + "\n"
 		return
 	}
-	m.scroll = renderHistory(hist)
+	m.scroll = renderHistory(m.u, hist)
 	m.trimScroll()
 }
 
 // renderHistory builds the scrollback text for a resumed conversation: user
 // lines styled violet, assistant replies plain, one blank line between turns,
 // in message-id order.
-func renderHistory(hist []deepseek.HistoryMessage) string {
+// renderHistory builds the scrollback text for a resumed conversation: user
+// lines styled violet, assistant replies rendered as markdown, one blank
+// line between turns, in message-id order. The width is fixed at 80 (a
+// fallback for the pre-resize window); the committed rows are re-wrapped by
+// the scroll renderer once a real terminal width is known.
+func renderHistory(u ui, hist []deepseek.HistoryMessage) string {
 	sort.Slice(hist, func(i, j int) bool { return hist[i].MessageID < hist[j].MessageID })
 	var b strings.Builder
 	for _, msg := range hist {
@@ -584,10 +616,13 @@ func renderHistory(hist []deepseek.HistoryMessage) string {
 		}
 		if msg.Role == "USER" {
 			b.WriteString(renderUserLine(text))
-		} else {
-			b.WriteString(text)
+			b.WriteString("\n")
+			continue
 		}
-		b.WriteString("\n")
+		for _, row := range renderMarkdown(u, text, 80) {
+			b.WriteString(row)
+			b.WriteString("\n")
+		}
 	}
 	return b.String()
 }
@@ -1003,10 +1038,13 @@ func (m *tuiModel) newSession() {
 }
 
 // outputRows returns how many scrollback lines fit between the status line
-// and the separator+input (plus any suggestion rows).
+// and the separator+input (plus any suggestion or working-indicator rows).
 func (m *tuiModel) outputRows() int {
 	// +1 for the separator row between scrollback and input
 	rows := m.height - 1 - 1 - m.inputHeight() - m.suggestionRows() // 1 = status line, 1 = separator
+	if m.busy {
+		rows-- // the working-indicator row
+	}
 	if rows < 0 {
 		return 0
 	}
@@ -1075,7 +1113,33 @@ func (m *tuiModel) scrollBottom() {
 }
 
 func (m *tuiModel) scrollLines() int {
-	return len(m.wrappedRows())
+	return len(m.wrappedRows()) + len(m.activeTurnRows())
+}
+
+// activeTurnRows renders the streaming turn's accumulated reply as markdown
+// — re-rendered every frame so a partial reply (an unclosed code fence, a
+// half-written list) always displays cleanly. On streamDone the rows are
+// committed to the scrollback (commitReply).
+func (m *tuiModel) activeTurnRows() []string {
+	if !m.busy || m.reply.Len() == 0 || m.width < 1 {
+		return nil
+	}
+	return renderMarkdown(m.u, m.reply.String(), m.width)
+}
+
+// commitReply moves the finished turn's reply from the live markdown view
+// into the scrollback, rendered to rows at the current width.
+func (m *tuiModel) commitReply() {
+	if m.reply.Len() == 0 {
+		return
+	}
+	if m.width < 1 {
+		m.appendText(m.reply.String())
+		return
+	}
+	for _, row := range renderMarkdown(m.u, m.reply.String(), m.width) {
+		m.appendLine(row)
+	}
 }
 
 // wrappedRows returns the scrollback split into rows that fit the pane width,
@@ -1166,8 +1230,11 @@ func (m *tuiModel) render() string {
 	var b strings.Builder
 
 	// 1. Chat scrollback (top). Rendered to exactly `avail` rows — blank lines
-	// pad a short conversation so the input box is pinned to the bottom.
+	// pad a short conversation so the input box is pinned to the bottom. The
+	// rows are the committed scrollback plus the streaming turn's live
+	// markdown view.
 	rows := m.wrappedRows()
+	rows = append(rows, m.activeTurnRows()...)
 	avail := m.outputRows()
 	rendered := 0
 	for i := m.viewTop; i < len(rows) && rendered < avail; i++ {
@@ -1187,17 +1254,23 @@ func (m *tuiModel) render() string {
 		b.WriteString("\n")
 	}
 
-	// 3. Slash-command menu sits just above the input.
+	// 3. Working indicator: a pulsing dot while a turn runs.
+	if m.busy {
+		b.WriteString(m.u.accent(spinnerFrames[m.spin]))
+		b.WriteString("\n")
+	}
+
+	// 4. Slash-command menu sits just above the input.
 	if len(m.suggestions) > 0 {
 		b.WriteString(m.renderSuggestions())
 		b.WriteString("\n")
 	}
 
-	// 4. Input at the bottom (open textarea, no leading prompt glyph).
+	// 5. Input at the bottom (open textarea, no leading prompt glyph).
 	b.WriteString(m.input.render(max(0, m.width)))
 	b.WriteString("\n")
 
-	// 5. Status line below the input (m.status is already dimmed; only
+	// 6. Status line below the input (m.status is already dimmed; only
 	// truncate to the terminal width so it never wraps). While a turn streams
 	// a live suffix tells the user it can be interrupted.
 	status := m.status
@@ -1585,7 +1658,6 @@ func (in *tuiInput) End() { in.col = len(in.lines[in.row]) }
 // the mint accent (Guac). Empty means no prompt is drawn and the input text
 // starts at the left edge of the terminal.
 const inputPrompt = ""
-const inputPromptAnsi = "\x1b[38;2;18;199;143m"
 
 // render draws the input into a fixed-height (maxInputLines) textarea: the
 // text wraps at boxW display columns, short lines are padded so the input
@@ -1651,7 +1723,7 @@ func (in *tuiInput) render(width int) string {
 			s = applyCursor(s, cursorCol, overChar)
 		}
 		if i == start && inputPrompt != "" {
-			s = inputPromptAnsi + inputPrompt + ansiReset + s
+			s = ansiAccent + inputPrompt + ansiReset + s
 		} else {
 			s = strings.Repeat(" ", promptW) + s
 		}
