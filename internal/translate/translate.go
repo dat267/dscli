@@ -361,11 +361,17 @@ func Translate(ctx context.Context, client *deepseek.Client, sessionID string, c
 	}
 
 	// The chunk-sizing strategy is the only difference between the modes:
-	// adaptive probe/grow/shrink for Instant, one fixed size for DeepThink.
+	// summarize covers the whole file per reply (its output is short, so the
+	// input cap never binds); one fixed size for DeepThink; adaptive
+	// probe/grow/shrink for Instant translation, whose output tracks the
+	// input size.
 	var sizer chunkSizer
-	if opts.Thinking {
+	switch {
+	case opts.Task == TaskSummarize:
+		sizer = newSummarizeSizer(maxChunk)
+	case opts.Thinking:
 		sizer = newFixedSizer(maxChunk)
-	} else {
+	default:
 		sizer = newAdaptiveSizer(maxChunk)
 	}
 

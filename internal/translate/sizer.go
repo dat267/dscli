@@ -73,6 +73,19 @@ type fixedSizer struct {
 	chunkBytes int
 }
 
+// newSummarizeSizer is the summarize strategy: the reply is far shorter
+// than its input, so there is no output-budget pressure on the input size —
+// start at the cap and cover the whole file in one reply when possible.
+// Truncation still learns and shrinks like the adaptive sizer.
+func newSummarizeSizer(maxChunk int) *adaptiveSizer {
+	return &adaptiveSizer{
+		chunkBytes: maxChunk,
+		maxChunk:   maxChunk,
+		capBytes:   defaultCapBytes,
+		growOK:     true,
+	}
+}
+
 func newFixedSizer(maxChunk int) *fixedSizer {
 	n := thinkingChunkBytes
 	if n > maxChunk {

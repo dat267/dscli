@@ -143,6 +143,30 @@ func TestSummarizeSingleChunk(t *testing.T) {
 	}
 }
 
+// TestSummarizeProbesAtMax: a summary is far shorter than its input, so the
+// sizer starts at the chunk cap instead of the small translate probe — a
+// file within the cap is one reply, no combine pass.
+func TestSummarizeProbesAtMax(t *testing.T) {
+	srv, calls, bodies := fakeSummarizeServer(t, func(n int) (int, string) {
+		return 200, sseReply(t, "A terse summary.\n")
+	})
+	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
+	content := strings.Repeat("word ", 6*1024) // 24 KiB, over the 8 KiB probe
+	text, _, err := Summarize(context.Background(), client, "sess-1", []byte(content), "text", Options{})
+	if err != nil {
+		t.Fatalf("Summarize: %v", err)
+	}
+	if text != "A terse summary.\n" {
+		t.Errorf("summary = %q", text)
+	}
+	if *calls != 1 {
+		t.Errorf("completions = %d, want 1 (whole file in one reply)", *calls)
+	}
+	if !strings.Contains((*bodies)[0], "Summarize the following") {
+		t.Errorf("summarize prompt not sent:\n%s", (*bodies)[0])
+	}
+}
+
 func TestSummarizeMultiChunkCombines(t *testing.T) {
 	// 24 KiB with no newlines: the 8 KiB probe chunk, then one 16 KiB chunk
 	// (ChunkBytes caps the adaptive growth), then a combine pass.
