@@ -32,7 +32,7 @@ type tuiModel struct {
 	thinking     bool
 	search       bool
 	cfgPath      string
-	noPersist    bool
+	persist      bool
 	conversation string
 	trusted      bool
 	firstTurn    bool
@@ -111,7 +111,7 @@ func newTUIModel(chat *ChatCmd, client *deepseek.Client, conversation string, tr
 		thinking:     chat.Thinking,
 		search:       chat.Search,
 		cfgPath:      chat.cfgPath,
-		noPersist:    chat.NoPersist,
+		persist:      chat.Persist,
 		conversation: conversation,
 		trusted:      trusted,
 		firstTurn:    true,
@@ -128,7 +128,7 @@ func (m *tuiModel) refreshStatus() {
 	mode := "ephemeral"
 	if m.chat.Conversation != "" {
 		mode = "continuing"
-	} else if !m.noPersist && m.cfgPath != "" {
+	} else if m.persist && m.cfgPath != "" {
 		mode = "persisted"
 	}
 	conv := ""
@@ -313,8 +313,8 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendLine("")
 		} else {
 			m.conversation = msg.convID
-			persistConversation(m.cfgPath, m.noPersist, msg.convID)
-			if transcriptsEnabled(m.cfgPath, m.noPersist, m.chat.NoTranscript) {
+			persistConversation(m.cfgPath, m.persist, msg.convID)
+			if transcriptsEnabled(m.cfgPath, m.persist, m.chat.NoTranscript) {
 				appendTranscript(m.cfgPath, msg.convID, "assistant", m.reply.String())
 			}
 			if msg.filtered {
@@ -505,7 +505,7 @@ func (m *tuiModel) quitCleanup() {
 	if m.cancel != nil {
 		m.cancel()
 	}
-	if m.noPersist && len(m.owned) > 0 {
+	if m.persist && len(m.owned) > 0 {
 		if err := m.client.DeleteSessions(context.Background(), m.owned); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to delete session(s): %v\n", err)
 		}
@@ -545,7 +545,7 @@ func (m *tuiModel) handleSubmit() (tea.Model, tea.Cmd) {
 	m.addHistory(line)
 	m.appendLine(renderUserLine(line))
 	m.appendLine("") // breathing room before the reply streams
-	if transcriptsEnabled(m.cfgPath, m.noPersist, m.chat.NoTranscript) {
+	if transcriptsEnabled(m.cfgPath, m.persist, m.chat.NoTranscript) {
 		appendTranscript(m.cfgPath, m.conversation, "user", line)
 	}
 	prompt := line
@@ -805,7 +805,7 @@ func (m *tuiModel) handleCommand(line string) (tea.Model, tea.Cmd) {
 		shown := strings.TrimSpace(line)
 		m.appendLine(renderUserLine(shown))
 		m.appendLine("") // breathing room
-		if transcriptsEnabled(m.cfgPath, m.noPersist, m.chat.NoTranscript) {
+		if transcriptsEnabled(m.cfgPath, m.persist, m.chat.NoTranscript) {
 			appendTranscript(m.cfgPath, m.conversation, "user", shown)
 		}
 		m.loaded = nil
@@ -1042,7 +1042,7 @@ func (m *tuiModel) newSession() {
 	}
 	m.conversation = sid
 	m.trusted = false
-	if m.noPersist || m.cfgPath == "" {
+	if !m.persist || m.cfgPath == "" {
 		m.owned = append(m.owned, sid)
 	} else if err := saveSession(m.cfgPath, sid); err != nil {
 		m.appendLine(m.u.red("warning: could not save session: " + err.Error()))

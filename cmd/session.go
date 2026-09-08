@@ -61,13 +61,14 @@ func clearSession(cfgPath string) error {
 
 // resolveDefaultSession returns the session id to use for one run.
 //
-// With noPersist a fresh session is created and the returned cleanup deletes
-// it when the run ends (the pre-persistence behaviour). Otherwise the session
-// saved in the config is reused; when none is saved, a fresh one is created
-// and saved as the new default. trusted reports whether the id came from the
-// config, which makes it eligible for stale-session recovery.
-func resolveDefaultSession(ctx context.Context, client *deepseek.Client, cfgPath string, noPersist bool) (sessionID string, trusted bool, cleanup func(), err error) {
-	if noPersist {
+// Unless persist is set (explicit --persist) nothing is reused or saved: a
+// fresh session is created and the returned cleanup deletes it when the run
+// ends (nothing survives the run). With --persist the session saved in the
+// config is reused; when none is saved, a fresh one is created and saved as
+// the new default. trusted reports whether the id came from the config,
+// which makes it eligible for stale-session recovery.
+func resolveDefaultSession(ctx context.Context, client *deepseek.Client, cfgPath string, persist bool) (sessionID string, trusted bool, cleanup func(), err error) {
+	if !persist {
 		sid, err := client.CreateChatSession(ctx)
 		if err != nil {
 			return "", false, nil, err
@@ -92,12 +93,11 @@ func resolveDefaultSession(ctx context.Context, client *deepseek.Client, cfgPath
 }
 
 // persistConversation saves the advanced conversation position (session:message)
-// after a successful turn, unless the run is ephemeral (--no-persist). Without
-// it the saved value stays the bare session id and every later run resumes the
-// thread from its root instead of the last message. A no-op when cfgPath is
+// after a successful turn, but only for explicitly persisted runs (--persist) —
+// ephemeral runs leave nothing behind. A no-op when cfgPath is
 // empty (tests) or convID is empty.
-func persistConversation(cfgPath string, noPersist bool, convID string) {
-	if noPersist || cfgPath == "" || convID == "" {
+func persistConversation(cfgPath string, persist bool, convID string) {
+	if !persist || cfgPath == "" || convID == "" {
 		return
 	}
 	if err := saveSession(cfgPath, convID); err != nil {

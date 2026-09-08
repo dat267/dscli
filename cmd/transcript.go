@@ -21,11 +21,11 @@ type transcriptEntry struct {
 	Text string `json:"text"`
 }
 
-// transcriptsEnabled reports whether session texts should be saved: the run is
-// not ephemeral (--no-persist) and the config (data) directory is known, so
-// there is a stable place to write them.
-func transcriptsEnabled(cfgPath string, noPersist, noTranscript bool) bool {
-	return cfgPath != "" && !noPersist && !noTranscript
+// transcriptsEnabled reports whether session texts should be saved: only for
+// explicitly persisted runs (--persist) with a known config (data) directory,
+// and not opted out via --no-transcript.
+func transcriptsEnabled(cfgPath string, persist, noTranscript bool) bool {
+	return cfgPath != "" && persist && !noTranscript
 }
 
 // transcriptPath returns the JSONL transcript path for a session: the

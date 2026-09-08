@@ -37,7 +37,7 @@ type ImproveWritingCmd struct {
 
 	Parallel bool `short:"p" help:"Improve multiple files concurrently (each in its own session). No shared context between files — terminology may drift"`
 
-	NoPersist bool `help:"Do not persist or reuse the default session; the session is deleted when the run ends (default: on)" default:"true"`
+	Persist bool `help:"Persist and reuse the default session across runs, and save transcripts (default: ephemeral — the session is deleted when the run ends)"`
 
 	// clientBase overrides the API base URL for tests.
 	clientBase string
@@ -101,7 +101,7 @@ func (c *ImproveWritingCmd) improveFile(ctx context.Context, client *deepseek.Cl
 		return fmt.Errorf("load %s: %w", file, err)
 	}
 
-	sessionID, trusted, cleanup, err := resolveDefaultSession(ctx, client, c.cfgPath, c.NoPersist)
+	sessionID, trusted, cleanup, err := resolveDefaultSession(ctx, client, c.cfgPath, c.Persist)
 	if err != nil {
 		return fmt.Errorf("create session: %w", err)
 	}
@@ -129,7 +129,7 @@ func (c *ImproveWritingCmd) improveFile(ctx context.Context, client *deepseek.Cl
 	if err != nil {
 		return err
 	}
-	persistConversation(c.cfgPath, c.NoPersist, convID)
+	persistConversation(c.cfgPath, c.Persist, convID)
 	if err := os.WriteFile(file, []byte(result), 0644); err != nil {
 		return fmt.Errorf("write %s: %w", file, err)
 	}

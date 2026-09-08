@@ -12,24 +12,25 @@ import (
 	"github.com/dat267/dscli/internal/deepseek"
 )
 
-// TestTranscriptsEnabled: transcripts are saved when the config (data)
-// directory is known and the run is neither ephemeral nor opted out.
+// TestTranscriptsEnabled: transcripts are saved only for explicitly
+// persisted runs (opt-in) with a known config (data) directory that have not
+// opted out via --no-transcript.
 func TestTranscriptsEnabled(t *testing.T) {
 	cases := []struct {
 		cfgPath      string
-		noPersist    bool
+		persist      bool
 		noTranscript bool
 		want         bool
 	}{
-		{"/x/cfg.json", false, false, true},
-		{"", false, false, false},           // no data dir
-		{"/x/cfg.json", true, false, false}, // ephemeral run leaves nothing
-		{"/x/cfg.json", false, true, false}, // explicit opt-out
+		{"/x/cfg.json", false, false, false}, // ephemeral by default
+		{"", true, false, false},             // no data dir
+		{"/x/cfg.json", true, false, true},   // explicit --persist
+		{"/x/cfg.json", true, true, false},   // --persist --no-transcript
 	}
 	for _, tc := range cases {
-		if got := transcriptsEnabled(tc.cfgPath, tc.noPersist, tc.noTranscript); got != tc.want {
+		if got := transcriptsEnabled(tc.cfgPath, tc.persist, tc.noTranscript); got != tc.want {
 			t.Errorf("transcriptsEnabled(%q, %v, %v) = %v, want %v",
-				tc.cfgPath, tc.noPersist, tc.noTranscript, got, tc.want)
+				tc.cfgPath, tc.persist, tc.noTranscript, got, tc.want)
 		}
 	}
 }
@@ -96,7 +97,7 @@ func TestChatAskTranscript(t *testing.T) {
 	srv, _ := fakeDeepSeekServerWith(t, []string{completionSSE(t, 2, "Hello back")})
 	defer srv.Close()
 	cfgPath := filepath.Join(t.TempDir(), "dscli.json")
-	cmd := &ChatCmd{Prompt: []string{"hi"}, Token: "tok", cfgPath: cfgPath, clientBase: srv.URL}
+	cmd := &ChatCmd{Persist: true, Prompt: []string{"hi"}, Token: "tok", cfgPath: cfgPath, clientBase: srv.URL}
 	captureStdout(t, func() {
 		if err := cmd.Run(nil, context.Background()); err != nil {
 			t.Fatalf("chat: %v", err)
@@ -112,15 +113,15 @@ func TestChatAskTranscript(t *testing.T) {
 	}
 }
 
-// TestChatAskTranscriptDisabled: with --no-persist (ephemeral) no transcript
-// is written; with --no-transcript the folder never appears.
+// TestChatAskTranscriptDisabled: ephemeral runs (the default) write no
+// transcript; --persist with --no-transcript never creates the folder either.
 func TestChatAskTranscriptDisabled(t *testing.T) {
 	for _, tc := range []struct {
-		name                    string
-		noPersist, noTranscript bool
+		name                  string
+		persist, noTranscript bool
 	}{
-		{"no-persist", true, false},
-		{"no-transcript", false, true},
+		{"ephemeral", false, false},
+		{"persist-no-transcript", true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, _ := fakeDeepSeekServerWith(t, []string{completionSSE(t, 2, "ok")})
@@ -128,7 +129,7 @@ func TestChatAskTranscriptDisabled(t *testing.T) {
 			dir := t.TempDir()
 			cfgPath := filepath.Join(dir, "dscli.json")
 			cmd := &ChatCmd{Prompt: []string{"hi"}, Token: "tok", cfgPath: cfgPath,
-				NoPersist: tc.noPersist, NoTranscript: tc.noTranscript, clientBase: srv.URL}
+				Persist: tc.persist, NoTranscript: tc.noTranscript, clientBase: srv.URL}
 			captureStdout(t, func() {
 				if err := cmd.Run(nil, context.Background()); err != nil {
 					t.Fatalf("chat: %v", err)
@@ -150,7 +151,7 @@ func TestReplTranscript(t *testing.T) {
 	defer srv.Close()
 	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
 	cfgPath := filepath.Join(t.TempDir(), "dscli.json")
-	cmd := &ChatCmd{cfgPath: cfgPath}
+	cmd := &ChatCmd{Persist: true, cfgPath: cfgPath}
 
 	withStdin(t, "first\nsecond\n/quit\n", func() {
 		captureStdout(t, func() {

@@ -31,7 +31,7 @@ type ChatCmd struct {
 	Cookie    string `env:"DS_COOKIE" help:"DeepSeek ds_session_id cookie value. Alternatively: config set cookie"`
 	UserAgent string `env:"DS_USER_AGENT" help:"Browser user-agent; some deployments reject non-browser UAs"`
 
-	NoPersist    bool   `help:"Do not persist or reuse the default session; the session is deleted when the run ends"`
+	Persist      bool   `help:"Persist and reuse the default session across runs, and save transcripts (default: ephemeral — the session is deleted when the run ends)"`
 	NoTranscript bool   `help:"Do not save session texts (transcripts) next to the config file"`
 	Workdir      string `help:"Working directory for /file loads" default:"."`
 
@@ -85,7 +85,7 @@ func (c *ChatCmd) newClient() *deepseek.Client {
 // transcriptsOn reports whether this run saves session texts, given the
 // resolved config path and flags.
 func (c *ChatCmd) transcriptsOn() bool {
-	return transcriptsEnabled(c.cfgPath, c.NoPersist, c.NoTranscript)
+	return transcriptsEnabled(c.cfgPath, c.Persist, c.NoTranscript)
 }
 
 // oneTurn asks one question in the given conversation, feeding every reply
@@ -244,7 +244,7 @@ func dirListing(dir string) string {
 
 // ask answers a single question and exits. By default it resumes the
 // persisted default session (creating and saving one on first use); with
-// --no-persist it runs in a fresh session that is deleted afterwards.
+// without --persist it runs in a fresh session that is deleted afterwards.
 func (c *ChatCmd) ask(ctx context.Context, prompt string) error {
 	client := c.newClient()
 	var sources []deepseek.Source
@@ -253,7 +253,7 @@ func (c *ChatCmd) ask(ctx context.Context, prompt string) error {
 	var cleanup func()
 	if conversation == "" {
 		var err error
-		conversation, trusted, cleanup, err = resolveDefaultSession(ctx, client, c.cfgPath, c.NoPersist)
+		conversation, trusted, cleanup, err = resolveDefaultSession(ctx, client, c.cfgPath, c.Persist)
 		if err != nil {
 			return err
 		}
@@ -283,7 +283,7 @@ func (c *ChatCmd) ask(ctx context.Context, prompt string) error {
 	if c.transcriptsOn() {
 		appendTranscript(c.cfgPath, convID, "assistant", replyBuf.String())
 	}
-	persistConversation(c.cfgPath, c.NoPersist, convID)
+	persistConversation(c.cfgPath, c.Persist, convID)
 	if c.JSONOut {
 		out := map[string]any{"done": true, "conversation_id": convID}
 		if len(sources) > 0 {
@@ -310,7 +310,7 @@ func (c *ChatCmd) repl(ctx context.Context) error {
 	if c.Conversation != "" {
 		return c.replLoop(ctx, client, c.Conversation, owned, false)
 	}
-	sessionID, trusted, cleanup, err := resolveDefaultSession(ctx, client, c.cfgPath, c.NoPersist)
+	sessionID, trusted, cleanup, err := resolveDefaultSession(ctx, client, c.cfgPath, c.Persist)
 	if err != nil {
 		return fmt.Errorf("create chat session: %w", err)
 	}
@@ -395,7 +395,7 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 	// (the saved id may no longer exist server-side); fresh and ephemeral
 	// sessions never are.
 	firstTurn := trusted
-	persist := !c.NoPersist && c.cfgPath != ""
+	persist := c.Persist && c.cfgPath != ""
 
 	deleteOwned := func() {
 		if len(owned) == 0 {
@@ -639,7 +639,7 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 		fmt.Fprintln(os.Stdout) // blank line before the next prompt
 		renderSources(os.Stderr, sources)
 		conversation = convID
-		persistConversation(c.cfgPath, c.NoPersist, conversation)
+		persistConversation(c.cfgPath, c.Persist, conversation)
 		turns++
 	}
 	if err := scanner.Err(); err != nil {

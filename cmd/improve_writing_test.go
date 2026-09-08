@@ -43,7 +43,7 @@ func TestImproveWritingPlainMD(t *testing.T) {
 	}
 	srv, rec := fakeDeepSeekServerWith(t, []string{completionSSE(t, 2, "Bonjour le monde\n")})
 	defer srv.Close()
-	cmd := &ImproveWritingCmd{NoPersist: true, InPlace: true, File: []string{in}, Token: "tok", clientBase: srv.URL}
+	cmd := &ImproveWritingCmd{InPlace: true, File: []string{in}, Token: "tok", clientBase: srv.URL}
 	if err := cmd.Run(nil, context.Background()); err != nil {
 		t.Fatalf("improve-writing: %v", err)
 	}

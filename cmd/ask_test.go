@@ -13,7 +13,7 @@ func TestAskPlain(t *testing.T) {
 	srv, rec := fakeDeepSeekServerWith(t, []string{completionSSE(t, 2, "Hello back")})
 	defer srv.Close()
 	cmd := &AskCmd{
-		NoPersist: true, Prompt: []string{"hi"}, Token: "tok", clientBase: srv.URL}
+		Prompt: []string{"hi"}, Token: "tok", clientBase: srv.URL}
 
 	stdout := captureStdout(t, func() {
 		if err := cmd.Run(nil, context.Background()); err != nil {
@@ -45,7 +45,7 @@ func TestAskFromStdin(t *testing.T) {
 	srv, _ := fakeDeepSeekServerWith(t, []string{completionSSE(t, 2, "sum is 3")})
 	defer srv.Close()
 	cmd := &AskCmd{
-		NoPersist: true, Token: "tok", clientBase: srv.URL}
+		Token: "tok", clientBase: srv.URL}
 
 	stdout := captureStdout(t, func() {
 		withStdin(t, "1 + 2\n", func() {
@@ -63,7 +63,7 @@ func TestAskJSONOut(t *testing.T) {
 	srv, _ := fakeDeepSeekServerWith(t, []string{completionSSE(t, 2, "Hi")})
 	defer srv.Close()
 	cmd := &AskCmd{
-		NoPersist: true, Prompt: []string{"hi"}, JSONOut: true, Token: "tok", clientBase: srv.URL}
+		Prompt: []string{"hi"}, JSONOut: true, Token: "tok", clientBase: srv.URL}
 
 	stdout := captureStdout(t, func() {
 		if err := cmd.Run(nil, context.Background()); err != nil {
@@ -81,7 +81,7 @@ func TestAskJSONOut(t *testing.T) {
 
 func TestAskRequiresInput(t *testing.T) {
 	cmd := &AskCmd{
-		NoPersist: true, Token: "tok"}
+		Token: "tok"}
 	err := cmd.Run(nil, context.Background())
 	if err == nil || !strings.Contains(err.Error(), "nothing to ask") {
 		t.Errorf("empty input must error, got %v", err)
@@ -126,7 +126,7 @@ func TestAskSearchSources(t *testing.T) {
 	})
 	defer srv.Close()
 	cmd := &AskCmd{
-		NoPersist: true, Prompt: []string{"gold price"}, Search: true, Token: "tok", clientBase: srv.URL}
+		Prompt: []string{"gold price"}, Search: true, Token: "tok", clientBase: srv.URL}
 
 	var stdout, stderr string
 	stdout = captureStdout(t, func() {
@@ -152,7 +152,7 @@ func TestAskSearchSourcesJSON(t *testing.T) {
 	})
 	defer srv.Close()
 	cmd := &AskCmd{
-		NoPersist: true, Prompt: []string{"x"}, Search: true, JSONOut: true, Token: "tok", clientBase: srv.URL}
+		Prompt: []string{"x"}, Search: true, JSONOut: true, Token: "tok", clientBase: srv.URL}
 
 	stdout := captureStdout(t, func() {
 		if err := cmd.Run(nil, context.Background()); err != nil {

@@ -39,7 +39,7 @@ func TestSummarizePrintsToStdout(t *testing.T) {
 	}
 	srv, _ := fakeDeepSeekServerWith(t, []string{completionSSE(t, 2, "A summary of greetings.\n")})
 	defer srv.Close()
-	cmd := &SummarizeCmd{NoPersist: true, File: []string{in}, Token: "tok", clientBase: srv.URL}
+	cmd := &SummarizeCmd{File: []string{in}, Token: "tok", clientBase: srv.URL}
 	out := captureStdout(t, func() {
 		if err := cmd.Run(nil, context.Background()); err != nil {
 			t.Errorf("summarize: %v", err)
@@ -59,7 +59,7 @@ func TestSummarizeOutputFile(t *testing.T) {
 	}
 	srv, rec := fakeDeepSeekServerWith(t, []string{completionSSE(t, 2, "A summary of greetings.\n")})
 	defer srv.Close()
-	cmd := &SummarizeCmd{NoPersist: true, File: []string{in}, Output: out, Force: true, Token: "tok", clientBase: srv.URL}
+	cmd := &SummarizeCmd{File: []string{in}, Output: out, Force: true, Token: "tok", clientBase: srv.URL}
 	if err := cmd.Run(nil, context.Background()); err != nil {
 		t.Fatalf("summarize -o: %v", err)
 	}

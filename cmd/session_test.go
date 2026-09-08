@@ -14,9 +14,36 @@ import (
 	"github.com/dat267/dscli/internal/deepseek"
 )
 
-// TestSessionPersistenceReused: by default the session is created once, the
-// advanced conversation position (session:message) is saved to the config, and
-// the next run resumes from that exact position instead of the thread root.
+// TestSessionEphemeralByDefault: without an explicit --persist nothing
+// survives a run — the session is created fresh, used, and deleted at the
+// end, and no conversation position is written to the config.
+func TestSessionEphemeralByDefault(t *testing.T) {
+	cfg := filepath.Join(t.TempDir(), "dscli.json")
+	srv, rec := fakeDeepSeekServerWith(t, []string{
+		completionSSE(t, 2, "one"),
+	})
+	defer srv.Close()
+	app := &App{cfgPath: cfg}
+
+	cmd := &AskCmd{Prompt: []string{"first"}, Token: "tok", clientBase: srv.URL}
+	if err := cmd.Run(app, context.Background()); err != nil {
+		t.Fatalf("ask: %v", err)
+	}
+	rec.mu.Lock()
+	creates, deleted := rec.creates, append([]string(nil), rec.deleted...)
+	rec.mu.Unlock()
+	if creates != 1 || len(deleted) != 1 || deleted[0] != "sess-1" {
+		t.Fatalf("creates=%d deleted=%v, want 1 create and sess-1 deleted", creates, deleted)
+	}
+	if got := loadSavedSession(cfg); got != "" {
+		t.Errorf("ephemeral run saved session %q, want nothing", got)
+	}
+}
+
+// TestSessionPersistenceReused: with --persist the session is created once,
+// the advanced conversation position (session:message) is saved to the
+// config, and the next run resumes from that exact position instead of the
+// thread root.
 func TestSessionPersistenceReused(t *testing.T) {
 	cfg := filepath.Join(t.TempDir(), "dscli.json")
 	srv, rec := fakeDeepSeekServerWith(t, []string{
@@ -26,7 +53,7 @@ func TestSessionPersistenceReused(t *testing.T) {
 	defer srv.Close()
 	app := &App{cfgPath: cfg}
 
-	cmd1 := &AskCmd{Prompt: []string{"first"}, Token: "tok", clientBase: srv.URL}
+	cmd1 := &AskCmd{Persist: true, Prompt: []string{"first"}, Token: "tok", clientBase: srv.URL}
 	if err := cmd1.Run(app, context.Background()); err != nil {
 		t.Fatalf("first ask: %v", err)
 	}
@@ -41,7 +68,7 @@ func TestSessionPersistenceReused(t *testing.T) {
 		t.Fatalf("persisted conversation = %q, want sess-1:2", got)
 	}
 
-	cmd2 := &AskCmd{Prompt: []string{"second"}, Token: "tok", clientBase: srv.URL}
+	cmd2 := &AskCmd{Persist: true, Prompt: []string{"second"}, Token: "tok", clientBase: srv.URL}
 	if err := cmd2.Run(app, context.Background()); err != nil {
 		t.Fatalf("second ask: %v", err)
 	}
@@ -110,7 +137,7 @@ func TestSessionStaleRecovered(t *testing.T) {
 	defer srv.Close()
 
 	app := &App{cfgPath: cfg}
-	cmd := &AskCmd{Prompt: []string{"hi"}, Token: "tok", clientBase: srv.URL}
+	cmd := &AskCmd{Persist: true, Prompt: []string{"hi"}, Token: "tok", clientBase: srv.URL}
 	stdout := captureStdout(t, func() {
 		if err := cmd.Run(app, context.Background()); err != nil {
 			t.Fatalf("ask: %v", err)
@@ -144,7 +171,7 @@ func TestSessionStaleRecoveredViaErrorFrame(t *testing.T) {
 	})
 	defer srv.Close()
 	app := &App{cfgPath: cfg}
-	cmd := &AskCmd{Prompt: []string{"hi"}, Token: "tok", clientBase: srv.URL}
+	cmd := &AskCmd{Persist: true, Prompt: []string{"hi"}, Token: "tok", clientBase: srv.URL}
 	stdout := captureStdout(t, func() {
 		if err := cmd.Run(app, context.Background()); err != nil {
 			t.Fatalf("ask: %v", err)
@@ -179,7 +206,7 @@ func TestReplStaleRecovered(t *testing.T) {
 	})
 	defer srv.Close()
 	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
-	cmd := &ChatCmd{cfgPath: cfg}
+	cmd := &ChatCmd{Persist: true, cfgPath: cfg}
 	var stdout, stderr string
 	withStdin(t, "hello\n/exit\n", func() {
 		stdout = captureStdout(t, func() {
@@ -211,7 +238,7 @@ func TestReplPersistedStatusAndNoDelete(t *testing.T) {
 	cfg := filepath.Join(t.TempDir(), "dscli.json")
 	srv, rec := fakeDeepSeekServer(t)
 	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
-	cmd := &ChatCmd{cfgPath: cfg}
+	cmd := &ChatCmd{Persist: true, cfgPath: cfg}
 	var stderr string
 	var runErr error
 	withStdin(t, "/exit\n", func() {
@@ -239,7 +266,7 @@ func TestReplPersistNewSessionSaved(t *testing.T) {
 	cfg := filepath.Join(t.TempDir(), "dscli.json")
 	srv, _ := fakeDeepSeekServer(t)
 	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
-	cmd := &ChatCmd{cfgPath: cfg}
+	cmd := &ChatCmd{Persist: true, cfgPath: cfg}
 	withStdin(t, "hello\n/exit\n", func() {
 		captureStderr(t, func() {
 			_ = cmd.replLoop(context.Background(), client, "", nil, false)

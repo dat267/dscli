@@ -105,7 +105,7 @@ type; replies, tool notes and file-write previews render inside the pane
 instead of stdout:
 
 ```
-DeepSeek · model default · thinking off · search off · persisted
+DeepSeek · model default · thinking off · search off · ephemeral
 
 What is 2+2?
 4
@@ -165,7 +165,8 @@ the next line (`...> `); a lone `\` line inserts a blank line and keeps going,
 and a trailing `\\` sends the line literally.
 
 **Persistence by default.** Launching `dscli chat` without `-c` resumes the
-*persisted default conversation* — the same thread every command uses, saved
+*persisted default conversation* — with `--persist` the same thread every
+command uses, saved
 under `session` in the config file as a `session:message` position. On first
 use a session is created and saved; every later run resumes from the last
 message and re-saves its position, so the conversation carries across
@@ -183,11 +184,14 @@ dscli session delete          # delete it server-side and forget it
 dscli config unset session    # equivalent to `session forget`
 ```
 
-Run with `--no-persist` for the old stateless behaviour: a *fresh* session is
-created per run, kept for its turns, and deleted on close (`/exit`, `/quit`,
-Ctrl-D, or Ctrl-C). If the saved default session no longer exists server-side
-(e.g. deleted in the web UI), the CLI creates a fresh one, saves it, and
-retries once automatically.
+Nothing is persisted by default: each run creates a *fresh* session, keeps it
+for its turns, and deletes it on close (`/exit`, `/quit`, Ctrl-D, or Ctrl-C),
+leaving nothing in the config or the transcripts folder. Run with `--persist`
+to opt in: the session and its conversation position are saved, the next run
+resumes that exact thread, and texts are kept as local transcripts. If a
+persisted default session no longer exists server-side (e.g. deleted in the
+web UI), the CLI creates a fresh one, saves it, and retries once
+automatically.
 
 **Session texts.** Every turn's typed prompt and the streamed reply are
 appended to a JSONL transcript — one line per message, `{"time": "...",
@@ -205,9 +209,9 @@ dscli session transcript <session>  # any session id
 dscli session transcript --delete   # delete the default session's transcript
 ```
 
-Ephemeral runs (`--no-persist`) leave no transcript, and `--no-transcript`
-(or `config set no-transcript true`) disables saving when you do not want the
-texts kept locally. `--delete` removes the JSONL file (and the `transcripts/`
+Runs without `--persist` leave no transcript, and `--no-transcript`
+(or `config set no-transcript true`) disables saving even for persisted runs
+when you do not want the texts kept locally. `--delete` removes the JSONL file (and the `transcripts/`
 folder when it becomes empty) without touching the server-side thread —
 `session delete`, on the other hand, removes the thread but leaves any saved
 texts alone.
@@ -420,8 +424,8 @@ dscli translate -f lyrics.lrc -o lyrics.lrc    # overwrite the source in place
 - `file_meta` reports duration for lrc/srt/vtt/ass/ssa/ttml files.
 - The output path defaults to `<input>.translated.<ext>` and is never
   overwritten without `-f`. Each translation runs in a fresh session deleted
-  when the run ends (`--no-persist` is the default; pass `--no-persist=false`
-  to resume the persisted default session instead).
+  when the run ends; `--persist` resumes and saves the default session
+  instead.
 - If DeepSeek's content filter cuts a chunk's reply off mid-stream, the
   partial translation produced before the filter is kept instead of the run
   retrying (a smaller chunk cannot un-censor content); a reply with no
@@ -448,7 +452,7 @@ a backup if you want one. EPUB is not supported in place — `Load` returns
 extracted text, which cannot be written back as a binary epub; improve the
 extracted `.txt` instead.
 - The same flags as `translate` apply: `--chunk-bytes`, `--model`/`-m`,
-  `--thinking`/`-t`, `--parallel`/`-p`, `--no-persist`, `--timeout`, and
+  `--thinking`/`-t`, `--parallel`/`-p`, `--persist`, `--timeout`, and
   `--instructions` / `--glossary` for per-run guidance. Improvement instructions
   are read from `improve-writing/default.md` (`./improve-writing/`, then
   `~/.config/dscli/improve-writing/`) or the built-in general style.
@@ -475,6 +479,6 @@ dscli summarize movie.srt                  # dialogue summarized, timings read n
   reproduces timestamps or markup, it only reads them. Subtitle/lyric formats
   work — the model reads the cues and summarizes the dialogue.
 - The same flags as `translate` apply: `--chunk-bytes`, `--model`/`-m`,
-  `--thinking`/`-t`, `--no-persist`, `--timeout`, and `--instructions`.
+  `--thinking`/`-t`, `--persist`, `--timeout`, and `--instructions`.
   Summarization instructions are read from `summarize/default.md`
   (`./summarize/`, then `~/.config/dscli/summarize/`) or the built-in style.

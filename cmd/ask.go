@@ -22,7 +22,7 @@ type AskCmd struct {
 	Model        string        `short:"m" help:"Model: default (Instant) or expert" default:""`
 	Thinking     bool          `short:"t" help:"Enable DeepThink reasoning"`
 	Search       bool          `short:"s" help:"Enable web search"`
-	NoPersist    bool          `help:"Do not persist or reuse the default session; the session is deleted when the run ends"`
+	Persist      bool          `help:"Persist and reuse the default session across runs, and save transcripts (default: ephemeral — the session is deleted when the run ends)"`
 	NoTranscript bool          `help:"Do not save session texts (transcripts) next to the config file"`
 	JSONOut      bool          `help:"Emit NDJSON: one {\"delta\":...} line per chunk, then a {\"sources\":[...]} line when search returned citations"`
 	Timeout      time.Duration `help:"Overall budget (0 = no limit)" default:"15m"`
@@ -86,8 +86,8 @@ func (c *AskCmd) Run(app *App, ctx context.Context) error {
 	}, c.Timeout, c.clientBase)
 
 	// By default the persisted default session is resumed (created + saved on
-	// first use); --no-persist runs in a fresh session deleted afterwards.
-	sessionID, trusted, cleanup, err := resolveDefaultSession(ctx, client, c.cfgPath, c.NoPersist)
+	// first use); without --persist it runs in a fresh session deleted afterwards.
+	sessionID, trusted, cleanup, err := resolveDefaultSession(ctx, client, c.cfgPath, c.Persist)
 	if err != nil {
 		return fmt.Errorf("create chat session: %w", err)
 	}
@@ -108,7 +108,7 @@ func (c *AskCmd) Run(app *App, ctx context.Context) error {
 		_, err := os.Stdout.WriteString(delta)
 		return err
 	}
-	if transcriptsEnabled(c.cfgPath, c.NoPersist, c.NoTranscript) {
+	if transcriptsEnabled(c.cfgPath, c.Persist, c.NoTranscript) {
 		appendTranscript(c.cfgPath, sessionID, "user", prompt)
 	}
 	var reply deepseek.Reply
@@ -135,10 +135,10 @@ func (c *AskCmd) Run(app *App, ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if transcriptsEnabled(c.cfgPath, c.NoPersist, c.NoTranscript) {
+	if transcriptsEnabled(c.cfgPath, c.Persist, c.NoTranscript) {
 		appendTranscript(c.cfgPath, usedSession, "assistant", replyBuf.String())
 	}
-	persistConversation(c.cfgPath, c.NoPersist, advanceConversation(usedSession, reply.MessageID))
+	persistConversation(c.cfgPath, c.Persist, advanceConversation(usedSession, reply.MessageID))
 	if c.JSONOut {
 		if len(reply.Sources) > 0 {
 			return json.NewEncoder(os.Stdout).Encode(map[string]any{"sources": reply.Sources})

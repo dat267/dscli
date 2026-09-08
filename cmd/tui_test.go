@@ -35,7 +35,7 @@ func tuiHarness(t *testing.T, completions []string, workdir string) (*tuiModel, 
 	srv, rec := fakeDeepSeekServerWith(t, completions)
 	t.Cleanup(srv.Close)
 	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
-	chat := &ChatCmd{Workdir: workdir, cfgPath: filepath.Join(t.TempDir(), "cfg.json")}
+	chat := &ChatCmd{Workdir: workdir, Persist: true, cfgPath: filepath.Join(t.TempDir(), "cfg.json")}
 	m := newTUIModel(chat, client, "sess-1", false)
 	return m, rec
 }
