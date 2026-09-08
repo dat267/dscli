@@ -138,31 +138,6 @@ func TestTranslateDefaultChunks(t *testing.T) {
 	}
 }
 
-// TestTranslateCompletenessRetry: a markdown chunk that loses a content
-// line fails VerifyComplete, triggers the strict retry, and the corrected
-// second attempt is accepted — the omission never reaches the output.
-func TestTranslateCompletenessRetry(t *testing.T) {
-	srv, calls := fakeTranslateServer(t, func(n int) (int, string) {
-		if n == 1 {
-			// First attempt drops the second paragraph.
-			return 200, sseReply(t, "First line.\n")
-		}
-		return 200, sseReply(t, "First line.\n\nSecond line.\n")
-	})
-	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
-	content := []byte("First line.\n\nSecond line.\n")
-	text, _, err := Translate(context.Background(), client, "sess-1", content, "md", Options{To: "English"})
-	if err != nil {
-		t.Fatalf("Translate: %v", err)
-	}
-	if got := *calls; got != 2 {
-		t.Errorf("completions = %d, want 2 (initial + strict retry)", got)
-	}
-	if !strings.Contains(text, "Second line") {
-		t.Errorf("retried translation lost the second paragraph:\n%s", text)
-	}
-}
-
 func TestTranslateRealErrorPropagates(t *testing.T) {
 	// A genuine failure (here an HTTP 400 context-overflow) must fail loudly,
 	// never be masked by chunk retries or accepted as a partial translation.

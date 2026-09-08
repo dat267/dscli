@@ -25,7 +25,7 @@ func TestAdaptiveSizerShrinksOnTruncation(t *testing.T) {
 	s := newAdaptiveSizer(DefaultChunkBytes)
 	s.success(1000, 800) // verbose ratio: grows to ~38 KiB
 	before := s.size()
-	if !s.truncated(40 * 1024) {
+	if !s.truncated(40*1024) {
 		t.Fatal("truncation above the floor must be retryable")
 	}
 	if s.size() >= before {
