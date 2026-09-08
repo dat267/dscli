@@ -324,3 +324,77 @@ func VerifyProtected(format string, original, translated string) error {
 	}
 	return nil
 }
+
+// completeLineFormats are the formats whose raw convention fixes the line
+// grid: markdown keeps one paragraph per line, and subtitle cues put every
+// index/text line on its own line. For these, a complete translation must
+// have one non-blank output line per non-blank input line — a dropped or
+// merged paragraph fails even though the protected (timestamp) lines match.
+var completeLineFormats = map[string]bool{
+	"md": true, "srt": true, "vtt": true, "ass": true, "lrc": true,
+}
+
+// completeRatioFormats reflow legitimately (hard-wrapped prose, generated
+// xhtml), so line counts vary; completeness is approximated by a broad
+// length band. Legitimate cross-lingual shrink/grow is wide (EN→ZH ≈ 0.3×),
+// so the band only catches gross omissions or inventions.
+var completeRatioFormats = map[string]bool{
+	"txt": true, "epub": true,
+}
+
+// verifyCompleteMinBytes: below this the ratio is noise (a short chunk of
+// headings or code has no meaningful length expectation).
+const verifyCompleteMinBytes = 256
+
+// VerifyComplete is the completeness backstop for formats where
+// VerifyProtected is trivial or leaves content lines unchecked: line-count
+// equality for the line-grid formats, a length band for the reflowing ones,
+// nothing for ttml (its tag-sequence protection already detects dropped
+// elements).
+func VerifyComplete(format string, original, translated string) error {
+	if completeLineFormats[format] {
+		orig, trans := countNonBlank(original), countNonBlank(translated)
+		if orig != trans {
+			return fmt.Errorf("content line count changed (%d → %d); every input line needs its own translated line", orig, trans)
+		}
+		return nil
+	}
+	if completeRatioFormats[format] {
+		o := len(nonSpace(original))
+		tr := len(nonSpace(translated))
+		if o < verifyCompleteMinBytes {
+			return nil
+		}
+		ratio := float64(tr) / float64(o)
+		if ratio < 0.2 || ratio > 2.0 {
+			return fmt.Errorf("output length is %.2f× the source length; content is missing or invented", ratio)
+		}
+	}
+	return nil
+}
+
+// countNonBlank counts lines with visible content.
+func countNonBlank(s string) int {
+	n := 0
+	for _, line := range strings.Split(s, "\n") {
+		if strings.TrimSpace(line) != "" {
+			n++
+		}
+	}
+	return n
+}
+
+// nonSpace returns s without whitespace, for length comparisons that ignore
+// formatting drift.
+func nonSpace(s string) []byte {
+	out := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch c {
+		case ' ', '\t', '\n', '\r', '\v', '\f':
+		default:
+			out = append(out, c)
+		}
+	}
+	return out
+}

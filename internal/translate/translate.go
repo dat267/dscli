@@ -391,20 +391,27 @@ func Translate(ctx context.Context, client *deepseek.Client, sessionID string, c
 		conversation = convID
 
 		// Structural formats must keep their timestamps/header markup
-		// byte-for-byte (ProtectedLines is empty for text/markdown, so the
-		// verification passes trivially there). A summary never reproduces
-		// the structural lines, so it skips verification entirely.
+		// byte-for-byte, and every format must account for all content lines
+		// (ProtectedLines is empty for text/markdown, so verification would
+		// otherwise pass trivially there). A summary never reproduces the
+		// structure, so it skips verification entirely.
 		if opts.Task != TaskSummarize {
-			if err := filetools.VerifyProtected(format, chunk, text); err != nil {
+			verify := func(got string) error {
+				if err := filetools.VerifyProtected(format, chunk, got); err != nil {
+					return err
+				}
+				return filetools.VerifyComplete(format, chunk, got)
+			}
+			if err := verify(text); err != nil {
 				strict := promptFor(true) +
-					"The previous attempt changed a protected (timestamps/header) line.\n" +
-					"Keep every line with a timestamp or the WEBVTT/header syntax EXACTLY as in the original. Retry the chunk:\n\n" + chunk
+					"The previous attempt was incomplete: " + err.Error() + "\n" +
+					"Keep every line with a timestamp or the WEBVTT/header syntax EXACTLY as in the original, and translate EVERY content line — one output line per input line. Retry the chunk:\n\n" + chunk
 				text2, convID2, _, err2 := translateChunk(ctx, client, conversation, strict, model, opts.Thinking)
 				if err2 != nil {
 					return "", conversation, fmt.Errorf("chunk (%d bytes): %w", len(chunk), err2)
 				}
 				conversation = convID2
-				if err := filetools.VerifyProtected(format, chunk, text2); err != nil {
+				if err := verify(text2); err != nil {
 					return "", conversation, fmt.Errorf("chunk (%d bytes): %w", len(chunk), err)
 				}
 				text = text2
