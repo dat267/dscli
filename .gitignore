@@ -3,3 +3,6 @@ dscli
 .gopath/
 tmp/
 .worktrees/
+node_modules/
+dist/
+*.tsbuildinfo
