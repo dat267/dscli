@@ -12,6 +12,7 @@ import { configCommand, warnOnConfigOverride } from "./cli/commands/config.js";
 import { loginCommand, versionCommand } from "./cli/commands/login.js";
 import { sessionCommand } from "./cli/commands/session.js";
 import { fileCommand, parseDurationMs as parseFileDuration } from "./cli/commands/files.js";
+import { chatCommand } from "./cli/commands/chat.js";
 import { stderrNote } from "./ui/notes.js";
 
 /** setupCli mirrors pi's cli/setup.js: process identity and env markers. */
@@ -182,8 +183,20 @@ export async function main(argv: readonly string[]): Promise<number> {
 				});
 				return 0;
 			case "chat":
-				stderrNote(`'chat' is not yet ported to the Node.js rewrite (in progress)\n`);
-				return 2;
+				await chatCommand({
+					cfgPath,
+					prompt: parsed.positionals,
+					conversation: String(flags["conversation"] ?? ""),
+					model: String(flags["model"] ?? ""),
+					thinking: flags["thinking"] === true,
+					search: flags["search"] === true,
+					jsonOut: flags["json-out"] === true,
+					timeoutMs: parseFileDuration(String(flags["timeout"] ?? "0")),
+					persist: flags["persist"] === true,
+					noTranscript: flags["no-transcript"] === true,
+					...creds,
+				});
+				return 0;
 			default:
 				stderrNote(`unknown command ${parsed.command}\n`);
 				printHelp(process.stderr);
