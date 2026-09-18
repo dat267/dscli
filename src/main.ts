@@ -13,6 +13,8 @@ import { loginCommand, versionCommand } from "./cli/commands/login.js";
 import { sessionCommand } from "./cli/commands/session.js";
 import { fileCommand, parseDurationMs as parseFileDuration } from "./cli/commands/files.js";
 import { chatCommand } from "./cli/commands/chat.js";
+import { ChatTui } from "./modes/interactive/chat-tui.js";
+import { DeepSeekClient } from "./core/deepseek/client.js";
 import { stderrNote } from "./ui/notes.js";
 
 /** setupCli mirrors pi's cli/setup.js: process identity and env markers. */
@@ -183,6 +185,24 @@ export async function main(argv: readonly string[]): Promise<number> {
 				});
 				return 0;
 			case "chat":
+				if (parsed.positionals.length === 0 && process.stdin.isTTY && process.stdout.isTTY) {
+					// Interactive TUI (both stdin and stdout are terminals).
+					await new ChatTui(new DeepSeekClient(
+						{ token: creds.token, cookie: creds.cookie, userAgent: creds.userAgent },
+						{ timeoutMs: parseFileDuration(String(flags["timeout"] ?? "0")), base: undefined },
+					), {
+						cfgPath,
+						conversation: String(flags["conversation"] ?? ""),
+						model: String(flags["model"] ?? ""),
+						thinking: flags["thinking"] === true,
+						search: flags["search"] === true,
+						persist: flags["persist"] === true,
+						noTranscript: flags["no-transcript"] === true,
+						workdir: String(flags["workdir"] ?? "."),
+						...creds,
+					}).run();
+					return 0;
+				}
 				await chatCommand({
 					cfgPath,
 					prompt: parsed.positionals,
