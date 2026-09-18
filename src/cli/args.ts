@@ -3,7 +3,7 @@
  * commander/yargs): a declarative command table, a single parse loop, and a
  * help printer generated from the table.
  */
-import { APP_DESCRIPTION, APP_NAME, VERSION } from "../config.js";
+import { APP_DESCRIPTION, APP_NAME } from "../config.js";
 
 export type FlagType = "string" | "bool" | "number";
 
@@ -422,5 +422,4 @@ export function printHelp(out: NodeJS.WritableStream = process.stdout): void {
 	}
 	w();
 	w(`Use "${APP_NAME} <command> --help" for command flags.`);
-	w(`${APP_NAME} version ${VERSION}`);
 }
