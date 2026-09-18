@@ -11,6 +11,7 @@ import { askCommand } from "./cli/commands/ask.js";
 import { configCommand, warnOnConfigOverride } from "./cli/commands/config.js";
 import { loginCommand, versionCommand } from "./cli/commands/login.js";
 import { sessionCommand } from "./cli/commands/session.js";
+import { fileCommand, parseDurationMs as parseFileDuration } from "./cli/commands/files.js";
 import { stderrNote } from "./ui/notes.js";
 
 /** setupCli mirrors pi's cli/setup.js: process identity and env markers. */
@@ -120,11 +121,68 @@ export async function main(argv: readonly string[]): Promise<number> {
 					...creds,
 				});
 				return 0;
-			case "chat":
 			case "translate":
+				await fileCommand("translate", {
+					cfgPath,
+					files: parsed.positionals,
+					from: String(flags["from"] ?? "auto"),
+					to: String(flags["to"] ?? "English"),
+					output: String(flags["output"] ?? ""),
+					force: flags["force"] === true,
+					inPlace: false,
+					chunkBytes: Number(flags["chunk-bytes"] ?? 0),
+					instructions: String(flags["instructions"] ?? ""),
+					glossary: String(flags["glossary"] ?? ""),
+					timeoutMs: parseFileDuration(String(flags["timeout"] ?? "0")),
+					model: String(flags["model"] ?? ""),
+					thinking: flags["thinking"] === true,
+					parallel: flags["parallel"] === true,
+					persist: flags["persist"] === true,
+					...creds,
+				});
+				return 0;
 			case "improve-writing":
+				await fileCommand("improve", {
+					cfgPath,
+					files: parsed.positionals,
+					from: "",
+					to: "",
+					output: "",
+					force: true,
+					inPlace: true,
+					chunkBytes: Number(flags["chunk-bytes"] ?? 0),
+					instructions: String(flags["instructions"] ?? ""),
+					glossary: String(flags["glossary"] ?? ""),
+					timeoutMs: parseFileDuration(String(flags["timeout"] ?? "0")),
+					model: String(flags["model"] ?? ""),
+					thinking: flags["thinking"] === true,
+					parallel: flags["parallel"] === true,
+					persist: flags["persist"] === true,
+					...creds,
+				});
+				return 0;
 			case "summarize":
-				stderrNote(`'${parsed.command}' is not yet ported to the Node.js rewrite (in progress)\n`);
+				await fileCommand("summarize", {
+					cfgPath,
+					files: parsed.positionals,
+					from: "",
+					to: "",
+					output: String(flags["output"] ?? ""),
+					force: flags["force"] === true,
+					inPlace: false,
+					chunkBytes: Number(flags["chunk-bytes"] ?? 0),
+					instructions: String(flags["instructions"] ?? ""),
+					glossary: "",
+					timeoutMs: parseFileDuration(String(flags["timeout"] ?? "0")),
+					model: String(flags["model"] ?? ""),
+					thinking: flags["thinking"] === true,
+					parallel: flags["parallel"] === true,
+					persist: flags["persist"] === true,
+					...creds,
+				});
+				return 0;
+			case "chat":
+				stderrNote(`'chat' is not yet ported to the Node.js rewrite (in progress)\n`);
 				return 2;
 			default:
 				stderrNote(`unknown command ${parsed.command}\n`);
