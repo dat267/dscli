@@ -535,3 +535,57 @@ func TestSSESearchFragmentTypeCollectsSources(t *testing.T) {
 		t.Errorf("SEARCH fragment sources = %v, want one", p.sources)
 	}
 }
+
+// TestSSEPathlessFragmentArray replays the live search stream's fragment
+// attach, which arrives PATHLESS as an array of fragment objects rather than
+// as a {"p":"response/fragments","o":"APPEND"} patch:
+//
+//	{"v":[{"id":4,"type":"RESPONSE","content":"I","references":[],"stage_id":3}]}
+//
+// The old parser assumed a pathless array was always a {p,v} status batch, so
+// the RESPONSE fragment was never registered and every following bare chunk
+// was swallowed (a search reply came back visibly empty).
+func TestSSEPathlessFragmentArray(t *testing.T) {
+	p := &patchParser{}
+	var all []string
+	// Snapshot: only a SEARCH fragment, so no RESPONSE exists yet.
+	all = append(all, feed(t, p, `{"v":{"response":{"message_id":2,"status":"WIP","fragments":[{"id":2,"type":"SEARCH","status":"WIP","content":null,"queries":[{"query":"q"}],"results":[]}]}}}`)...)
+	// The answer fragment is attached pathlessly.
+	all = append(all, feed(t, p, `{"v":[{"id":4,"type":"RESPONSE","content":"I","references":[],"stage_id":3}]}`)...)
+	// The rest of the answer streams as bare chunks.
+	all = append(all, feed(t, p, `{"v":" couldn"}`)...)
+	all = append(all, feed(t, p, `{"v":"'t"}`)...)
+	feed(t, p, `{"p":"response/status","o":"SET","v":"FINISHED"}`)
+
+	want := []string{"I", " couldn", "'t"}
+	if !reflect.DeepEqual(all, want) {
+		t.Errorf("deltas = %q, want %q", all, want)
+	}
+	if got := p.messageID; got == nil || *got != 2 {
+		t.Errorf("messageID = %v, want 2", got)
+	}
+	if !p.finished {
+		t.Error("FINISHED should mark the reply finished")
+	}
+}
+
+// TestSSEPathlessFragmentArraySources: a pathless array may also carry
+// SEARCH fragments whose results are citation sources.
+func TestSSEPathlessFragmentArraySources(t *testing.T) {
+	p := &patchParser{}
+	feed(t, p, `{"v":[{"id":3,"type":"SEARCH","results":[{"url":"https://ex.com/a","title":"A"}]}]}`)
+	if len(p.sources) != 1 || p.sources[0].URL != "https://ex.com/a" {
+		t.Errorf("sources = %v, want one", p.sources)
+	}
+}
+
+// TestSSEContainerAppendWithoutOp: the live client also omits "o" on a
+// container append ({"p":"response/fragments","v":[...]}); it still appends.
+func TestSSEContainerAppendWithoutOp(t *testing.T) {
+	p := &patchParser{}
+	feed(t, p, `{"v":{"response":{"fragments":[{"type":"THINK","content":"t"}]}}}`)
+	all := feed(t, p, `{"p":"response/fragments","v":[{"type":"RESPONSE","content":"Hello"}]}`)
+	if len(all) != 1 || all[0] != "Hello" {
+		t.Errorf("deltas = %q, want [Hello]", all)
+	}
+}

@@ -214,7 +214,10 @@ func (p *patchParser) applyPatch(path string, v any, op string, emit func(string
 	// way (the snapshot only carries THINK/TOOL_SEARCH fragments), so this
 	// frame must not be skipped just because the path does not end in
 	// "content".
-	if (path == "response/fragments" || path == "fragments") && op == "APPEND" {
+	// A container append may omit "o" entirely (observed on the live stream),
+	// so an empty op is treated as append, the same default the content
+	// patches use.
+	if (path == "response/fragments" || path == "fragments") && (op == "APPEND" || op == "") {
 		return p.applyFragments(v, emit)
 	}
 	if !strings.HasSuffix(path, "content") {
@@ -369,11 +372,21 @@ func isSearchFragment(t string) bool {
 // a non-content frame interleaved between answer chunks must not swallow the
 // next chunk.
 func (p *patchParser) applyPathless(v any, emit func(string) error) error {
-	// A pathless terminal batch carries status/state patches as an array of
-	// {p, v} objects (e.g. {"v":[{"p":"status","v":"CONTENT_FILTER"},...]}).
-	// Extract any status signals so truncated replies are detected even though
-	// the array itself is not reply text.
+	// A pathless array is one of two things:
+	//
+	//   - a batch of {p,v} patches (terminal status/state updates), e.g.
+	//     {"v":[{"p":"status","v":"CONTENT_FILTER"},...]}; or
+	//   - a batch of fragment objects being appended to the container, which
+	//     the live client sends without any path:
+	//     {"v":[{"id":4,"type":"RESPONSE","content":"I",...}]}.
+	//
+	// Fragment objects carry a "type"; patches carry a "p". Missing this
+	// second form left the RESPONSE fragment unregistered, and every later
+	// bare chunk was then swallowed (a search reply came back empty).
 	if items, ok := v.([]any); ok {
+		if fragmentArray(items) {
+			return p.applyFragments(items, emit)
+		}
 		for _, it := range items {
 			if m, ok := it.(map[string]any); ok {
 				if pp, ok := m["p"].(string); ok {
@@ -393,6 +406,24 @@ func (p *patchParser) applyPathless(v any, emit func(string) error) error {
 	}
 	p.markEmitted(idx)
 	return emit(txt)
+}
+
+// fragmentArray reports whether a pathless array's items are fragment objects
+// (container-append semantics) rather than {p,v} patches (status updates).
+func fragmentArray(items []any) bool {
+	for _, it := range items {
+		m, ok := it.(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, ok := m["p"].(string); ok {
+			return false
+		}
+		if _, ok := m["type"].(string); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // textOf extracts visible text from a chunk value: a plain string, or an
