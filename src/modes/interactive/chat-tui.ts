@@ -1,31 +1,43 @@
 /**
- * The interactive chat TUI, built on pi's own terminal framework
- * (@earendil-works/pi-tui): a scrollable chat pane, the working indicator
- * embedded in the separator rule (no layout change for streaming), the
- * editor with slash-command autocomplete, and the status line.
+ * The interactive chat TUI — pi's exact recipe (@earendil-works/pi-coding-agent,
+ * modes/interactive): a ScrollView transcript that grows to fill the screen,
+ * a fixed dock below it (working indicator in the DynamicBorder, editor,
+ * two-sided footer), user messages in background boxes, markdown replies.
  *
- * Behaviour ported from cmd/tui.go (Go/bubbletea): submit/stream/finish
- * lifecycle, /resume of filtered partials, session persistence and
- * transcripts.
+ * Built from pi-tui primitives with the layout of pi's createChatViewport:
+ *
+ *   VStack root
+ *   ├ ScrollView(document, follow: end, primary)   ← transcript
+ *   └ VStack dock
+ *      ├ DynamicBorder (embeds the ⠋ Working loader while streaming)
+ *      ├ Editor (min 3 rows, slash-command autocomplete)
+ *      └ Footer (left: run facts · right: model, right-aligned)
  */
 import {
+	Container,
 	Editor,
-	Markdown,
 	ProcessTerminal,
 	ScrollView,
-	Text,
 	TuiMainScreen,
 	VStack,
 	type Component,
 } from "@earendil-works/pi-tui";
-import chalk from "chalk";
+import {
+	AssistantMessageComponent,
+	FooterComponent,
+	NoteComponent,
+	UserMessageComponent,
+	WorkingBorder,
+} from "./components.js";
+import { TUI_COMMANDS } from "./parts.js";
+import { theme } from "./theme.js";
 import type { DeepSeekClient } from "../../core/deepseek/client.js";
 import {
 	effectiveModel,
-	resolveDefaultSession,
 	loadSavedSession,
 	persistConversation,
 	recoverStaleSession,
+	resolveDefaultSession,
 	saveSession,
 	splitConversation,
 } from "../../core/session.js";
@@ -33,14 +45,10 @@ import { appendTranscript, loadTranscript, transcriptsEnabled } from "../../core
 import { localSessionRows, sessionRowText } from "../../cli/commands/session.js";
 import { oneTurn, resumePrompt, toggleState } from "../../cli/commands/chat.js";
 import { stderrNote } from "../../ui/notes.js";
-import {
-	ruleText,
-	statusLine,
-	TUI_COMMANDS,
-	SPINNER_FRAMES,
-} from "./parts.js";
+import { homedir } from "node:os";
+import { resolve } from "node:path";
 
-const SPINNER_INTERVAL_MS = 120;
+const SPINNER_INTERVAL_MS = 80; // pi's Loader default
 
 export interface ChatTuiOptions {
 	cfgPath: string;
@@ -67,20 +75,14 @@ class SlashProvider {
 	}
 }
 
-/**
- * ChatTui wires the components together. All stream/session behaviour is
- * shared with the REPL (oneTurn, recoverStaleSession); this class only
- * renders and routes.
- */
 export class ChatTui {
 	private readonly tui: TuiMainScreen;
-	private readonly chat: VStack;
+	private readonly document: Container;
 	private readonly scroller: ScrollView;
-	private readonly rule: Text;
-	private readonly status: Text;
+	private readonly border: WorkingBorder;
+	private readonly footer: FooterComponent;
 	private readonly editor: Editor;
 	private busy = false;
-	private spin = 0;
 	private spinnerTimer: NodeJS.Timeout | undefined;
 	private turns = 0;
 	private model: string;
@@ -88,7 +90,10 @@ export class ChatTui {
 	private search: boolean;
 	private conversation: string;
 	private lastPartial = "";
-	private firstTurn: boolean;
+	private firstTurn = false;
+	private readonly owned: string[] = [];
+	private readonly startedAt = Date.now();
+	private closed = false;
 
 	constructor(
 		private readonly client: DeepSeekClient,
@@ -99,29 +104,68 @@ export class ChatTui {
 		this.search = opts.search;
 		this.conversation = opts.conversation;
 		this.tui = new TuiMainScreen(new ProcessTerminal());
-		this.chat = new VStack();
-		this.scroller = new ScrollView(this.chat, { follow: "end" });
-		this.rule = new Text("");
-		this.status = new Text("");
-		this.editor = new Editor(this.tui, {
-			borderColor: (s) => chalk.dim(s),
-			selectList: {
-				selectedPrefix: (t) => chalk.hex("#12c78f")(t),
-				selectedText: (t) => chalk.bold(t),
-				description: (t) => chalk.dim(t),
-				scrollInfo: (t) => chalk.dim(t),
-				noMatch: (t) => chalk.dim(t),
-			},
-		});
-		this.editor.setPaddingX(1);
-		this.editor.setAutocompleteProvider(new SlashProvider() as never);
-		this.firstTurn = false;
+		this.document = new Container();
+		this.scroller = new ScrollView(this.document, { follow: "end", primary: true });
 
-		this.tui.addChild(this.scroller);
-		this.tui.addChild(this.rule);
-		this.tui.addChild(this.editor);
-		this.tui.addChild(this.status);
+		this.border = new WorkingBorder();
+		this.footer = new FooterComponent({
+			model: this.model,
+			thinking: this.thinking,
+			search: this.search,
+			mode: this.opts.conversation !== "" ? "continuing" : this.opts.persist ? "persisted" : "ephemeral",
+			turns: 0,
+			conversation: this.conversation,
+			cwd: formatCwd(resolve(this.opts.workdir), homedir()),
+		});
+		this.editor = new Editor(this.tui, {
+			borderColor: (s) => theme.fg("border", s),
+			selectList: {
+				selectedPrefix: (t) => theme.fg("accent", t),
+				selectedText: (t) => theme.bold(t),
+				description: (t) => theme.fg("muted", t),
+				scrollInfo: (t) => theme.fg("dim", t),
+				noMatch: (t) => theme.fg("dim", t),
+			},
+		}, { paddingX: 1 });
+		this.editor.setAutocompleteProvider(new SlashProvider() as never);
+
+		// pi's createChatViewport layout: transcript grows, dock is fixed.
+		const dock = new VStack([
+			{ component: this.border, shrink: 1, minSize: 1 },
+			{ component: this.editor as unknown as Component, shrink: 1, minSize: 3 },
+			{ component: this.footer as unknown as Component, shrink: 1, minSize: 1 },
+		]);
+		this.tui.addChild(new VStack([
+			{ component: this.scroller, basis: 0, grow: 1, shrink: 1, minSize: 1 },
+			{ component: dock, basis: "auto", grow: 0, shrink: 1, minSize: 1 },
+		]));
+
 		this.editor.onSubmit = (text: string) => void this.submit(text);
+		this.editor.addToHistory("");
+
+		// pi's ctrl+c contract: clear the input first, exit on a second press.
+		let lastCtrlC = 0;
+		this.tui.addInputListener((data: string): { consume?: boolean } | undefined => {
+			if (data === "\x03") {
+				const now = Date.now();
+				if (this.editor.getText().trim() !== "" || now - lastCtrlC < 2000) {
+					if (this.editor.getText().trim() !== "") {
+						this.editor.setText("");
+					} else {
+						void this.close();
+						process.exit(130);
+					}
+				}
+				lastCtrlC = now;
+				return { consume: true };
+			}
+			if (data === "\x04") {
+				void this.close();
+				process.exit(0);
+				return { consume: true };
+			}
+			return undefined;
+		});
 
 		if (this.conversation === "") {
 			void this.initSession();
@@ -129,92 +173,79 @@ export class ChatTui {
 	}
 
 	private async initSession(): Promise<void> {
-		const resolved = await resolveDefaultSession(this.client, this.opts.cfgPath, this.opts.persist);
-		this.conversation = resolved.sessionId;
-		this.firstTurn = resolved.trusted;
-		if (resolved.cleanup && !this.opts.persist) {
-			// The TUI owns the ephemeral session; delete it on exit.
-			this.owned.push(this.conversation);
+		try {
+			const resolved = await resolveDefaultSession(this.client, this.opts.cfgPath, this.opts.persist);
+			this.conversation = resolved.sessionId;
+			this.firstTurn = resolved.trusted;
+			if (resolved.cleanup && !this.opts.persist) {
+				// The TUI owns the ephemeral session; delete it on exit.
+				this.owned.push(this.conversation);
+			}
+		} catch (err) {
+			// The session is created lazily on the first submit instead; the
+			// pane must not crash on startup (stale token, offline, ...).
+			this.addNote(`note: no session yet (${err instanceof Error ? err.message : err}) — it is created on your first message`);
 		}
+		this.refreshFooter();
 	}
 
-	private owned: string[] = [];
+	// --- transcript helpers -------------------------------------------------
 
-	/** addNote appends dimmed system text (slash feedback, hints). */
-	private addNote(s: string): void {
-		this.chat.addChild(new Text(chalk.dim(s)));
-		this.scroller.scrollToEnd?.();
+	private addComponent(c: Component): void {
+		this.document.addChild(c);
 		this.tui.requestRender();
 	}
 
-	/** addUser / addAssistant append chat content. */
-	private addUser(text: string): void {
-		this.chat.addChild(new Text(chalk.hex("#6b50ff").bold(`> ${text.split("\n")[0]}`)));
+	private addNote(text: string): void {
+		this.addComponent(new NoteComponent(text));
 	}
 
-	private addAssistant(): Markdown {
-		const md = new Markdown("", 0, 0, {
-			heading: (t) => chalk.bold(t),
-			link: (t) => chalk.hex("#7aa2f7")(t),
-			linkUrl: (t) => chalk.dim(t),
-			code: (t) => chalk.hex("#9ece6a")(t),
-			codeBlock: (t) => t,
-			codeBlockBorder: (t) => chalk.dim(t),
-			quote: (t) => t,
-			quoteBorder: (t) => chalk.dim(t),
-			hr: (t) => chalk.dim(t),
-			listBullet: (t) => chalk.hex("#12c78f")(t),
-			bold: (t) => chalk.bold(t),
-			italic: (t) => chalk.italic(t),
-			strikethrough: (t) => chalk.strikethrough(t),
-			underline: (t) => chalk.underline(t),
-		});
-		this.chat.addChild(md as unknown as Component);
-		return md;
+	private addBlank(): void {
+		this.addComponent(new NoteComponent(""));
 	}
 
-	private refreshChrome(): void {
-		const mode = this.opts.conversation !== "" ? "continuing" : this.opts.persist ? "persisted" : "ephemeral";
-		this.rule.setText(ruleText(this.busy, this.spin, this.tui.terminal.columns ?? 80, {
-			dim: (s) => chalk.dim(s),
-			accent: (s) => chalk.hex("#12c78f")(s),
-			muted: (s) => chalk.hex("#858392")(s),
-		}));
-		this.status.setText(chalk.dim(statusLine({
+	private refreshFooter(): void {
+		this.footer.setParams({
 			model: this.model,
 			thinking: this.thinking,
 			search: this.search,
-			mode,
-			turn: this.turns,
+			mode: this.opts.conversation !== "" ? "continuing" : this.opts.persist ? "persisted" : "ephemeral",
+			turns: this.turns,
 			conversation: this.conversation,
-		})));
+			cwd: formatCwd(resolve(this.opts.workdir), homedir()),
+		});
 		this.tui.requestRender();
 	}
 
 	private startSpinner(): void {
 		this.busy = true;
-		this.refreshChrome();
+		this.border.setBusy(true);
 		this.spinnerTimer = setInterval(() => {
-			this.spin = (this.spin + 1) % SPINNER_FRAMES.length;
-			this.refreshChrome();
+			this.border.tick();
+			this.tui.requestRender();
 		}, SPINNER_INTERVAL_MS);
+		this.tui.requestRender();
 	}
 
 	private stopSpinner(): void {
 		this.busy = false;
+		this.border.setBusy(false);
 		if (this.spinnerTimer) clearInterval(this.spinnerTimer);
 		this.spinnerTimer = undefined;
-		this.refreshChrome();
+		this.tui.requestRender();
 	}
+
+	// --- submission ---------------------------------------------------------
 
 	private async submit(raw: string): Promise<void> {
 		const text = raw.trim();
 		this.editor.setText("");
-		if (text === "") return;
+		if (text === "" || this.busy) return;
 		if (text.startsWith("/")) {
 			await this.command(text);
 			return;
 		}
+		this.editor.addToHistory(text);
 
 		// A reset (/new, /model) leaves conversation empty: spawn a fresh session.
 		if (this.conversation === "") {
@@ -232,22 +263,21 @@ export class ChatTui {
 			}
 		}
 
-		this.addUser(text);
-		const md = this.addAssistant();
+		this.addComponent(new UserMessageComponent(text));
+		const md = new AssistantMessageComponent("");
+		this.addComponent(md);
 		this.startSpinner();
 
 		const transcriptsOn = transcriptsEnabled(this.opts.cfgPath, this.opts.persist, this.opts.noTranscript);
 		if (transcriptsOn) appendTranscript(this.opts.cfgPath, this.conversation, "user", text);
 
 		let replyBuf = "";
-		let first = true;
 		let convId = this.conversation;
 		let filtered = false;
 		const r = await recoverStaleSession(this.client, this.opts.cfgPath, this.conversation, this.firstTurn, async (sid) => {
 			const t = await oneTurn(this.client, sid, text, this.model, this.thinking, this.search, (delta) => {
 				replyBuf += delta;
-				md.setText(first ? delta : (md as unknown as { getText(): string }).getText() + delta);
-				first = false;
+				md.setText(replyBuf);
 				this.tui.requestRender();
 			});
 			convId = t.convId;
@@ -266,27 +296,28 @@ export class ChatTui {
 		} else if (!filtered) {
 			this.lastPartial = "";
 		}
-		this.chat.addChild(new Text("")); // trailing blank: commit is a visual no-op
+		this.addBlank(); // spacing between turns
 		this.conversation = convId;
 		persistConversation(this.opts.cfgPath, this.opts.persist, convId);
 		this.turns++;
-		this.refreshChrome();
+		this.refreshFooter();
 	}
+
+	// --- slash commands ------------------------------------------------------
 
 	private async command(line: string): Promise<void> {
 		const arg = (prefix: string): string => line.slice(prefix.length).trim();
 		switch (true) {
 			case line === "/exit" || line === "/quit":
 				await this.close();
-				process.exitCode = 0;
-				process.kill(process.pid, "SIGTERM");
+				process.exit(0);
 				return;
 			case line === "/new":
 				this.conversation = "";
 				this.addNote("new conversation");
 				break;
 			case line === "/help":
-				this.addNote("commands: /exit /quit /new /model /thinking /search /clear /resume /session /sessions /help");
+				this.addNote("commands: /exit /quit /new /model /thinking /search /resume /session /sessions /clear /help");
 				break;
 			case line === "/model" || line.startsWith("/model "): {
 				const m = arg("/model");
@@ -354,31 +385,31 @@ export class ChatTui {
 				break;
 			}
 			case line === "/clear":
-				this.chat.children.length = 0;
+				this.document.clear();
 				this.addNote("pane cleared");
 				break;
 			default:
 				this.addNote("unknown command (/help for commands)");
 		}
-		this.refreshChrome();
+		this.refreshFooter();
 	}
 
 	/** loadHistory renders a resumed thread's past messages into the pane. */
 	loadHistory(messages: Array<{ role: string; text: string }>): void {
 		for (const m of messages) {
 			if (m.role === "USER") {
-				this.chat.addChild(new Text(chalk.hex("#6b50ff").bold(`> ${m.text.split("\n")[0]}`)));
+				this.addComponent(new UserMessageComponent(m.text));
 			} else {
-				const md = this.addAssistant();
-				md.setText(m.text);
+				this.addComponent(new AssistantMessageComponent(m.text));
 			}
 		}
-		this.chat.addChild(new Text(""));
-		this.refreshChrome();
+		this.addBlank();
+		this.refreshFooter();
 	}
 
 	async run(): Promise<void> {
-		this.refreshChrome();
+		this.addNote("DeepSeek · /help for commands · ctrl+c clears (twice exits)");
+		this.tui.setFocus(this.editor);
 		this.tui.start();
 		// Resume history when the default conversation exists.
 		if (this.firstTurn) {
@@ -387,7 +418,6 @@ export class ChatTui {
 				const msgs = await this.client.chatHistory(sessionId);
 				this.loadHistory(
 					msgs
-						.filter((m) => m.content !== "" || m.fragments.length > 0)
 						.map((m) => ({
 							role: m.role,
 							text:
@@ -401,35 +431,30 @@ export class ChatTui {
 				// history is best-effort UI sugar
 			}
 		}
-		// Ctrl+C twice quits; once while busy is left to the editor for now.
-		const stop = async (): Promise<void> => {
-			this.stopSpinner();
-			if (this.owned.length > 0) {
-				try {
-					await this.client.deleteSessions(this.owned);
-				} catch (err) {
-					stderrNote(`warning: failed to delete session(s): ${err instanceof Error ? err.message : err}\n`);
-				}
-			}
-			if (this.turns > 0) stderrNote(`conversation: ${this.conversation}\n`);
-			this.tui.stop();
-		};
-		process.on("SIGINT", () => {
-			void stop().then(() => process.exit(130));
-		});
-		// Run until signalled (SIGINT above; the editor owns the keyboard).
+		// Run until the input listener exits the process.
 		await new Promise<never>(() => {});
 	}
 
 	async close(): Promise<void> {
+		if (this.closed) return;
+		this.closed = true;
 		this.stopSpinner();
 		if (this.owned.length > 0) {
 			try {
 				await this.client.deleteSessions(this.owned);
-			} catch {
-				// best-effort
+			} catch (err) {
+				stderrNote(`warning: failed to delete session(s): ${err instanceof Error ? err.message : err}\n`);
 			}
 		}
+		if (this.turns > 0) stderrNote(`conversation: ${this.conversation}\n`);
 		this.tui.stop();
 	}
+}
+
+/** formatCwd: replace the home directory with ~. */
+function formatCwd(cwd: string, home: string | undefined): string {
+	if (!home) return cwd;
+	if (cwd === home) return "~";
+	if (cwd.startsWith(home + "/")) return "~" + cwd.slice(home.length);
+	return cwd;
 }

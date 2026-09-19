@@ -1,71 +1,101 @@
 import { strict as assert } from "node:assert";
+import chalk from "chalk";
+chalk.level = 3; // force truecolor even in the non-TTY test runner
 import { test } from "node:test";
-import {
-	onoff,
-	ruleText,
-	statusLine,
-	SPINNER_FRAMES,
-	ANSI_ACCENT,
-	ANSI_DIM,
-	ANSI_MUTED,
-	ANSI_RESET,
-} from "../src/modes/interactive/parts.js";
+import { FooterComponent, NoteComponent, UserMessageComponent, WorkingBorder } from "../src/modes/interactive/components.js";
+import { SPINNER_FRAMES } from "../src/modes/interactive/parts.js";
+import { PALETTE, theme } from "../src/modes/interactive/theme.js";
 
-const colors = {
-	dim: (s: string) => ANSI_DIM + s + ANSI_RESET,
-	accent: (s: string) => ANSI_ACCENT + s + ANSI_RESET,
-	muted: (s: string) => ANSI_MUTED + s + ANSI_RESET,
-};
+const strip = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
 
 test("spinner frames are pi's braille pulse", () => {
 	assert.equal(SPINNER_FRAMES[0], "⠋");
 	assert.equal(SPINNER_FRAMES.length, 10);
 });
 
-test("idle rule is the plain dim rule; busy rule embeds the working indicator", () => {
-	const idle = ruleText(false, 0, 40);
-	assert.equal(idle, "─".repeat(40));
-	const busy = ruleText(true, 0, 40);
-	assert.equal(busy, "── ⠋ Working " + "─".repeat(27));
-	// The frame advances modulo the table.
-	assert.ok(ruleText(true, 11, 40).includes("⠙"));
+test("WorkingBorder: idle is the plain border-coloured rule", () => {
+	const b = new WorkingBorder();
+	const lines = b.render(40);
+	assert.equal(lines.length, 1);
+	assert.equal(strip(lines[0]!), "─".repeat(40));
+	assert.ok(lines[0]!.includes("\x1b[38;2;95;135;255m"), "border colour (pi's blue)");
 });
 
-test("colored rule keeps the accent frame and muted label", () => {
-	const v = ruleText(true, 0, 40, colors);
-	assert.ok(v.includes(ANSI_ACCENT + "⠋" + ANSI_RESET), v);
-	assert.ok(v.includes(ANSI_MUTED + "Working" + ANSI_RESET), v);
-	// Visible width still fills the full rule (ANSI codes are zero-width).
-	const visible = v.replace(/\x1b\[[0-9;]*m/g, "");
+test("WorkingBorder: busy embeds the working indicator, no layout change", () => {
+	const b = new WorkingBorder();
+	b.setBusy(true);
+	const lines = b.render(40);
+	assert.equal(lines.length, 1); // still one row
+	const visible = strip(lines[0]!);
 	assert.equal(visible.length, 40);
+	assert.ok(visible.includes("⠋"), "braille frame");
+	assert.ok(visible.includes("Working"));
+	// The frame is in pi's accent colour, the label muted.
+	assert.ok(lines[0]!.includes("\x1b[38;2;138;190;183m⠋"), "accent spinner");
+	// The frame advances on tick.
+	b.tick();
+	assert.ok(strip(b.render(40)[0]!).includes(SPINNER_FRAMES[1]!));
+	// Setting busy=false stops the indicator.
+	b.setBusy(false);
+	assert.ok(!b.render(40)[0]!.includes("Working"));
 });
 
-test("idle rule has no working indicator", () => {
-	const idle = ruleText(false, 3, 40, colors);
-	assert.ok(!idle.includes("Working"));
-	assert.ok(!idle.includes(ANSI_ACCENT));
+test("UserMessageComponent renders the prompt in a padded background box", () => {
+	const c = new UserMessageComponent("Hello\nworld");
+	const lines = c.render(30);
+	// pi's Box: blank padded rows around the content, all under the bg colour.
+	assert.equal(lines.length, 4); // top pad, 2 content rows, bottom pad
+	assert.ok(lines[0]!.includes("\x1b[48;2;52;53;65m"), "userMsgBg #343541");
+	assert.equal(strip(lines[0]!), " ".repeat(30));
+	assert.ok(strip(lines[1]!).includes("Hello"));
+	assert.ok(strip(lines[2]!).includes("world"));
 });
 
-test("status line shows modes before turn/session", () => {
-	const s = statusLine({
+test("NoteComponent dims and truncates system text", () => {
+	const c = new NoteComponent("a hint\nsecond line");
+	const lines = c.render(80);
+	assert.equal(lines.length, 2);
+	assert.ok(lines[0]!.includes("\x1b[38;2;128;128;128m"), "muted grey");
+	assert.equal(strip(c.render(5)[0]!), strip(lines[0]!).slice(0, 5));
+});
+
+test("FooterComponent right-aligns the model side", () => {
+	const f = new FooterComponent({
 		model: "default",
-		thinking: true,
+		thinking: false,
 		search: false,
 		mode: "ephemeral",
-		turn: 2,
+		turns: 2,
 		conversation: "910c6ac2-cca9:4",
+		cwd: "~/repos/dscli",
 	});
-	assert.equal(s, "DeepSeek · model default · thinking on · search off · ephemeral · turn 2 · 910c6ac2…");
-	// The modes come before turn/session so truncation never hides them.
-	assert.ok(s.indexOf("thinking") < s.indexOf("turn 2"));
+	const line = strip(f.render(120)[0]!);
+	assert.ok(line.startsWith("~/repos/dscli · 2 turns · ephemeral · 910c6ac2…"));
+	assert.ok(line.endsWith("default · thinking off · search off"));
+	// Right-aligned: padding between the two sides.
+	assert.equal(line.length, 120);
 });
 
-test("status line without a conversation omits the tail", () => {
-	const s = statusLine({ model: "expert", thinking: false, search: true, mode: "persisted", turn: 0, conversation: "" });
-	assert.equal(s, "DeepSeek · model expert · thinking off · search on · persisted · turn 0");
+test("FooterComponent truncates the left side on a narrow terminal", () => {
+	const f = new FooterComponent({
+		model: "default",
+		thinking: true,
+		search: true,
+		mode: "persisted",
+		turns: 1,
+		conversation: "sess-1",
+		cwd: "~/somewhere",
+	});
+	// pi's footer: when both sides cannot fit, the right side is dropped
+	// entirely rather than truncated mid-state.
+	const line = strip(f.render(40)[0]!);
+	assert.ok(line.length <= 40, line);
+	assert.ok(line.startsWith("~/somewhere"), line);
+	assert.ok(!line.includes("thinking on"), line);
 });
 
-test("onoff", () => {
-	assert.equal(onoff(true), "on");
-	assert.equal(onoff(false), "off");
+test("theme palette matches pi's dark theme", () => {
+	assert.equal(PALETTE.accent, "#8abeb7");
+	assert.equal(PALETTE.userMsgBg, "#343541");
+	assert.equal(theme.fg("error", "x"), "\x1b[38;2;204;102;102mx\x1b[39m");
 });
