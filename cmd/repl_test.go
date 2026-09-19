@@ -213,6 +213,9 @@ func TestReplUIStatelessEndToEnd(t *testing.T) {
 	for _, want := range []string{
 		"DeepSeek · model default · thinking off · search off · ephemeral",
 		"DeepSeek · model default · thinking on · search off · ephemeral", // bare /thinking flipped it
+		// The redraw is a block: a blank line separates it from the echoed
+		// command above and the next prompt below.
+		"\n\nDeepSeek · model default · thinking on · search off · ephemeral\n\n",
 		"one question per line · /help for commands\n\n",
 		"conversation: sess-1:2",
 	} {

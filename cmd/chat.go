@@ -444,6 +444,18 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 	fmt.Fprintln(os.Stderr, u.dim("one question per line · /help for commands"))
 	fmt.Fprintln(os.Stderr)
 
+	// statusBlock reprints the live settings line as its own block: a blank
+	// line above separates it from the echoed slash command, a blank line
+	// below from the next prompt. Optional notes follow the status line.
+	statusBlock := func(notes ...string) {
+		fmt.Fprintln(os.Stderr)
+		status()
+		for _, n := range notes {
+			fmt.Fprintln(os.Stderr, u.note(n))
+		}
+		fmt.Fprintln(os.Stderr)
+	}
+
 	var turns int
 	// lastPartial keeps the text of the most recent filtered reply so /resume
 	// can continue it; it is cleared when a later turn completes unfiltered.
@@ -499,8 +511,7 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 		case line == "/model" || strings.HasPrefix(line, "/model "):
 			m := strings.TrimSpace(strings.TrimPrefix(line, "/model"))
 			if m == "" {
-				status()
-				fmt.Fprintln(os.Stderr, u.note("model: "+model+" (fixed per thread; /model <default|expert> starts a new conversation)"))
+				statusBlock("model: " + model + " (fixed per thread; /model <default|expert> starts a new conversation)")
 				continue
 			}
 			if m != "default" && m != "expert" {
@@ -509,16 +520,15 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 			}
 			model = m
 			conversation = ""
-			status()
-			fmt.Fprintln(os.Stderr, u.note("new conversation"))
+			statusBlock("new conversation")
 			continue
 		case line == "/thinking" || strings.HasPrefix(line, "/thinking "):
 			thinking = toggleState(line, "/thinking", thinking)
-			status()
+			statusBlock()
 			continue
 		case line == "/search" || strings.HasPrefix(line, "/search "):
 			search = toggleState(line, "/search", search)
-			status()
+			statusBlock()
 			continue
 		case line == "/resume" || strings.HasPrefix(line, "/resume "):
 			// Continue a reply the content filter cut off: the partial text
