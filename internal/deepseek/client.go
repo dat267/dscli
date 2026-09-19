@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -55,6 +57,12 @@ type Session struct {
 	Token     string
 	Cookie    string // ds_session_id value, or a full "k=v; ..." cookie header
 	UserAgent string // optional; zero value falls back to DefaultUserAgent
+	// DeviceID is the x-device-id the web client persists per browser. When
+	// empty a random UUID is generated for the client's lifetime.
+	DeviceID string
+	// TimezoneOffset overrides x-client-timezone-offset (seconds east of
+	// UTC). Nil uses the local zone, matching the browser.
+	TimezoneOffset *int
 }
 
 // Client is a stateful HTTP client for DeepSeek's web API.
@@ -63,6 +71,7 @@ type Client struct {
 	base string // API base URL; overridable for tests
 	sess Session
 	ua   string
+	tz   string // x-client-timezone-offset, seconds east of UTC
 }
 
 // NewClient builds a client for the given session. timeout bounds the whole
@@ -78,12 +87,32 @@ func NewClient(sess Session, timeout time.Duration, base ...string) *Client {
 	if len(base) > 0 && base[0] != "" {
 		b = base[0]
 	}
+	if sess.DeviceID == "" {
+		sess.DeviceID = newDeviceID()
+	}
+	_, tzOff := time.Now().Zone()
+	if sess.TimezoneOffset != nil {
+		tzOff = *sess.TimezoneOffset
+	}
 	return &Client{
 		http: &http.Client{Timeout: timeout},
 		base: b,
 		sess: sess,
 		ua:   ua,
+		tz:   strconv.Itoa(tzOff),
 	}
+}
+
+// newDeviceID returns a random UUID v4 for the x-device-id header, the same
+// shape the web client stores in localStorage.
+func newDeviceID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return ""
+	}
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // RFC 4122 variant
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 // sessionCookie renders the Cookie header. The config stores the bare
@@ -110,12 +139,14 @@ func (c *Client) headers() http.Header {
 	h.Set("user-agent", c.ua)
 	h.Set("origin", BaseURL)
 	h.Set("referer", BaseURL+"/")
-	h.Set("x-app-version", "2.0.0")
-	h.Set("x-client-version", "2.0.0")
+	// Client identity headers, mirroring the current web client (HAR).
+	h.Set("x-client-version", "2.5.0")
 	h.Set("x-client-platform", "web")
 	h.Set("x-client-bundle-id", "com.deepseek.chat")
 	h.Set("x-client-locale", "en_US")
-	h.Set("x-client-timezone-offset", "19800")
+	h.Set("x-client-timezone-offset", c.tz)
+	h.Set("x-device-id", c.sess.DeviceID)
+	h.Set("x-device-model", "")
 	return h
 }
 
@@ -348,9 +379,16 @@ type CompletionRequest struct {
 }
 
 func (r CompletionRequest) body() map[string]any {
-	b := map[string]any{
+	// model_type is only meaningful on a thread's first turn; the web client
+	// still sends the field as null when resuming.
+	var modelType any
+	if r.ModelType != "" {
+		modelType = r.ModelType
+	}
+	return map[string]any{
 		"chat_session_id":   r.ChatSessionID,
 		"parent_message_id": r.ParentMessageID,
+		"model_type":        modelType,
 		"prompt":            r.Prompt,
 		"ref_file_ids":      []any{},
 		"thinking_enabled":  r.ThinkingEnabled,
@@ -358,10 +396,6 @@ func (r CompletionRequest) body() map[string]any {
 		"action":            nil,
 		"preempt":           false,
 	}
-	if r.ModelType != "" {
-		b["model_type"] = r.ModelType
-	}
-	return b
 }
 
 // Reply carries a completed stream: the assistant message_id needed to resume

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -54,15 +55,60 @@ func TestCompletionRequestBody(t *testing.T) {
 		t.Errorf("first-turn body must send parent_message_id null, got %s", raw)
 	}
 
-	// Resume: parent id set, model_type omitted.
+	// Resume: parent id set, model_type sent as JSON null (the web client
+	// always includes the field; a thread's model is fixed at creation).
 	pid := int64(7)
 	resume := CompletionRequest{ChatSessionID: "s1", ParentMessageID: &pid, Prompt: "more", ModelType: ""}
 	body = resume.body()
 	if got := body["parent_message_id"].(*int64); *got != 7 {
 		t.Errorf("resume parent_message_id wrong: %v", body["parent_message_id"])
 	}
-	if _, ok := body["model_type"]; ok {
-		t.Errorf("resume body must not carry model_type: %v", body)
+	if v, ok := body["model_type"]; !ok || v != nil {
+		t.Errorf("resume body model_type = %v (present=%v), want explicit null", v, ok)
+	}
+	raw, err = json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(raw, []byte(`"model_type":null`)) {
+		t.Errorf("resume body must send model_type null, got %s", raw)
+	}
+}
+
+// TestClientHeadersMatchWebClient pins the request headers to what the
+// current chat.deepseek.com web client sends (captured in a HAR).
+func TestClientHeadersMatchWebClient(t *testing.T) {
+	tz := 25200 // UTC+7
+	c := NewClient(Session{Token: "tok", DeviceID: "c54e9f4a-c397-44a0-9335-3755e5f2e856", TimezoneOffset: &tz}, 0)
+	h := c.headers()
+	for _, tc := range []struct{ name, want string }{
+		{"x-client-version", "2.5.0"},
+		{"x-client-platform", "web"},
+		{"x-client-bundle-id", "com.deepseek.chat"},
+		{"x-client-locale", "en_US"},
+		{"x-client-timezone-offset", "25200"},
+		{"x-device-id", "c54e9f4a-c397-44a0-9335-3755e5f2e856"},
+	} {
+		if got := h.Get(tc.name); got != tc.want {
+			t.Errorf("%s = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+	if _, ok := h["X-App-Version"]; ok {
+		t.Error("x-app-version is not sent by the current web client")
+	}
+	// x-device-model is present but empty in the captured requests.
+	if vals, ok := h["X-Device-Model"]; !ok || len(vals) != 1 || vals[0] != "" {
+		t.Errorf("x-device-model = %v (present=%v), want one empty value", vals, ok)
+	}
+
+	// A client without an explicit device id still sends a well-formed one.
+	c2 := NewClient(Session{Token: "tok"}, 0)
+	id := c2.headers().Get("x-device-id")
+	if len(id) != 36 || strings.Count(id, "-") != 4 {
+		t.Errorf("generated x-device-id = %q, want a UUID", id)
+	}
+	if id == "00000000-0000-0000-0000-000000000000" {
+		t.Error("generated x-device-id must be random")
 	}
 }
 
