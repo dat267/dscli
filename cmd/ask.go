@@ -57,6 +57,14 @@ func renderSources(w io.Writer, sources []deepseek.Source) {
 	}
 }
 
+// endConversation prints the conversation id that closes a run as its own
+// block. The blank line separates it from the prompt (or slash command) the
+// terminal echoed on the line above.
+func endConversation(w io.Writer, conversation string) {
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "conversation: %s\n", conversation)
+}
+
 func (c *AskCmd) Run(app *App, ctx context.Context) error {
 	if app != nil {
 		c.cfgPath = app.CfgPath()

@@ -475,3 +475,32 @@ func TestReplSourcesSpacing(t *testing.T) {
 		t.Errorf("exactly one blank line after the sources block expected\n%q", out)
 	}
 }
+
+// TestReplExitBlankBeforeConversation: leaving the REPL prints the final
+// conversation id as its own block, separated by a blank line so the echoed
+// /quit (or the EOF) is not glued to it. The banner already ends with a blank
+// line, so the exit block adds the second one.
+func TestReplExitBlankBeforeConversation(t *testing.T) {
+	for _, tc := range []struct{ name, input string }{
+		{"quit", "hi\n/quit\n"},
+		{"eof", "hi\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := fakeDeepSeekServer(t)
+			c := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
+			cmd := &ChatCmd{}
+
+			var stderr string
+			withStdin(t, tc.input, func() {
+				captureStdout(t, func() {
+					stderr = captureStderr(t, func() {
+						_ = cmd.replLoop(context.Background(), c, "sess-1", nil, false)
+					})
+				})
+			})
+			if !strings.HasSuffix(stderr, "\n\n\nconversation: sess-1:2\n") {
+				t.Errorf("expected a blank line before the exit conversation line; stderr = %q", stderr)
+			}
+		})
+	}
+}

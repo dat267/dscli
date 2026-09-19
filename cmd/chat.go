@@ -321,7 +321,7 @@ func (c *ChatCmd) ask(ctx context.Context, prompt string) error {
 		}
 		return json.NewEncoder(os.Stdout).Encode(out)
 	}
-	fmt.Fprintf(os.Stderr, "\nconversation: %s\n", convID)
+	endConversation(os.Stderr, convID)
 	renderSources(os.Stderr, sources)
 	return nil
 }
@@ -514,7 +514,7 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 			continue
 		case line == "/exit" || line == "/quit":
 			if turns > 0 {
-				fmt.Fprintf(os.Stderr, "conversation: %s\n", conversation)
+				endConversation(os.Stderr, conversation)
 			}
 			return nil
 		case line == "/new":
@@ -770,7 +770,7 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 	}
 
 	if turns > 0 {
-		fmt.Fprintf(os.Stderr, "conversation: %s\n", conversation)
+		endConversation(os.Stderr, conversation)
 	}
 	return nil
 }
