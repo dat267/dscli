@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -445,17 +444,33 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 	fmt.Fprintln(os.Stderr, u.dim("one question per line · /help for commands"))
 	fmt.Fprintln(os.Stderr)
 
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	var turns int
 	// lastPartial keeps the text of the most recent filtered reply so /resume
 	// can continue it; it is cleared when a later turn completes unfiltered.
 	var lastPartial string
+	// reader is the input reader: lineEditor in interactive mode (raw terminal),
+	// scannerLineReader otherwise (pipes, redirects).
+	var readLineFn func() (string, bool, error)
+	if interactive {
+		ed := newLineEditor(nil)
+		readLineFn = func() (string, bool, error) {
+			text, eof, _, err := ed.readLine()
+			return text, eof, err
+		}
+	} else {
+		sr := newScannerLineReader()
+		readLineFn = func() (string, bool, error) {
+			return sr.readLine()
+		}
+	}
 	for {
-		if !scanner.Scan() {
+		line, eof, err := readLineFn()
+		if eof || err != nil {
+			if err != nil {
+				fmt.Fprintln(os.Stderr, u.red("error: "+err.Error()))
+			}
 			break
 		}
-		line := strings.TrimSpace(scanner.Text())
 		switch {
 		case line == "":
 			continue
@@ -568,10 +583,11 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 			if interactive {
 				fmt.Fprint(os.Stderr, u.bold(u.cyan("...> ")))
 			}
-			if !scanner.Scan() {
+			var cont string
+			cont, eof, err = readLineFn()
+			if eof || err != nil {
 				break
 			}
-			cont := strings.TrimSpace(scanner.Text())
 			typed = append(typed, cont)
 			line += "\n" + cont
 		}
@@ -623,8 +639,12 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 			}
 		}
 		fmt.Fprintln(os.Stdout) // breathing room between the prompt and the reply
-		var filtered bool
-		_, err := recoverStaleSession(ctx, client, c.cfgPath, conversation, firstTurn, func(sid string) error {
+		var (
+			filtered bool
+			rerr     error
+		)
+
+		_, rerr = recoverStaleSession(ctx, client, c.cfgPath, conversation, firstTurn, func(sid string) error {
 			cid, isFiltered, e := c.oneTurn(ctx, client, sid, line, model, write, &sources)
 			if e == nil {
 				convID = cid
@@ -633,11 +653,11 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 			return e
 		})
 		firstTurn = false
-		if err != nil {
+		if rerr != nil {
 			if last != '\n' && last != 0 {
 				fmt.Fprintln(os.Stdout)
 			}
-			fmt.Fprintln(os.Stderr, u.red("error: "+err.Error()))
+			fmt.Fprintln(os.Stderr, u.red("error: "+rerr.Error()))
 			if last != '\n' {
 				fmt.Fprintln(os.Stdout)
 			}
@@ -667,9 +687,7 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 		persistConversation(c.cfgPath, c.Persist, conversation)
 		turns++
 	}
-	if err := scanner.Err(); err != nil {
-		return err
-	}
+
 	if turns > 0 {
 		fmt.Fprintf(os.Stderr, "conversation: %s\n", conversation)
 	}
