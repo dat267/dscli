@@ -369,3 +369,40 @@ func TestFetchFiles(t *testing.T) {
 		t.Errorf("files = %+v", files)
 	}
 }
+
+// TestDeleteSessionsHARShape pins the exact exchange captured from the live
+// site: POST /api/v0/chat_session/delete with a single-key body, the current
+// client headers, no PoW header, and a response whose biz_data is null.
+func TestDeleteSessionsHARShape(t *testing.T) {
+	const id = "fb62955e-f3b2-4218-a957-3d46e767a40f"
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != sessionDeletePath || r.Method != http.MethodPost {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		if h := r.Header.Get("x-ds-pow-response"); h != "" {
+			t.Error("delete must not carry a PoW header")
+		}
+		if h := r.Header.Get("x-client-version"); h != "2.5.0" {
+			t.Errorf("x-client-version = %q, want 2.5.0", h)
+		}
+		if h := r.Header.Get("content-type"); h != "application/json" {
+			t.Errorf("content-type = %q", h)
+		}
+		if h := r.Header.Get("referer"); h != BaseURL+"/" {
+			t.Errorf("referer = %q", h)
+		}
+		raw, _ := io.ReadAll(r.Body)
+		gotBody = string(raw)
+		_, _ = io.WriteString(w, `{"code":0,"msg":"","data":{"biz_code":0,"biz_msg":"","biz_data":null}}`)
+	}))
+	defer srv.Close()
+
+	c := NewClient(Session{Token: "tok", Cookie: "ck"}, 0, srv.URL)
+	if err := c.DeleteSessions(context.Background(), []string{id}); err != nil {
+		t.Fatalf("DeleteSessions: %v", err)
+	}
+	if want := `{"chat_session_ids":["` + id + `"]}`; gotBody != want {
+		t.Errorf("body = %s, want %s", gotBody, want)
+	}
+}
