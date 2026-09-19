@@ -25,6 +25,7 @@ type ChatCmd struct {
 	Model        string        `short:"m" help:"Model for a new thread: default (Instant) or expert. Cannot be combined with --conversation — a thread's model is fixed when it is created"`
 	Thinking     bool          `short:"t" help:"Enable DeepThink reasoning"`
 	Search       bool          `short:"s" help:"Enable web search"`
+	Attach       []string      `help:"Upload a file and attach it to the message (repeatable; up to 50 files, 100 MB each)"`
 	JSONOut      bool          `help:"Emit NDJSON: one {\"delta\":...} line per chunk, then a final {\"done\":true,\"conversation_id\":...} line"`
 	Timeout      time.Duration `help:"Overall budget for one question (0 = no limit)" default:"15m"`
 
@@ -94,7 +95,7 @@ func (c *ChatCmd) transcriptsOn() bool {
 // ("<session_id>:<message_id>") and whether the reply was rejected by the
 // content-safety filter (the partial text already written is kept for
 // /resume).
-func (c *ChatCmd) oneTurn(ctx context.Context, client *deepseek.Client, conversation, prompt, model string, write func(string) error, sources *[]deepseek.Source) (string, bool, error) {
+func (c *ChatCmd) oneTurn(ctx context.Context, client *deepseek.Client, conversation, prompt, model string, refIDs []string, write func(string) error, sources *[]deepseek.Source) (string, bool, error) {
 	sessionID, parentID := splitConversation(conversation)
 	if sessionID == "" {
 		sid, err := client.CreateChatSession(ctx)
@@ -117,6 +118,7 @@ func (c *ChatCmd) oneTurn(ctx context.Context, client *deepseek.Client, conversa
 		ModelType:       modelType,
 		ThinkingEnabled: c.Thinking,
 		SearchEnabled:   c.Search,
+		RefFileIDs:      refIDs,
 	}, write)
 	if err != nil {
 		return "", false, err
@@ -288,11 +290,15 @@ func (c *ChatCmd) ask(ctx context.Context, prompt string) error {
 
 	var convID string
 	var replyBuf strings.Builder
+	askAttach, err := uploadAttachments(ctx, client, c.Attach, effectiveModel(c.Model), c.Thinking)
+	if err != nil {
+		return err
+	}
 	if c.transcriptsOn() {
 		appendTranscript(c.cfgPath, conversation, "user", prompt)
 	}
-	_, err := recoverStaleSession(ctx, client, c.cfgPath, conversation, trusted, func(sid string) error {
-		cid, _, e := c.oneTurn(ctx, client, sid, prompt, effectiveModel(c.Model), func(delta string) error {
+	_, err = recoverStaleSession(ctx, client, c.cfgPath, conversation, trusted, func(sid string) error {
+		cid, _, e := c.oneTurn(ctx, client, sid, prompt, effectiveModel(c.Model), askAttach, func(delta string) error {
 			replyBuf.WriteString(delta)
 			return c.answerWriter()(delta)
 		}, &sources)
@@ -457,6 +463,14 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 	}
 
 	var turns int
+	attachIDs, err := uploadAttachments(ctx, client, c.Attach, model, thinking)
+	if err != nil {
+		return err
+	}
+	// pendingAttach holds uploaded file ids queued for the next message:
+	// --attach seeds it, /attach appends. Consumed by exactly one message.
+	pendingAttach := attachIDs
+
 	// lastPartial keeps the text of the most recent filtered reply so /resume
 	// can continue it; it is cleared when a later turn completes unfiltered.
 	var lastPartial string
@@ -604,6 +618,24 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 			pendingFiles = append(pendingFiles, block)
 			fmt.Fprintf(os.Stderr, "%s\n", u.note("loaded "+arg+" (prepended to the next message)"))
 			continue
+		case line == "/attach" || strings.HasPrefix(line, "/attach "):
+			arg := strings.TrimSpace(strings.TrimPrefix(line, "/attach"))
+			if arg == "" {
+				fmt.Fprintln(os.Stderr, u.red("usage: /attach <path>"))
+				continue
+			}
+			p := arg
+			if !filepath.IsAbs(p) {
+				p = filepath.Join(c.Workdir, p)
+			}
+			ids, err := uploadAttachments(ctx, client, []string{p}, model, thinking)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%s\n", u.red("attach: "+err.Error()))
+				continue
+			}
+			pendingAttach = append(pendingAttach, ids...)
+			fmt.Fprintf(os.Stderr, "%s\n", u.note("attached "+arg+" to the next message"))
+			continue
 		case strings.HasPrefix(line, "/"):
 			fmt.Fprintln(os.Stderr, u.red("unknown command (/help for commands)"))
 			continue
@@ -633,6 +665,10 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 			line = strings.Join(pendingFiles, "") + line
 			pendingFiles = nil
 		}
+		// Attachment ids apply to this message only (the server keeps them in
+		// the thread's context afterwards).
+		refIDs := pendingAttach
+		pendingAttach = nil
 
 		// A reset (/new, /model) leaves conversation empty; the next turn
 		// spawns a fresh session. In persist mode it becomes the new default
@@ -687,7 +723,7 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 		)
 
 		_, rerr = recoverStaleSession(ctx, client, c.cfgPath, conversation, firstTurn, func(sid string) error {
-			cid, isFiltered, e := c.oneTurn(ctx, client, sid, line, model, write, &sources)
+			cid, isFiltered, e := c.oneTurn(ctx, client, sid, line, model, refIDs, write, &sources)
 			if e == nil {
 				convID = cid
 				filtered = isFiltered
@@ -760,6 +796,7 @@ func printReplHelp(u ui) {
   /search [on|off]            toggle web search
   /resume [instruction]       continue a reply the filter cut off, from its partial text
   /file <path>                load a file's (or directory's) contents into the next message
+  /attach <path>              upload a file and attach it to the next message
   /session [id]               show the current conversation; select a saved session to resume
   /sessions                   list sessions with saved texts
   /help                       this help

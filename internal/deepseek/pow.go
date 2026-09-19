@@ -1,7 +1,7 @@
 // Package deepseek speaks chat.deepseek.com's internal web API: it creates a
-// chat session, solves DeepSeek's DeepSeekHashV1 proof-of-work challenge (by
-// running DeepSeek's own WebAssembly module inside the wazero sandbox) and
-// streams the completion response.
+// chat session, uploads file attachments, solves DeepSeek's DeepSeekHashV1
+// proof-of-work challenge (by running DeepSeek's own WebAssembly module inside
+// the wazero sandbox) and streams the completion response.
 package deepseek
 
 import (

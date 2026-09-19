@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -86,6 +87,12 @@ func fakeDeepSeekServerWith(t *testing.T, completions []string) (*httptest.Serve
 			rec.mu.Unlock()
 			w.Header().Set("Content-Type", "text/event-stream")
 			_, _ = io.WriteString(w, resp)
+		case "/api/v0/file/upload_file":
+			rec.mu.Lock()
+			rec.uploads = append(rec.uploads, r.Header.Get("x-file-size"))
+			id := fmt.Sprintf("file-%d", len(rec.uploads))
+			rec.mu.Unlock()
+			_, _ = io.WriteString(w, `{"code":0,"data":{"biz_data":{"id":"`+id+`","status":"PENDING","file_name":"x"}}}`)
 		case "/api/v0/chat_session/delete":
 			body, _ := io.ReadAll(r.Body)
 			var env struct {
@@ -112,6 +119,7 @@ type fakeRecorder struct {
 	powHeader        string
 	completionBodies []string
 	remaining        []string
+	uploads          []string // x-file-size per uploaded file
 }
 
 // withStdin redirects os.Stdin to a pipe containing input for the duration
@@ -286,6 +294,25 @@ func completionBody(t *testing.T, rec *fakeRecorder, i int) (prompt string, pare
 	}
 	prompt, _ = env["prompt"].(string)
 	return prompt, env["parent_message_id"]
+}
+
+// completionRefIDs returns the ref_file_ids of the i-th completion body.
+func completionRefIDs(t *testing.T, rec *fakeRecorder, i int) []string {
+	t.Helper()
+	rec.mu.Lock()
+	if i >= len(rec.completionBodies) {
+		rec.mu.Unlock()
+		t.Fatalf("completion %d not recorded", i)
+	}
+	raw := rec.completionBodies[i]
+	rec.mu.Unlock()
+	var env struct {
+		RefFileIDs []string `json:"ref_file_ids"`
+	}
+	if err := json.Unmarshal([]byte(raw), &env); err != nil {
+		t.Fatalf("completion body %d not JSON: %v", i, err)
+	}
+	return env.RefFileIDs
 }
 
 // TestPromptRecolor: the echoed prompt is re-rendered in the user colour by

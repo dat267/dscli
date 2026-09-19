@@ -5,7 +5,7 @@ free signed-in [chat.deepseek.com](https://chat.deepseek.com) account directly,
 speaking the site's internal web API: it creates a chat session, solves
 DeepSeek's DeepSeekHashV1 proof-of-work challenge by running DeepSeek's own
 WebAssembly module inside the [wazero](https://wazero.io) sandbox (vendored
-`sha3_wasm_bg.wasm`), and streams the reply.
+`sha3_wasm_bg.wasm`), uploads any attached files, and streams the reply.
 
 Unofficial project for personal use — not affiliated with DeepSeek.
 
@@ -69,6 +69,11 @@ dscli ask "What is 2+2?"
 echo "summarize this" | dscli ask
 dscli ask --thinking --search "latest Mars rover news"
 
+# Attach a file: it is uploaded to DeepSeek and referenced by the message
+# (up to 50 files per message, 100 MB each)
+dscli ask --attach chapter.md "summarize the chapter"
+dscli chat --attach a.pdf --attach b.png "what changed between these?"
+
 # Continue that conversation later
 dscli chat -c '<conversation id>' "And what about Rice's theorem?"
 ```
@@ -107,7 +112,10 @@ inserts a blank line and keeps going, and a trailing `\\` sends the line
 literally. **`/file <path>`** loads a file's (or directory's) contents
 (relative to `--workdir`, defaulting to `.`) into a buffer that is prepended
 to the next submitted message inside a `<file>`/`<dir>` block — repeat it to
-stack several files.
+stack several files. **`/attach <path>`** instead uploads the file to
+DeepSeek and attaches it to the next message (the same mechanism as
+`--attach`, up to 50 files, 100 MB each); the server keeps it in the
+thread's context afterwards, so later questions can refer back to it.
 **`/resume`** (see the Censorship section below) continues a filtered reply.
 
 **Censorship.** Prompts are sent exactly as written — no hidden instructions.
@@ -288,15 +296,26 @@ cannot be combined with `--conversation`.
    append/SET/BATCH patches on `response/fragments/-1/content`, and bare
    pathless `{"v":...}` chunks (which can carry the reply's very first
    characters) — all reconstructed in arrival order without trimming, so no
-   leading text is lost. Fragments are tracked by type: content belonging to
-   THINK/SEARCH fragments is never rendered as answer text, so `--thinking`
-   mode cannot leak reasoning into the reply (or drop the answer's opening
-   token after it). `message_id` (from `v.message_id` / `v.message.id`
-   or a patch path) becomes the next turn's `parent_message_id`.
+   leading text is lost. Nested BATCH paths are relative to the batch's own
+   path (`{"p":"response","o":"BATCH","v":[{"p":"fragments",...}]}`),
+   as the current web client sends them. Fragments are tracked by type:
+   content belonging to THINK/SEARCH fragments is never rendered as answer
+   text, so `--thinking` mode cannot leak reasoning into the reply and a
+   search status line ("Found N web pages") cannot leak either.
+   `message_id` (from `v.message_id` / `v.message.id` or a patch path)
+   becomes the next turn's `parent_message_id`.
+5. Attachments: `POST /api/v0/file/upload_file` (multipart field `file`, with
+   its own `target_path` PoW header plus `x-model-type`/`x-thinking-enabled`/
+   `x-file-size`) returns a file id, which the completion sends back in
+   `ref_file_ids`; `GET /api/v0/file/fetch_files?file_ids=...` resolves ids to
+   records. `--attach`/`/attach` enforce the site's limits client-side: at
+   most 50 files, 100 MB each.
 
 Credentials are sent as `authorization: Bearer <token>` plus the `ds_session_id`
-cookie, with the site's `x-app-version` / `x-client-version` /
-`x-client-platform` / `x-client-bundle-id` headers and origin/referer.
+cookie, with the site's current client-identity headers (`x-client-version:
+2.5.0`, `x-client-platform`, `x-client-bundle-id`, `x-client-locale`,
+`x-client-timezone-offset` computed from the local zone, plus a per-client
+`x-device-id` UUID and an empty `x-device-model`) and origin/referer.
 
 The PoW challenge is short-lived, so a failed completion (transport hiccup,
 HTTP 401/403/429) automatically re-solves a fresh challenge once.

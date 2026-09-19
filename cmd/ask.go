@@ -22,6 +22,7 @@ type AskCmd struct {
 	Model        string        `short:"m" help:"Model: default (Instant) or expert" default:""`
 	Thinking     bool          `short:"t" help:"Enable DeepThink reasoning"`
 	Search       bool          `short:"s" help:"Enable web search"`
+	Attach       []string      `help:"Upload a file and attach it to the message (repeatable; up to 50 files, 100 MB each)"`
 	Persist      bool          `help:"Persist and reuse the default session across runs, and save transcripts (default: ephemeral — the session is deleted when the run ends)"`
 	NoTranscript bool          `help:"Do not save session texts (transcripts) next to the config file"`
 	JSONOut      bool          `help:"Emit NDJSON: one {\"delta\":...} line per chunk, then a {\"sources\":[...]} line when search returned citations"`
@@ -85,6 +86,11 @@ func (c *AskCmd) Run(app *App, ctx context.Context) error {
 		UserAgent: c.UserAgent,
 	}, c.Timeout, c.clientBase)
 
+	attachIDs, err := uploadAttachments(ctx, client, c.Attach, effectiveModel(c.Model), c.Thinking)
+	if err != nil {
+		return err
+	}
+
 	// By default the persisted default session is resumed (created + saved on
 	// first use); without --persist it runs in a fresh session deleted afterwards.
 	sessionID, trusted, cleanup, err := resolveDefaultSession(ctx, client, c.cfgPath, c.Persist)
@@ -122,6 +128,7 @@ func (c *AskCmd) Run(app *App, ctx context.Context) error {
 			ModelType:       effectiveModel(c.Model),
 			ThinkingEnabled: c.Thinking,
 			SearchEnabled:   c.Search,
+			RefFileIDs:      attachIDs,
 		}, write)
 		if e != nil {
 			return e
