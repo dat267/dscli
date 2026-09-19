@@ -173,10 +173,11 @@ func noteToStderr(text string) {
 	fmt.Fprintln(os.Stderr, u.dim(text))
 }
 
-// replNote prints one line of slash-command feedback followed by a blank
-// line, so the next prompt is not glued to it (the status block does the same
-// for state changes, and the exit block for the conversation line).
+// replNote prints one line of slash-command feedback as a padded block: a
+// blank line separates it from the command the terminal echoed above and from
+// the next prompt below, matching the status and exit blocks.
 func replNote(text string) {
+	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, text)
 	fmt.Fprintln(os.Stderr)
 }
@@ -525,6 +526,7 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 			replNote(u.note("new conversation"))
 			continue
 		case line == "/help":
+			fmt.Fprintln(os.Stderr) // separate the block from the echoed command
 			printReplHelp(u)
 			fmt.Fprintln(os.Stderr) // blank line: help is a block, not chat text
 			continue

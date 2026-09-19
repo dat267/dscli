@@ -533,8 +533,9 @@ func TestReplEphemeralDeletionNote(t *testing.T) {
 	}
 }
 
-// TestReplUnknownCommandSpacing: slash-command feedback is its own block, so
-// the next prompt is not glued to it.
+// TestReplUnknownCommandSpacing: slash-command feedback is a padded block
+// like the status block — a blank line separates it from the echoed command
+// above and from the next prompt below.
 func TestReplUnknownCommandSpacing(t *testing.T) {
 	srv, _ := fakeDeepSeekServer(t)
 	c := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
@@ -548,8 +549,10 @@ func TestReplUnknownCommandSpacing(t *testing.T) {
 			})
 		})
 	})
-	if !strings.Contains(stderr, "unknown command (/help for commands)\n\n") {
-		t.Errorf("blank line after unknown-command feedback expected; stderr = %q", stderr)
+	// The banner's hint line ends with "commands", then its own trailing
+	// blank, then the feedback block's leading blank: three newlines.
+	if !strings.Contains(stderr, "commands\n\n\nunknown command (/help for commands)\n\n") {
+		t.Errorf("padded unknown-command block expected; stderr = %q", stderr)
 	}
 }
 
