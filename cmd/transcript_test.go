@@ -258,3 +258,29 @@ func TestSessionTranscriptDelete(t *testing.T) {
 		t.Errorf("no-session delete output = %q", noSession)
 	}
 }
+
+// TestSessionTranscriptSpacing: a blank line separates the header from the
+// entries and each entry from the next, a reply that already ends in a newline
+// does not add an extra blank line, and the output does not end with one.
+func TestSessionTranscriptSpacing(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "dscli.json")
+	appendTranscript(cfgPath, "sess-9", "user", "why?")
+	appendTranscript(cfgPath, "sess-9", "assistant", "because\n")
+	app := &App{cfgPath: cfgPath}
+
+	out := captureStdout(t, func() {
+		cmd := &SessionTranscriptCmd{Session: "sess-9"}
+		if err := cmd.Run(app); err != nil {
+			t.Fatalf("session transcript: %v", err)
+		}
+	})
+	if strings.Contains(out, "\n\n\n") {
+		t.Errorf("no double blank lines expected:\n%q", out)
+	}
+	if !strings.Contains(out, "\n\n") {
+		t.Errorf("blank line between header and entries expected:\n%q", out)
+	}
+	if !strings.HasSuffix(out, "because\n") {
+		t.Errorf("output should end with the last entry and no trailing blank:\n%q", out)
+	}
+}

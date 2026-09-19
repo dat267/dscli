@@ -329,8 +329,8 @@ func (c *ChatCmd) ask(ctx context.Context, prompt string) error {
 		}
 		return json.NewEncoder(os.Stdout).Encode(out)
 	}
-	endConversation(os.Stderr, convID)
 	renderSources(os.Stderr, sources)
+	endConversation(os.Stderr, convID)
 	return nil
 }
 

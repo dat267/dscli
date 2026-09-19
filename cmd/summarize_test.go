@@ -72,3 +72,24 @@ func TestSummarizeOutputFile(t *testing.T) {
 		t.Errorf("summarize prompt not sent:\n%s", prompt)
 	}
 }
+
+// TestSummarizeStdoutEndsWithNewline: a summary with no trailing newline still
+// leaves the shell prompt on its own line.
+func TestSummarizeStdoutEndsWithNewline(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "notes.md")
+	if err := os.WriteFile(in, []byte("Hello\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	srv, _ := fakeDeepSeekServerWith(t, []string{completionSSE(t, 2, "no trailing newline")})
+	defer srv.Close()
+	cmd := &SummarizeCmd{File: []string{in}, Token: "tok", clientBase: srv.URL}
+	out := captureStdout(t, func() {
+		if err := cmd.Run(nil, context.Background()); err != nil {
+			t.Fatalf("summarize: %v", err)
+		}
+	})
+	if !strings.HasSuffix(out, "no trailing newline\n") {
+		t.Errorf("stdout = %q, want a trailing newline", out)
+	}
+}

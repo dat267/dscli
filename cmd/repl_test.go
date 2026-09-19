@@ -552,3 +552,32 @@ func TestReplUnknownCommandSpacing(t *testing.T) {
 		t.Errorf("blank line after unknown-command feedback expected; stderr = %q", stderr)
 	}
 }
+
+// TestChatSourcesBeforeConversation: the non-interactive chat path prints the
+// citation block before the closing conversation line, matching the REPL (the
+// conversation line is always last).
+func TestChatSourcesBeforeConversation(t *testing.T) {
+	srv, _ := fakeDeepSeekServerWith(t, []string{
+		searchSSE(t, 2, "Gold is high [citation:1]", []map[string]string{
+			{"url": "https://ex.com/gold", "title": "Gold Prices"},
+		}),
+	})
+	cmd := &ChatCmd{Prompt: []string{"gold?"}, Search: true, Token: "tok", clientBase: srv.URL}
+
+	out := captureCombined(t, func() {
+		if err := cmd.Run(nil, context.Background()); err != nil {
+			t.Fatalf("chat: %v", err)
+		}
+	})
+	iSrc := strings.Index(out, "Sources:")
+	iConv := strings.Index(out, "conversation: ")
+	if iSrc < 0 || iConv < 0 {
+		t.Fatalf("missing block; output:\n%q", out)
+	}
+	if iSrc > iConv {
+		t.Errorf("Sources: must precede the conversation line; output:\n%q", out)
+	}
+	if !strings.HasSuffix(out, "note: ephemeral session deleted\n") {
+		t.Errorf("output should still end with the deletion note; got\n%q", out)
+	}
+}

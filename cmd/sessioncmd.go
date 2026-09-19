@@ -19,6 +19,7 @@ import (
 // default, or inspect the saved texts. A bare `dscli session` prints the
 // persisted value.
 type SessionCmdGroup struct {
+	Show       SessionShowCmd       `cmd:"" default:"1" hidden:"" help:"Show the persisted default session"`
 	List       SessionListCmd       `cmd:"" help:"List sessions with saved texts"`
 	Select     SessionSelectCmd     `cmd:"" help:"Select a session to resume as the default"`
 	Transcript SessionTranscriptCmd `cmd:"" help:"Print or delete the saved session texts (transcript) for a session"`
@@ -26,7 +27,15 @@ type SessionCmdGroup struct {
 	Forget     SessionForgetCmd     `cmd:"" help:"Forget the persisted default session (the thread is kept server-side)"`
 }
 
-func (c *SessionCmdGroup) Run(app *App) error {
+// SessionShowCmd is the bare `dscli session`: it prints the persisted default
+// conversation. It is the group's default command, hidden from help.
+//
+// It is a subcommand rather than a Run method on the group because kong runs
+// the Run methods of every node in the selected hierarchy, so a group Run
+// would also fire after `session list`, `session delete`, and the rest.
+type SessionShowCmd struct{}
+
+func (c *SessionShowCmd) Run(app *App) error {
 	if saved := loadSavedSession(app.CfgPath()); saved != "" {
 		fmt.Println(saved)
 	} else {
@@ -233,11 +242,11 @@ func (c *SessionTranscriptCmd) Run(app *App) error {
 		return nil
 	}
 	fmt.Printf("session %s · %s\n", bare, p)
-	for i, e := range entries {
-		if i > 0 {
-			fmt.Println()
-		}
-		fmt.Printf("%s  %s\n%s\n", e.Time, e.Role, e.Text)
+	for _, e := range entries {
+		// One blank line before each entry, including the first (separating
+		// the header from the block).
+		fmt.Println()
+		fmt.Printf("%s  %s\n%s\n", e.Time, e.Role, strings.TrimRight(e.Text, "\n"))
 	}
 	return nil
 }

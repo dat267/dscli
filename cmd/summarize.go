@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/dat267/dscli/internal/deepseek"
@@ -137,5 +138,8 @@ func (c *SummarizeCmd) summarizeFile(ctx context.Context, client *deepseek.Clien
 		return nil
 	}
 	fmt.Print(result)
+	if !strings.HasSuffix(result, "\n") {
+		fmt.Println()
+	}
 	return nil
 }

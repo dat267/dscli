@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -280,7 +282,7 @@ func TestReplPersistNewSessionSaved(t *testing.T) {
 // TestSessionShow: bare `dscli session` prints the persisted value.
 func TestSessionShow(t *testing.T) {
 	cfg := filepath.Join(t.TempDir(), "dscli.json")
-	cmd := &SessionCmdGroup{}
+	cmd := &SessionShowCmd{}
 	if out := captureStdout(t, func() {
 		if err := cmd.Run(&App{cfgPath: cfg}); err != nil {
 			t.Fatal(err)
@@ -465,3 +467,31 @@ func TestSessionSelect(t *testing.T) {
 }
 
 var _ = deepseek.Session{} // keep the import if assertions change
+
+// TestSessionSubcommandNoGroupOutput: kong runs the Run methods of the whole
+// selected hierarchy, so a Run method on the session group leaked the bare
+// "show the persisted session" line into every subcommand. The bare command is
+// now a hidden default subcommand, so `session list` prints only its own body.
+func TestSessionSubcommandNoGroupOutput(t *testing.T) {
+	cfg := filepath.Join(t.TempDir(), "dscli.json")
+	if err := os.WriteFile(cfg, []byte(`{"session":"abc:3"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("go", append([]string{"run", ".."}, args...)...)
+		cmd.Env = append(os.Environ(), "DSCLI_CONFIG_FILE="+cfg)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("go run .. %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+		return string(out)
+	}
+
+	if got := run("session", "list"); got != "no local sessions (nothing saved yet)\n" {
+		t.Errorf("session list = %q, want only the list body", got)
+	}
+	if got := run("session"); got != "abc:3\n" {
+		t.Errorf("bare session = %q, want the persisted value", got)
+	}
+}
