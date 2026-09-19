@@ -315,6 +315,48 @@ func completionRefIDs(t *testing.T, rec *fakeRecorder, i int) []string {
 	return env.RefFileIDs
 }
 
+// completionFlags returns the thinking_enabled/search_enabled flags of the
+// i-th completion body.
+func completionFlags(t *testing.T, rec *fakeRecorder, i int) (thinking, search bool) {
+	t.Helper()
+	rec.mu.Lock()
+	if i >= len(rec.completionBodies) {
+		rec.mu.Unlock()
+		t.Fatalf("completion %d not recorded", i)
+	}
+	raw := rec.completionBodies[i]
+	rec.mu.Unlock()
+	var env struct {
+		ThinkingEnabled bool `json:"thinking_enabled"`
+		SearchEnabled   bool `json:"search_enabled"`
+	}
+	if err := json.Unmarshal([]byte(raw), &env); err != nil {
+		t.Fatalf("completion body %d not JSON: %v", i, err)
+	}
+	return env.ThinkingEnabled, env.SearchEnabled
+}
+
+// TestReplTogglesAffectRequests: /thinking and /search must change the flags
+// the completion actually sends, not just the status line.
+func TestReplTogglesAffectRequests(t *testing.T) {
+	srv, rec := fakeDeepSeekServer(t)
+	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
+	cmd := &ChatCmd{}
+
+	withStdin(t, "/thinking\n/search\nhi\n/quit\n", func() {
+		captureStdout(t, func() {
+			captureStderr(t, func() {
+				_ = cmd.replLoop(context.Background(), client, "sess-1", nil, false)
+			})
+		})
+	})
+
+	thinking, search := completionFlags(t, rec, 0)
+	if !thinking || !search {
+		t.Errorf("completion flags thinking=%v search=%v, want both true", thinking, search)
+	}
+}
+
 // TestPromptRecolor: the echoed prompt is re-rendered in the user colour by
 // erasing the echoed line(s) and reprinting them — but only when every
 // physical line fits the terminal width (otherwise the echo wrapped and

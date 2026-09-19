@@ -95,7 +95,7 @@ func (c *ChatCmd) transcriptsOn() bool {
 // ("<session_id>:<message_id>") and whether the reply was rejected by the
 // content-safety filter (the partial text already written is kept for
 // /resume).
-func (c *ChatCmd) oneTurn(ctx context.Context, client *deepseek.Client, conversation, prompt, model string, refIDs []string, write func(string) error, sources *[]deepseek.Source) (string, bool, error) {
+func (c *ChatCmd) oneTurn(ctx context.Context, client *deepseek.Client, conversation, prompt, model string, thinking, search bool, refIDs []string, write func(string) error, sources *[]deepseek.Source) (string, bool, error) {
 	sessionID, parentID := splitConversation(conversation)
 	if sessionID == "" {
 		sid, err := client.CreateChatSession(ctx)
@@ -116,8 +116,8 @@ func (c *ChatCmd) oneTurn(ctx context.Context, client *deepseek.Client, conversa
 		ParentMessageID: parentID,
 		Prompt:          prompt,
 		ModelType:       modelType,
-		ThinkingEnabled: c.Thinking,
-		SearchEnabled:   c.Search,
+		ThinkingEnabled: thinking,
+		SearchEnabled:   search,
 		RefFileIDs:      refIDs,
 	}, write)
 	if err != nil {
@@ -298,7 +298,7 @@ func (c *ChatCmd) ask(ctx context.Context, prompt string) error {
 		appendTranscript(c.cfgPath, conversation, "user", prompt)
 	}
 	_, err = recoverStaleSession(ctx, client, c.cfgPath, conversation, trusted, func(sid string) error {
-		cid, _, e := c.oneTurn(ctx, client, sid, prompt, effectiveModel(c.Model), askAttach, func(delta string) error {
+		cid, _, e := c.oneTurn(ctx, client, sid, prompt, effectiveModel(c.Model), c.Thinking, c.Search, askAttach, func(delta string) error {
 			replyBuf.WriteString(delta)
 			return c.answerWriter()(delta)
 		}, &sources)
@@ -723,7 +723,7 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 		)
 
 		_, rerr = recoverStaleSession(ctx, client, c.cfgPath, conversation, firstTurn, func(sid string) error {
-			cid, isFiltered, e := c.oneTurn(ctx, client, sid, line, model, refIDs, write, &sources)
+			cid, isFiltered, e := c.oneTurn(ctx, client, sid, line, model, thinking, search, refIDs, write, &sources)
 			if e == nil {
 				convID = cid
 				filtered = isFiltered
