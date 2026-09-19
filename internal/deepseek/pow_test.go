@@ -162,3 +162,53 @@ func TestPowPayloadFieldOrder(t *testing.T) {
 		t.Errorf("payload JSON differs:\n got %s\nwant %s", raw, want)
 	}
 }
+
+// TestSolveRealChallengeVectors replays challenges the live site issued
+// (captured in a HAR) together with the answers the web client submitted in
+// its x-ds-pow-response headers. Unlike the offline golden above, these come
+// from production: solving each challenge with the same salt/expire_at/
+// difficulty must reproduce the recorded answer, pinning the prefix format,
+// the wasm call convention and the JSON number handling against the current
+// server.
+func TestSolveRealChallengeVectors(t *testing.T) {
+	vectors := []struct {
+		challenge, salt, signature string
+		expireAt                   string
+		difficulty                 float64
+		want                       int64
+	}{
+		{"16d6d539f41b758899d4687af4fbad52ec302236c4e9dcc55ba69e29554782ec", "8a09c5e0e0bb56df19d8", "f2676e1d6b72726da74dbd936c1f64e160ca03268ddec6a5b4c54944d1ae80a5", "1789842927388", 144000, 22298},
+		{"dcf7b173f8b8222947ac5e2f68e80bfc0596999021a6ee046efebf5ce205f17e", "0621a2ae1ce04161307d", "26ea1014ea2d5b854731a26c9d08a45e9d54330768b2e4bb9c51e83003ddf2d2", "1789842931799", 144000, 18230},
+		{"bbe1ad9efb4ae8aa69479c21960da5703d0b1c33e1e77a8528b380c673c4d482", "5dcb2c73b1aa513a7168", "ee81445879502e9ed54e607c35d599433fe9c95aa21c4e837c83216808358e8a", "1789842935323", 144000, 82103},
+		{"a013f8c0ddc7fbb222c4a4278c6eb219e05417a35968872ae727d2c567f35f8a", "3ed981bd7b91076d8022", "70fdf4ccef914f5518e12b8933d187df4241c23b655b805774627129471502bd", "1789842995871", 144000, 52573},
+	}
+	for i, v := range vectors {
+		ch := Challenge{
+			Algorithm:  "DeepSeekHashV1",
+			Challenge:  v.challenge,
+			Salt:       v.salt,
+			Signature:  v.signature,
+			TargetPath: CompletionPath,
+			Difficulty: v.difficulty,
+			ExpireAt:   json.Number(v.expireAt),
+		}
+		header, err := PowHeader(context.Background(), ch)
+		if err != nil {
+			t.Fatalf("vector %d: PowHeader: %v", i, err)
+		}
+		raw, err := base64.StdEncoding.DecodeString(header)
+		if err != nil {
+			t.Fatalf("vector %d: decode header: %v", i, err)
+		}
+		var got powPayload
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("vector %d: unmarshal header: %v", i, err)
+		}
+		if got.Answer != v.want {
+			t.Errorf("vector %d (%s…): answer = %d, want %d", i, v.challenge[:8], got.Answer, v.want)
+		}
+		if got.TargetPath != CompletionPath {
+			t.Errorf("vector %d: target_path = %q", i, got.TargetPath)
+		}
+	}
+}
