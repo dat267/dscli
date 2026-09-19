@@ -483,3 +483,55 @@ func TestSSEIndexedContentRespectsFragmentType(t *testing.T) {
 		t.Errorf("deltas = %q, want %q", all, want)
 	}
 }
+
+// TestSSESearchStreamRelativeBatchPaths mirrors the current web client's
+// search-enabled stream (HAR-observed). Two things matter:
+//
+//   - BATCH patches carry paths RELATIVE to the batch's own path, so
+//     {"p":"response/fragments/-1","o":"BATCH","v":[{"p":"content",...}]}
+//     targets the SEARCH fragment's content. That text is search chrome
+//     ("Found 12 web pages"), never answer text.
+//   - The answer's first token arrives through the relative nested
+//     {"p":"fragments","o":"APPEND"} under {"p":"response"}.
+func TestSSESearchStreamRelativeBatchPaths(t *testing.T) {
+	p := &patchParser{}
+	var all []string
+
+	// Snapshot: a SEARCH fragment with no content yet; results arrive later.
+	all = append(all, feed(t, p, `{"v":{"response":{"message_id":8,"parent_id":7,"role":"ASSISTANT","status":"WIP","search_enabled":true,"fragments":[{"id":2,"type":"SEARCH","status":"WIP","content":null,"queries":[{"query":"q"}],"results":[]}]}}}`)...)
+	if got := p.messageID; got == nil || *got != 8 {
+		t.Fatalf("messageID = %v, want 8", got)
+	}
+	// Results land on the search fragment's path.
+	feed(t, p, `{"p":"response/fragments/-1/results","v":[{"url":"https://a.example/1","title":"A","snippet":"s","cite_index":1},{"url":"https://b.example/2","title":"B","cite_index":2}]}`)
+	// The search status text is set with a RELATIVE BATCH patch: it must be
+	// attributed to the SEARCH fragment and dropped, not emitted as answer.
+	all = append(all, feed(t, p, `{"p":"response/fragments/-1","o":"BATCH","v":[{"p":"status","v":"FINISHED"},{"p":"content","v":"Found 2 web pages"}]}`)...)
+	// The answer fragment is appended through a relative nested patch.
+	all = append(all, feed(t, p, `{"p":"response","o":"BATCH","v":[{"p":"fragments","o":"APPEND","v":[{"id":3,"type":"RESPONSE","content":"Yes","references":[],"stage_id":2}]},{"p":"has_pending_fragment","o":"SET","v":false}]}`)...)
+	// Continuation with no "o": an append, not a replace.
+	all = append(all, feed(t, p, `{"p":"response/fragments/-1/content","v":", it happened."}`)...)
+	feed(t, p, `{"p":"response","o":"BATCH","v":[{"p":"quasi_status","v":"FINISHED"}]}`)
+
+	want := []string{"Yes", ", it happened."}
+	if !reflect.DeepEqual(all, want) {
+		t.Errorf("deltas = %q, want %q", all, want)
+	}
+	if len(p.sources) != 2 || p.sources[0].URL != "https://a.example/1" || p.sources[1].URL != "https://b.example/2" {
+		t.Errorf("sources = %v", p.sources)
+	}
+	if !p.finished {
+		t.Error("FINISHED should mark the reply finished")
+	}
+}
+
+// TestSSESearchFragmentTypeCollectsSources: the current client names the
+// search fragment type "SEARCH" (the older name was TOOL_SEARCH); either
+// spelling carries the citation results.
+func TestSSESearchFragmentTypeCollectsSources(t *testing.T) {
+	p := &patchParser{}
+	feed(t, p, `{"p":"response/fragments","o":"APPEND","v":[{"id":4,"type":"SEARCH","results":[{"url":"https://ex.com/s","title":"S"}]}]}`)
+	if len(p.sources) != 1 || p.sources[0].URL != "https://ex.com/s" {
+		t.Errorf("SEARCH fragment sources = %v, want one", p.sources)
+	}
+}

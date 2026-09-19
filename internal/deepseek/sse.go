@@ -140,7 +140,7 @@ func (p *patchParser) feedOne(obj map[string]any, emit func(string) error) error
 								}
 								p.markEmitted(len(p.fragKinds) - 1)
 							}
-						case strings.EqualFold(t, "tool_search"):
+						case isSearchFragment(t):
 							p.collectSources(fm)
 						}
 					}
@@ -165,7 +165,10 @@ func (p *patchParser) feedOne(obj map[string]any, emit func(string) error) error
 					if m, ok := it.(map[string]any); ok {
 						pp, _ := m["p"].(string)
 						oo, _ := m["o"].(string)
-						if err := p.applyPatch(pp, m["v"], oo, emit); err != nil {
+						// Nested BATCH patches carry paths relative to the
+						// batch's own path ({"p":"response","o":"BATCH",
+						// "v":[{"p":"fragments",...}]}).
+						if err := p.applyPatch(joinPath(path, pp), m["v"], oo, emit); err != nil {
 							return err
 						}
 					}
@@ -180,6 +183,23 @@ func (p *patchParser) feedOne(obj map[string]any, emit func(string) error) error
 	// candidates, and they may arrive before any path is active (this is
 	// what used to eat the reply's first characters).
 	return p.applyPathless(v, emit)
+}
+
+// joinPath resolves a nested BATCH patch path against the batch's own path.
+// Nested patches are relative to the parent ({"p":"response","o":"BATCH",
+// "v":[{"p":"fragments",...}]} targets response/fragments), an absolute
+// child path is left alone, and an empty child keeps the parent path.
+func joinPath(parent, child string) string {
+	switch {
+	case child == "":
+		return parent
+	case parent == "":
+		return child
+	case strings.HasPrefix(child, "/"):
+		return child
+	default:
+		return strings.TrimSuffix(parent, "/") + "/" + child
+	}
 }
 
 // applyPatch handles one content/results patch operation.
@@ -326,11 +346,17 @@ func (p *patchParser) applyFragments(v any, emit func(string) error) error {
 				return err
 			}
 			p.markEmitted(len(p.fragKinds) - 1)
-		case strings.EqualFold(t, "tool_search"):
+		case isSearchFragment(t):
 			p.collectSources(fm)
 		}
 	}
 	return nil
+}
+
+// isSearchFragment reports whether a fragment type carries search citations.
+// The current web client names it "SEARCH"; older streams used "TOOL_SEARCH".
+func isSearchFragment(t string) bool {
+	return strings.EqualFold(t, "search") || strings.EqualFold(t, "tool_search")
 }
 
 // applyPathless emits a pathless chunk. Pathless string chunks are visible
