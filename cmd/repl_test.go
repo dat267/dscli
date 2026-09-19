@@ -283,3 +283,30 @@ func completionBody(t *testing.T, rec *fakeRecorder, i int) (prompt string, pare
 	prompt, _ = env["prompt"].(string)
 	return prompt, env["parent_message_id"]
 }
+
+// TestPromptRecolor: the echoed prompt is re-rendered in the user colour by
+// erasing the echoed line(s) and reprinting them — but only when every
+// physical line fits the terminal width (otherwise the echo wrapped and
+// rewriting would leave artifacts).
+func TestPromptRecolor(t *testing.T) {
+	u := ui{color: true}
+	got := promptRecolor(u, []string{"hi"}, 80)
+	want := "\x1b[1F\x1b[2K" + u.cyan("hi") + "\n"
+	if got != want {
+		t.Errorf("promptRecolor = %q, want %q", got, want)
+	}
+	// Multiple lines (not used for continuations, but supported).
+	got = promptRecolor(u, []string{"one", "two"}, 80)
+	if got != "\x1b[1F\x1b[2K\x1b[1F\x1b[2K"+u.cyan("one")+"\n"+u.cyan("two")+"\n" {
+		t.Errorf("promptRecolor multi = %q", got)
+	}
+	// A line that cannot fit the width is left alone (the echo wrapped).
+	if got := promptRecolor(u, []string{strings.Repeat("x", 81)}, 80); got != "" {
+		t.Errorf("promptRecolor over-wide = %q, want empty", got)
+	}
+	// Colourless ui still emits the cursor moves and the plain text.
+	got = promptRecolor(ui{color: false}, []string{"hi"}, 80)
+	if got != "\x1b[1F\x1b[2Khi\n" {
+		t.Errorf("promptRecolor plain = %q", got)
+	}
+}

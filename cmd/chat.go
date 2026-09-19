@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/term"
+
 	"github.com/dat267/dscli/internal/deepseek"
 )
 
@@ -174,6 +176,29 @@ func noteToStderr(text string) {
 // partial reply embedded as context with an instruction to continue it in the
 // same voice. The content filter still applies to whatever the model
 // generates next — this only recovers the user's own cut-off text.
+// promptRecolor renders the escape sequence that recolours an echoed prompt:
+// for each echoed line, move the cursor up and erase it, then print the line
+// in the user-message colour. Returns "" when a physical line does not fit
+// the terminal width — the echo then wrapped, and rewriting would leave
+// artifacts. Byte length is used as a conservative width estimate (it
+// overestimates CJK, whose wide runes take ~3 bytes but 2 columns).
+func promptRecolor(u ui, lines []string, width int) string {
+	for _, l := range lines {
+		if len(l) > width {
+			return ""
+		}
+	}
+	var b strings.Builder
+	for range lines {
+		b.WriteString("\x1b[1F\x1b[2K") // cursor to the previous line, erase it
+	}
+	for _, l := range lines {
+		b.WriteString(u.cyan(l))
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
 func resumePrompt(partial, instruction string) string {
 	var b strings.Builder
 	b.WriteString("The previous reply was cut off by a content-safety filter. ")
@@ -533,6 +558,7 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 			continue
 		}
 
+		typed := []string{line}
 		// Multi-line prompt: a line ending in a single backslash continues
 		// onto the next line (a lone "\" line inserts a blank line and keeps
 		// going; "\\" at the end sends a literal backslash and ends the
@@ -545,7 +571,9 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 			if !scanner.Scan() {
 				break
 			}
-			line += "\n" + strings.TrimSpace(scanner.Text())
+			cont := strings.TrimSpace(scanner.Text())
+			typed = append(typed, cont)
+			line += "\n" + cont
 		}
 
 		// A reset (/new, /model) leaves conversation empty; the next turn
@@ -582,6 +610,17 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 		turnSession := conversation
 		if c.transcriptsOn() {
 			appendTranscript(c.cfgPath, turnSession, "user", line)
+		}
+		// Re-render the echoed prompt in the user-message colour: erase the
+		// echoed line(s) and reprint them. Only for single-line prompts on
+		// terminals (continuations carry the "...> " prompt on their line,
+		// which the cursor arithmetic would clobber).
+		if interactive && len(typed) == 1 && isTerminal(os.Stdout) {
+			if w, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && w > 0 {
+				if seq := promptRecolor(u, typed, w); seq != "" {
+					fmt.Fprint(os.Stdout, seq)
+				}
+			}
 		}
 		fmt.Fprintln(os.Stdout) // breathing room between the prompt and the reply
 		var filtered bool
