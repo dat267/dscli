@@ -444,3 +444,34 @@ func TestReplEmptyReplyNote(t *testing.T) {
 		t.Errorf("the note should point at DSCLI_DEBUG_SSE; stderr = %q", stderr)
 	}
 }
+
+// TestReplSourcesSpacing: the citation block is separated from the reply by
+// exactly one blank line, and followed by one blank line before the next
+// prompt. It previously had two blank lines above it (the loop's post-reply
+// blank plus renderSources' own) and none below.
+func TestReplSourcesSpacing(t *testing.T) {
+	srv, _ := fakeDeepSeekServerWith(t, []string{
+		searchSSE(t, 2, "Here is the news [citation:1]", []map[string]string{
+			{"url": "https://ex.com/a", "title": "A"},
+		}),
+	})
+	c := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
+	cmd := &ChatCmd{}
+
+	var out string
+	withStdin(t, "hi\n/quit\n", func() {
+		out = captureCombined(t, func() {
+			_ = cmd.replLoop(context.Background(), c, "sess-1", nil, false)
+		})
+	})
+
+	if strings.Contains(out, "\n\n\nSources:") {
+		t.Errorf("double blank line before Sources:\n%q", out)
+	}
+	if !strings.Contains(out, "\n\nSources:\n") {
+		t.Errorf("exactly one blank line before Sources: expected\n%q", out)
+	}
+	if !strings.Contains(out, "https://ex.com/a\n\nconversation:") {
+		t.Errorf("exactly one blank line after the sources block expected\n%q", out)
+	}
+}

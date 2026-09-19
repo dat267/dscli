@@ -762,8 +762,8 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 		if last != '\n' {
 			fmt.Fprintln(os.Stdout)
 		}
-		fmt.Fprintln(os.Stdout) // blank line before the next prompt
 		renderSources(os.Stderr, sources)
+		fmt.Fprintln(os.Stdout) // blank line before the next prompt
 		conversation = convID
 		persistConversation(c.cfgPath, c.Persist, conversation)
 		turns++
