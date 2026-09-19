@@ -95,64 +95,26 @@ dscli chat -m expert             # REPL on the stronger model
 dscli chat --thinking --search   # DeepThink + web search
 ```
 
-When stdin and stdout are terminals, `dscli chat` runs a terminal-agent TUI
-(open-code/Claude Code style): the conversation scrolls in a pane above a
-bottom-pinned, multi-line input. Replies render as **markdown** — styled
-headings, bordered code boxes with a language label, bullets, quote bars and
-rules — live while the reply streams, with a pulsing working indicator. Slash
-commands get a suggestion menu as you
-type; replies, tool notes and file-write previews render inside the pane
-instead of stdout:
-
-```
-DeepSeek · model default · thinking off · search off · ephemeral
-
-What is 2+2?
-4
-
-/model expert              # switch model (starts a fresh conversation)
-/thinking on               # or bare /thinking to flip it
-/search off
-/exit
-conversation: 0123456789:42
-```
-
-Keys: **Enter** submits, **Ctrl+J / Alt+Enter** inserts a newline, **Up/Down**
-move the cursor one *visual* row at a time through wrapped input (at the first
-and last rows they fall back to history recall), **Ctrl+←/→** (or **Alt+←/→**)
-move by word, **Alt+Backspace** deletes the word before the cursor, **Ctrl+A /**
-**Ctrl+E** jump to the start/end of the line, and **Tab** completes a command
-(cycling through the candidates when several match; Enter also completes).
-**Esc** first dismisses the completion menu without losing what you typed, then
-clears the input, and **Ctrl+C** interrupts a reply while it streams — the chat
-stays open — or quits when idle. The layout is a scrollable chat pane on top, a
-3-line input at the bottom, and the status line below it.
-Text wraps inside the box by *display* width (so line breaks land correctly for
-CJK/wide characters too), and a `…` in the rightmost cell marks content
-scrolled out of the box. PgUp/PgDn scroll a page, the mouse wheel scrolls a few
-lines, **Ctrl+L** clears the pane, and Home / End jump to the top/bottom. When
-a persisted conversation is resumed the past messages are loaded from the
-server into the pane first. User messages render in a foreground colour to
-stand apart from the assistant's replies. `/new` starts a fresh conversation,
-`/sessions` lists the sessions with saved texts (the persisted default
-marked), `/session <id>` switches to an existing one — the live chat resumes
-it from its root and it becomes the default for next launch — and bare
-`/session` shows the current conversation. `/clear` forgets the persisted
-default session and starts a fresh one
-(`/clear --delete` also removes the old thread server-side).
-**`/file <path>`** loads a file's (or directory's) contents (relative to
-`--workdir`, defaulting to `.`) into a buffer that is prepended to the next
-submitted message inside a `<file>`/`<dir>` block — repeat it to stack several
-files, and a system note in the chat shows each load and the final
-attachments. **`/copy`** copies the entire chat pane's text (colours stripped)
-to the system clipboard via xclip, wl-copy, pbcopy, or clip.exe.
+`dscli chat` runs a line-based REPL: replies stream to stdout as plain
+text, one question per line. The same slash commands work here — bare
+`/thinking` or `/search` flips the state, `/model <default|expert>` switches
+model (starting a fresh conversation), `/sessions` lists the sessions with
+saved texts, `/session <id>` switches to an existing one (resuming it from
+its root; it becomes the default for next launch), and bare `/session` shows
+the current conversation. `/new` starts a fresh conversation. A line ending
+in a single `\` continues the message on the next line; a lone `\` line
+inserts a blank line and keeps going, and a trailing `\\` sends the line
+literally. **`/file <path>`** loads a file's (or directory's) contents
+(relative to `--workdir`, defaulting to `.`) into a buffer that is prepended
+to the next submitted message inside a `<file>`/`<dir>` block — repeat it to
+stack several files.
 **`/resume`** (see the Censorship section below) continues a filtered reply.
 
 **Censorship.** Prompts are sent exactly as written — no hidden instructions.
 If DeepSeek's content filter rejects a reply, the CLI prints a short dim note
 ("reply was filtered by DeepSeek") instead of silently returning an empty
 answer. When the filter cuts a reply off mid-stream, the partial text that
-already streamed is kept, and **`/resume [hint]`** (TUI and line REPL) sends it
+already streamed is kept, and **`/resume [hint]`** sends it
 back as context with a "continue from where it stopped" instruction — an
 honest recovery for wrongly flagged replies: the text is sent as an ordinary
 prompt, and the filter still applies to whatever the model generates next.
@@ -199,8 +161,7 @@ appended to a JSONL transcript — one line per message, `{"time": "...",
 inside the app's persistent data directory (next to the config file,
 `~/.config/dscli/transcripts/` by default), named `<session-id>.jsonl`. The
 whole thread's texts accumulate in one file as the conversation advances,
-whether from the TUI, the line REPL, or a one-shot `chat`/`ask` (in the TUI,
-`/file` attachments are the only things not copied — the typed prompt is).
+whether from the REPL or a one-shot `chat`/`ask`.
 Print a transcript with:
 
 ```bash

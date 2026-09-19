@@ -317,22 +317,6 @@ func (c *ChatCmd) repl(ctx context.Context) error {
 	if cleanup != nil {
 		defer cleanup()
 	}
-	// When both stdin and stdout are terminals, run the bubbletea TUI (the
-	// opencode/Claude Code-style prompt); otherwise fall back to the plain
-	// line-based loop (pipes, scripts, tests).
-	if isTerminal(os.Stdin) && isTerminal(os.Stdout) {
-		m := newTUIModel(c, client, sessionID, trusted)
-		if trusted {
-			loadHistoryInto(ctx, m, client, sessionID)
-		}
-		if err := runTUI(m); err != nil {
-			return err
-		}
-		if m.turns > 0 {
-			fmt.Fprintf(os.Stderr, "conversation: %s\n", m.conversation)
-		}
-		return nil
-	}
 	return c.replLoop(ctx, client, sessionID, owned, trusted)
 }
 
@@ -676,7 +660,6 @@ func printReplHelp(u ui) {
   /resume [instruction]       continue a reply the filter cut off, from its partial text
   /session [id]               show the current conversation; select a saved session to resume
   /sessions                   list sessions with saved texts
-  /copy                       copy the chat text to the system clipboard (TUI only)
   /help                       this help
 
 multiline: end a line with \ to continue it on the next line; a lone \ line

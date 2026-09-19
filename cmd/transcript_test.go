@@ -7,8 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	tea "charm.land/bubbletea/v2"
-
 	"github.com/dat267/dscli/internal/deepseek"
 )
 
@@ -176,23 +174,6 @@ func TestReplTranscript(t *testing.T) {
 	}
 	if got := strings.Join(texts, "|"); got != "first|one|second|two" {
 		t.Errorf("texts = %q, want first|one|second|two", got)
-	}
-}
-
-// TestTUITranscript: the TUI saves the submitted prompt before the turn and
-// the streamed reply when it finishes.
-func TestTUITranscript(t *testing.T) {
-	m, _ := tuiHarness(t, []string{completionSSE(t, 2, "Hello TUI")}, "")
-	m.input.SetValue("hi")
-	m.Update(press(tea.KeyEnter))
-	pumpTUI(m)
-	entries, err := loadTranscript(m.cfgPath, "sess-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 2 || entries[0].Role != "user" || entries[0].Text != "hi" ||
-		entries[1].Role != "assistant" || entries[1].Text != "Hello TUI" {
-		t.Errorf("transcript = %+v, want [user:hi, assistant:Hello TUI]", entries)
 	}
 }
 
