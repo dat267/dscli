@@ -203,16 +203,17 @@ func TestReplUIStatelessEndToEnd(t *testing.T) {
 		t.Fatalf("replLoop: %v", runErr)
 	}
 
-	// The reply streams to stdout and is followed by exactly one blank line,
-	// even though the model text has no trailing newline.
-	if stdout != "Hello world!\n\n" {
-		t.Errorf("stdout = %q, want %q", stdout, "Hello world!\n\n")
+	// Each turn's reply is separated from the echoed prompt by a blank line
+	// above and exactly one blank line below, even though the model text has
+	// no trailing newline.
+	if stdout != "\nHello world!\n\n" {
+		t.Errorf("stdout = %q, want %q", stdout, "\nHello world!\n\n")
 	}
 
 	for _, want := range []string{
 		"DeepSeek · model default · thinking off · search off · ephemeral",
 		"DeepSeek · model default · thinking on · search off · ephemeral", // bare /thinking flipped it
-		"one question per line · /help for commands",
+		"one question per line · /help for commands\n\n",
 		"conversation: sess-1:2",
 	} {
 		if !strings.Contains(stderr, want) {

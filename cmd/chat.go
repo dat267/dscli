@@ -418,6 +418,7 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 	}
 	status()
 	fmt.Fprintln(os.Stderr, u.dim("one question per line · /help for commands"))
+	fmt.Fprintln(os.Stderr)
 
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
@@ -582,6 +583,7 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 		if c.transcriptsOn() {
 			appendTranscript(c.cfgPath, turnSession, "user", line)
 		}
+		fmt.Fprintln(os.Stdout) // breathing room between the prompt and the reply
 		var filtered bool
 		_, err := recoverStaleSession(ctx, client, c.cfgPath, conversation, firstTurn, func(sid string) error {
 			cid, isFiltered, e := c.oneTurn(ctx, client, sid, line, model, write, &sources)
