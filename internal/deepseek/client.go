@@ -9,9 +9,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -25,6 +29,13 @@ const (
 	sessionCreatePath = "/api/v0/chat_session/create"
 	sessionDeletePath = "/api/v0/chat_session/delete"
 	historyPath       = "/api/v0/chat/history_messages"
+	UploadPath        = "/api/v0/file/upload_file"
+	FetchFilesPath    = "/api/v0/file/fetch_files"
+
+	// Attachment limits enforced by the site's web client: at most 50 files
+	// per conversation, no more than 100 MB each.
+	MaxAttachments     = 50
+	MaxAttachmentBytes = 100 << 20 // 100 MiB per file
 
 	// One-minute ceiling for the small JSON exchanges; the completion stream
 	// is bounded by the caller-supplied context instead.
@@ -338,12 +349,13 @@ func (c *Client) ChatHistory(ctx context.Context, sessionID string) ([]HistoryMe
 	return data.ChatMessages, nil
 }
 
-// fetchChallenge fetches a PoW challenge for the completion endpoint.
-func (c *Client) fetchChallenge(ctx context.Context) (Challenge, error) {
+// fetchChallenge fetches a PoW challenge for the given target path (the
+// completion endpoint or the file-upload endpoint).
+func (c *Client) fetchChallenge(ctx context.Context, targetPath string) (Challenge, error) {
 	ctx, cancel := context.WithTimeout(ctx, shortTimeout)
 	defer cancel()
 	var env bizEnvelope
-	if err := c.postJSON(ctx, powChallengePath, map[string]string{"target_path": CompletionPath}, &env); err != nil {
+	if err := c.postJSON(ctx, powChallengePath, map[string]string{"target_path": targetPath}, &env); err != nil {
 		return Challenge{}, err
 	}
 	var data struct {
@@ -358,10 +370,10 @@ func (c *Client) fetchChallenge(ctx context.Context) (Challenge, error) {
 	return data.Challenge, nil
 }
 
-// powHeader fetches a challenge and solves it, returning the base64
-// x-ds-pow-response header value.
-func (c *Client) powHeader(ctx context.Context) (string, error) {
-	ch, err := c.fetchChallenge(ctx)
+// powHeader fetches a challenge for targetPath and solves it, returning the
+// base64 x-ds-pow-response header value.
+func (c *Client) powHeader(ctx context.Context, targetPath string) (string, error) {
+	ch, err := c.fetchChallenge(ctx, targetPath)
 	if err != nil {
 		return "", err
 	}
@@ -373,9 +385,12 @@ type CompletionRequest struct {
 	ChatSessionID   string
 	ParentMessageID *int64 // nil on the first turn (sent as JSON null)
 	Prompt          string
-	ModelType       string // "default"/"expert" on the first turn; "" omits the field when resuming
+	ModelType       string // "default"/"expert" on the first turn; "" sends JSON null when resuming
 	ThinkingEnabled bool
 	SearchEnabled   bool
+	// RefFileIDs are the ids of files uploaded with UploadFile; they are
+	// attached to this message (the site's ref_file_ids).
+	RefFileIDs []string
 }
 
 func (r CompletionRequest) body() map[string]any {
@@ -390,12 +405,21 @@ func (r CompletionRequest) body() map[string]any {
 		"parent_message_id": r.ParentMessageID,
 		"model_type":        modelType,
 		"prompt":            r.Prompt,
-		"ref_file_ids":      []any{},
+		"ref_file_ids":      refIDs(r.RefFileIDs),
 		"thinking_enabled":  r.ThinkingEnabled,
 		"search_enabled":    r.SearchEnabled,
 		"action":            nil,
 		"preempt":           false,
 	}
+}
+
+// refIDs renders the attachment ids as a JSON array, never nil (the web
+// client always sends the field).
+func refIDs(ids []string) []string {
+	if ids == nil {
+		return []string{}
+	}
+	return ids
 }
 
 // Reply carries a completed stream: the assistant message_id needed to resume
@@ -429,7 +453,7 @@ type Source struct {
 func (c *Client) StreamCompletion(ctx context.Context, req CompletionRequest, emit func(string) error) (Reply, error) {
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
-		pow, err := c.powHeader(ctx)
+		pow, err := c.powHeader(ctx, CompletionPath)
 		if err != nil {
 			return Reply{}, err
 		}
@@ -536,4 +560,173 @@ func retryable(err error) bool {
 		return true
 	}
 	return false
+}
+
+// FileRef is one file known to chat.deepseek.com: the reference returned by
+// UploadFile and the entries returned by FetchFiles.
+type FileRef struct {
+	ID         string `json:"id"`
+	Status     string `json:"status"`
+	FileName   string `json:"file_name"`
+	FileSize   int64  `json:"file_size"`
+	ModelKind  string `json:"model_kind"`
+	IsImage    bool   `json:"is_image"`
+	ErrorCode  string `json:"error_code"`
+	TokenUsage *int64 `json:"token_usage"`
+}
+
+// ValidateAttachments checks a batch of attachment sizes against the site's
+// limits: at most MaxAttachments files, each no larger than
+// MaxAttachmentBytes. It is a client-side guard so an oversized batch fails
+// before anything is uploaded.
+func ValidateAttachments(sizes []int64) error {
+	if len(sizes) > MaxAttachments {
+		return fmt.Errorf("too many attachments: %d files (the limit is %d)", len(sizes), MaxAttachments)
+	}
+	for _, n := range sizes {
+		if n > MaxAttachmentBytes {
+			return fmt.Errorf("attachment is %s (the limit is %s per file)", humanBytes(n), humanBytes(MaxAttachmentBytes))
+		}
+	}
+	return nil
+}
+
+// humanBytes formats a byte count in MB for limit messages.
+func humanBytes(n int64) string {
+	if n%(1<<20) == 0 {
+		return fmt.Sprintf("%d MB", n>>20)
+	}
+	return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
+}
+
+// contentTypeFor picks the part Content-Type for an upload: the extension's
+// registered type (the web client sends text/markdown for .md), else a sniff
+// of the bytes.
+func contentTypeFor(filename string, data []byte) string {
+	if ct := mime.TypeByExtension(filepath.Ext(filename)); ct != "" {
+		return ct
+	}
+	if len(data) > 0 {
+		return http.DetectContentType(data)
+	}
+	return "application/octet-stream"
+}
+
+// quoteMultipart escapes a filename for a Content-Disposition header.
+func quoteMultipart(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	return strings.ReplaceAll(s, `"`, `\"`)
+}
+
+// UploadFile uploads one file to POST /api/v0/file/upload_file (multipart
+// field "file") and returns its server reference, to be sent back in
+// CompletionRequest.RefFileIDs. modelType is the thread's model
+// ("default"/"expert"; empty means default) and thinking is the DeepThink
+// flag, both mirrored into the x-model-type/x-thinking-enabled headers the
+// web client sends, next to a PoW header for the upload path itself.
+func (c *Client) UploadFile(ctx context.Context, filename string, data []byte, modelType string, thinking bool) (FileRef, error) {
+	if int64(len(data)) > MaxAttachmentBytes {
+		return FileRef{}, fmt.Errorf("attachment %q is %s (the limit is %s per file)", filename, humanBytes(int64(len(data))), humanBytes(MaxAttachmentBytes))
+	}
+	if modelType == "" {
+		modelType = "default"
+	}
+	pow, err := c.powHeader(ctx, UploadPath)
+	if err != nil {
+		return FileRef{}, err
+	}
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	part, err := mw.CreatePart(textproto.MIMEHeader{
+		"Content-Disposition": {fmt.Sprintf(`form-data; name="file"; filename="%s"`, quoteMultipart(filename))},
+		"Content-Type":        {contentTypeFor(filename, data)},
+	})
+	if err != nil {
+		return FileRef{}, err
+	}
+	if _, err := part.Write(data); err != nil {
+		return FileRef{}, err
+	}
+	if err := mw.Close(); err != nil {
+		return FileRef{}, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+UploadPath, &buf)
+	if err != nil {
+		return FileRef{}, err
+	}
+	req.Header = c.headers()
+	req.Header.Set("content-type", mw.FormDataContentType())
+	req.Header.Set("x-ds-pow-response", pow)
+	req.Header.Set("x-model-type", modelType)
+	req.Header.Set("x-thinking-enabled", boolFlag(thinking))
+	req.Header.Set("x-file-size", strconv.Itoa(len(data)))
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return FileRef{}, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return FileRef{}, httpStatusError(UploadPath, resp)
+	}
+	var env bizEnvelope
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+		return FileRef{}, fmt.Errorf("deepseek api error: decode upload response: %w", err)
+	}
+	var ref FileRef
+	if err := env.biz(&ref); err != nil {
+		return FileRef{}, err
+	}
+	if ref.ID == "" {
+		return FileRef{}, fmt.Errorf("deepseek api error: upload response missing file id")
+	}
+	return ref, nil
+}
+
+// boolFlag renders a bool as the "1"/"0" the web client uses in headers.
+func boolFlag(b bool) string {
+	if b {
+		return "1"
+	}
+	return "0"
+}
+
+// FetchFiles resolves attachment ids to their server records. It is a no-op
+// for an empty list.
+func (c *Client) FetchFiles(ctx context.Context, ids []string) ([]FileRef, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, shortTimeout)
+	defer cancel()
+	q := url.Values{}
+	for _, id := range ids {
+		q.Add("file_ids", id)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+FetchFilesPath+"?"+q.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header = c.headers()
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, httpStatusError(FetchFilesPath, resp)
+	}
+	var env bizEnvelope
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+		return nil, fmt.Errorf("deepseek api error: decode fetch_files response: %w", err)
+	}
+	var data struct {
+		Files []FileRef `json:"files"`
+	}
+	if err := env.biz(&data); err != nil {
+		return nil, err
+	}
+	return data.Files, nil
 }
