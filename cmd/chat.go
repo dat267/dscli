@@ -173,6 +173,14 @@ func noteToStderr(text string) {
 	fmt.Fprintln(os.Stderr, u.dim(text))
 }
 
+// replNote prints one line of slash-command feedback followed by a blank
+// line, so the next prompt is not glued to it (the status block does the same
+// for state changes, and the exit block for the conversation line).
+func replNote(text string) {
+	fmt.Fprintln(os.Stderr, text)
+	fmt.Fprintln(os.Stderr)
+}
+
 // resumePrompt builds the continuation message sent by /resume: the filtered
 // partial reply embedded as context with an instruction to continue it in the
 // same voice. The content filter still applies to whatever the model
@@ -514,7 +522,7 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 			return nil
 		case line == "/new":
 			conversation = ""
-			fmt.Fprintln(os.Stderr, u.note("new conversation"))
+			replNote(u.note("new conversation"))
 			continue
 		case line == "/help":
 			printReplHelp(u)
@@ -527,7 +535,7 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 				continue
 			}
 			if m != "default" && m != "expert" {
-				fmt.Fprintf(os.Stderr, "unknown model %q (want default or expert)\n", m)
+				replNote(fmt.Sprintf("unknown model %q (want default or expert)", m))
 				continue
 			}
 			model = m
@@ -547,7 +555,7 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 			// is sent back as context with a continue instruction. Nothing is
 			// bypassed — the filter still applies to the new generation.
 			if lastPartial == "" {
-				fmt.Fprintln(os.Stderr, u.red("nothing to resume: no filtered partial (or the last reply was accepted)"))
+				replNote(u.red("nothing to resume: no filtered partial (or the last reply was accepted)"))
 				continue
 			}
 			instruction := strings.TrimSpace(strings.TrimPrefix(line, "/resume"))
@@ -556,11 +564,11 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 		case line == "/sessions":
 			rows, err := localSessionRows(c.cfgPath)
 			if err != nil {
-				fmt.Fprintln(os.Stderr, u.red("error: "+err.Error()))
+				replNote(u.red("error: " + err.Error()))
 				continue
 			}
 			if len(rows) == 0 {
-				fmt.Fprintln(os.Stderr, u.note("no local sessions (nothing saved yet)"))
+				replNote(u.note("no local sessions (nothing saved yet)"))
 				continue
 			}
 			fmt.Fprintln(os.Stderr, u.note("local sessions (most recent first; the default is resumed on launch):"))
@@ -573,20 +581,19 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 			arg := strings.TrimSpace(strings.TrimPrefix(line, "/session"))
 			if arg == "" {
 				if saved := loadSavedSession(c.cfgPath); saved != "" {
-					fmt.Fprintln(os.Stderr, u.note("conversation: "+saved))
+					replNote(u.note("conversation: " + saved))
 				} else {
-					fmt.Fprintln(os.Stderr, u.note("no persisted session"))
+					replNote(u.note("no persisted session"))
 				}
-				fmt.Fprintln(os.Stderr)
 				continue
 			}
 			bare, _ := splitConversation(arg)
 			if bare == "" {
-				fmt.Fprintln(os.Stderr, u.red("give a session id (see /sessions)"))
+				replNote(u.red("give a session id (see /sessions)"))
 				continue
 			}
 			if err := saveSession(c.cfgPath, bare); err != nil {
-				fmt.Fprintln(os.Stderr, u.red("error: "+err.Error()))
+				replNote(u.red("error: " + err.Error()))
 				continue
 			}
 			if msgs, ok := transcriptCount(c.cfgPath, bare); ok {
@@ -602,21 +609,21 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 		case line == "/file" || strings.HasPrefix(line, "/file "):
 			arg := strings.TrimSpace(strings.TrimPrefix(line, "/file"))
 			if arg == "" {
-				fmt.Fprintln(os.Stderr, u.red("usage: /file <path>"))
+				replNote(u.red("usage: /file <path>"))
 				continue
 			}
 			block := c.mentionBlock(arg)
 			if block == "" {
-				fmt.Fprintf(os.Stderr, "%s\n", u.red("cannot load "+arg+" (missing, not a file/directory, or over the 1 MiB inline limit)"))
+				replNote(u.red("cannot load " + arg + " (missing, not a file/directory, or over the 1 MiB inline limit)"))
 				continue
 			}
 			pendingFiles = append(pendingFiles, block)
-			fmt.Fprintf(os.Stderr, "%s\n", u.note("loaded "+arg+" (prepended to the next message)"))
+			replNote(u.note("loaded " + arg + " (prepended to the next message)"))
 			continue
 		case line == "/attach" || strings.HasPrefix(line, "/attach "):
 			arg := strings.TrimSpace(strings.TrimPrefix(line, "/attach"))
 			if arg == "" {
-				fmt.Fprintln(os.Stderr, u.red("usage: /attach <path>"))
+				replNote(u.red("usage: /attach <path>"))
 				continue
 			}
 			p := arg
@@ -625,14 +632,14 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 			}
 			ids, err := uploadAttachments(ctx, client, []string{p}, model, thinking)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "%s\n", u.red("attach: "+err.Error()))
+				replNote(u.red("attach: " + err.Error()))
 				continue
 			}
 			pendingAttach = append(pendingAttach, ids...)
-			fmt.Fprintf(os.Stderr, "%s\n", u.note("attached "+arg+" to the next message"))
+			replNote(u.note("attached " + arg + " to the next message"))
 			continue
 		case strings.HasPrefix(line, "/"):
-			fmt.Fprintln(os.Stderr, u.red("unknown command (/help for commands)"))
+			replNote(u.red("unknown command (/help for commands)"))
 			continue
 		}
 

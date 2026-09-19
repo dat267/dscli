@@ -532,3 +532,23 @@ func TestReplEphemeralDeletionNote(t *testing.T) {
 		t.Error("no session was deleted")
 	}
 }
+
+// TestReplUnknownCommandSpacing: slash-command feedback is its own block, so
+// the next prompt is not glued to it.
+func TestReplUnknownCommandSpacing(t *testing.T) {
+	srv, _ := fakeDeepSeekServer(t)
+	c := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
+	cmd := &ChatCmd{}
+
+	var stderr string
+	withStdin(t, "/clear\n/quit\n", func() {
+		captureStdout(t, func() {
+			stderr = captureStderr(t, func() {
+				_ = cmd.replLoop(context.Background(), c, "sess-1", nil, false)
+			})
+		})
+	})
+	if !strings.Contains(stderr, "unknown command (/help for commands)\n\n") {
+		t.Errorf("blank line after unknown-command feedback expected; stderr = %q", stderr)
+	}
+}
