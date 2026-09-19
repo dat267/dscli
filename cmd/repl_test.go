@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -311,5 +312,37 @@ func TestPromptRecolor(t *testing.T) {
 	got = promptRecolor(ui{color: false}, []string{"hi"}, 80)
 	if got != "\x1b[1F\x1b[2Khi\n" {
 		t.Errorf("promptRecolor plain = %q", got)
+	}
+}
+
+// TestReplFileCommand: /file loads a file into a <file> block that is
+// prepended to the next submitted message, and only that message.
+func TestReplFileCommand(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "notes.md"), []byte("alpha\nbeta\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv, rec := fakeDeepSeekServer(t)
+	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
+	cmd := &ChatCmd{Workdir: dir}
+
+	withStdin(t, "/file notes.md\nsummarize it\nsecond\n/quit\n", func() {
+		captureStdout(t, func() {
+			captureStderr(t, func() {
+				_ = cmd.replLoop(context.Background(), client, "sess-1", nil, false)
+			})
+		})
+	})
+
+	first, _ := completionBody(t, rec, 0)
+	if !strings.Contains(first, `path="notes.md"`) || !strings.Contains(first, "alpha\nbeta") {
+		t.Errorf("first prompt missing the file block: %q", first)
+	}
+	if !strings.HasSuffix(first, "summarize it") {
+		t.Errorf("file block must be prepended to the message: %q", first)
+	}
+	second, _ := completionBody(t, rec, 1)
+	if strings.Contains(second, "alpha") {
+		t.Errorf("the file block must not carry over to the next message: %q", second)
 	}
 }

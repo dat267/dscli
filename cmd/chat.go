@@ -460,6 +460,9 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 	// lastPartial keeps the text of the most recent filtered reply so /resume
 	// can continue it; it is cleared when a later turn completes unfiltered.
 	var lastPartial string
+	// pendingFiles holds <file>/<dir> blocks stacked by /file, prepended to
+	// the next submitted message and then cleared.
+	var pendingFiles []string
 	// reader is the input reader: lineEditor in interactive mode (raw terminal),
 	// scannerLineReader otherwise (pipes, redirects).
 	var readLineFn func() (string, bool, bool, error) // text, eof, sig, err
@@ -587,6 +590,20 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 			conversation = bare
 			lastPartial = ""
 			continue
+		case line == "/file" || strings.HasPrefix(line, "/file "):
+			arg := strings.TrimSpace(strings.TrimPrefix(line, "/file"))
+			if arg == "" {
+				fmt.Fprintln(os.Stderr, u.red("usage: /file <path>"))
+				continue
+			}
+			block := c.mentionBlock(arg)
+			if block == "" {
+				fmt.Fprintf(os.Stderr, "%s\n", u.red("cannot load "+arg+" (missing, not a file/directory, or over the 1 MiB inline limit)"))
+				continue
+			}
+			pendingFiles = append(pendingFiles, block)
+			fmt.Fprintf(os.Stderr, "%s\n", u.note("loaded "+arg+" (prepended to the next message)"))
+			continue
 		case strings.HasPrefix(line, "/"):
 			fmt.Fprintln(os.Stderr, u.red("unknown command (/help for commands)"))
 			continue
@@ -608,6 +625,13 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 			}
 			typed = append(typed, cont)
 			line += "\n" + cont
+		}
+
+		// /file blocks are prepended to the message that is about to be sent
+		// (after the recolor uses `typed`, which holds only what was typed).
+		if len(pendingFiles) > 0 {
+			line = strings.Join(pendingFiles, "") + line
+			pendingFiles = nil
 		}
 
 		// A reset (/new, /model) leaves conversation empty; the next turn
@@ -735,6 +759,7 @@ func printReplHelp(u ui) {
   /thinking [on|off]          toggle DeepThink reasoning
   /search [on|off]            toggle web search
   /resume [instruction]       continue a reply the filter cut off, from its partial text
+  /file <path>                load a file's (or directory's) contents into the next message
   /session [id]               show the current conversation; select a saved session to resume
   /sessions                   list sessions with saved texts
   /help                       this help
