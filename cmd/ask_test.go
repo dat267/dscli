@@ -169,3 +169,25 @@ func TestAskSearchSourcesJSON(t *testing.T) {
 		t.Errorf("sources line = %v", final)
 	}
 }
+
+// TestAskEmptyReplyNote: an empty reply says so rather than printing nothing.
+func TestAskEmptyReplyNote(t *testing.T) {
+	empty := "event: ready\ndata: {\"response_message_id\":2}\n\n" +
+		"data: {\"v\":{\"response\":{\"message_id\":2,\"fragments\":[]}}}\n\n" +
+		"event: close\ndata: {}\n\n"
+	srv, _ := fakeDeepSeekServerWith(t, []string{empty})
+	cmd := &AskCmd{Prompt: []string{"hi"}, Token: "tok", clientBase: srv.URL, cfgPath: t.TempDir() + "/cfg.json"}
+
+	var stderr string
+	captureStdout(t, func() {
+		stderr = captureStderr(t, func() {
+			_ = cmd.Run(nil, context.Background())
+		})
+	})
+	if !strings.Contains(stderr, "no reply text") {
+		t.Errorf("empty reply should be reported; stderr = %q", stderr)
+	}
+	if !strings.Contains(stderr, "DSCLI_DEBUG_SSE") {
+		t.Errorf("the note should point at DSCLI_DEBUG_SSE; stderr = %q", stderr)
+	}
+}

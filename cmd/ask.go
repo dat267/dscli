@@ -142,6 +142,9 @@ func (c *AskCmd) Run(app *App, ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if replyBuf.Len() == 0 && !reply.Filtered {
+		noteToStderr("note: no reply text was received (set DSCLI_DEBUG_SSE=<file> to capture the raw stream)")
+	}
 	if transcriptsEnabled(c.cfgPath, c.Persist, c.NoTranscript) {
 		appendTranscript(c.cfgPath, usedSession, "assistant", replyBuf.String())
 	}

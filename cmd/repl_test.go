@@ -415,3 +415,32 @@ func TestReplFileCommand(t *testing.T) {
 		t.Errorf("the file block must not carry over to the next message: %q", second)
 	}
 }
+
+// TestReplEmptyReplyNote: a completion that yields no text must say so rather
+// than looking like the CLI did nothing. DSCLI_DEBUG_SSE is named so the raw
+// stream can be captured.
+func TestReplEmptyReplyNote(t *testing.T) {
+	// A stream with a snapshot that carries a message id but no response text.
+	empty := "event: ready\ndata: {\"request_message_id\":1,\"response_message_id\":2,\"model_type\":\"default\"}\n\n" +
+		"data: {\"v\":{\"response\":{\"message_id\":2,\"status\":\"WIP\",\"fragments\":[{\"id\":2,\"type\":\"SEARCH\",\"content\":null,\"results\":[]}]}}}\n\n" +
+		"data: {\"p\":\"response/status\",\"o\":\"SET\",\"v\":\"FINISHED\"}\n\n" +
+		"event: close\ndata: {}\n\n"
+	srv, _ := fakeDeepSeekServerWith(t, []string{empty})
+	client := deepseek.NewClient(deepseek.Session{Token: "tok"}, 0, srv.URL)
+	cmd := &ChatCmd{}
+
+	var stderr string
+	withStdin(t, "hi\n/quit\n", func() {
+		captureStdout(t, func() {
+			stderr = captureStderr(t, func() {
+				_ = cmd.replLoop(context.Background(), client, "sess-1", nil, false)
+			})
+		})
+	})
+	if !strings.Contains(stderr, "no reply text") {
+		t.Errorf("empty reply should be reported; stderr = %q", stderr)
+	}
+	if !strings.Contains(stderr, "DSCLI_DEBUG_SSE") {
+		t.Errorf("the note should point at DSCLI_DEBUG_SSE; stderr = %q", stderr)
+	}
+}

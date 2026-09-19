@@ -741,6 +741,9 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 			}
 			continue
 		}
+		if replyBuf.Len() == 0 && !filtered {
+			fmt.Fprintln(os.Stderr, u.note("note: no reply text was received (set DSCLI_DEBUG_SSE=<file> to capture the raw stream)"))
+		}
 		if c.transcriptsOn() {
 			appendTranscript(c.cfgPath, turnSession, "assistant", replyBuf.String())
 		}
