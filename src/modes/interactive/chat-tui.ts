@@ -14,6 +14,7 @@
  *      └ Footer (left: run facts · right: model, right-aligned)
  */
 import {
+	CombinedAutocompleteProvider,
 	Container,
 	Editor,
 	ProcessTerminal,
@@ -66,12 +67,48 @@ export interface ChatTuiOptions {
 	clientBase?: string;
 }
 
-/** Autocomplete provider for the editor's slash commands. */
-class SlashProvider {
-	getSuggestions(input: string): Array<{ label: string; description?: string }> {
-		if (!input.startsWith("/")) return [];
-		const word = input.split(" ")[0] ?? input;
-		return TUI_COMMANDS.filter((c) => c.startsWith(word)).map((c) => ({ label: c }));
+/**
+ * The editor's autocomplete provider: pi's CombinedAutocompleteProvider over
+ * the dscli slash commands (fuzzy matching, applyCompletion, tab-complete).
+ */
+class SlashProvider extends CombinedAutocompleteProvider {
+	constructor() {
+		super(
+			TUI_COMMANDS.map((name) => ({
+				name,
+				description: SlashProvider.description(name),
+			})),
+			process.cwd(),
+			null,
+		);
+	}
+
+	private static description(name: string): string {
+		switch (name) {
+			case "/exit":
+			case "/quit":
+				return "leave the session";
+			case "/new":
+				return "start a fresh conversation";
+			case "/help":
+				return "this help";
+			case "/model":
+				return "switch model (starts a fresh conversation)";
+			case "/thinking":
+				return "toggle DeepThink reasoning";
+			case "/search":
+				return "toggle web search";
+			case "/resume":
+				return "continue a filtered reply";
+			case "/session":
+				return "show or switch the conversation";
+			case "/sessions":
+				return "list sessions with saved texts";
+			case "/clear":
+				return "clear the pane";
+			default:
+				return "";
+		}
 	}
 }
 
@@ -127,7 +164,7 @@ export class ChatTui {
 				noMatch: (t) => theme.fg("dim", t),
 			},
 		}, { paddingX: 1 });
-		this.editor.setAutocompleteProvider(new SlashProvider() as never);
+		this.editor.setAutocompleteProvider(new SlashProvider());
 
 		// pi's createChatViewport layout: transcript grows, dock is fixed.
 		const dock = new VStack([
