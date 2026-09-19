@@ -59,6 +59,24 @@ func clearSession(cfgPath string) error {
 	return saveConfigMap(cfgPath, m)
 }
 
+// deleteEphemeral removes ephemeral sessions server-side and reports it, so an
+// ephemeral run visibly leaves nothing behind. A failure is a warning, never
+// fatal: the run is already over by the time this runs.
+func deleteEphemeral(ctx context.Context, client *deepseek.Client, ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	if err := client.DeleteSessions(ctx, ids); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to delete session(s): %v\n", err)
+		return
+	}
+	if len(ids) == 1 {
+		noteToStderr("note: ephemeral session deleted")
+		return
+	}
+	noteToStderr(fmt.Sprintf("note: %d ephemeral sessions deleted", len(ids)))
+}
+
 // resolveDefaultSession returns the session id to use for one run.
 //
 // Unless persist is set (explicit --persist) nothing is reused or saved: a
@@ -74,9 +92,7 @@ func resolveDefaultSession(ctx context.Context, client *deepseek.Client, cfgPath
 			return "", false, nil, err
 		}
 		return sid, false, func() {
-			if err := client.DeleteSessions(context.Background(), []string{sid}); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: failed to delete session: %v\n", err)
-			}
+			deleteEphemeral(context.Background(), client, []string{sid})
 		}, nil
 	}
 	if saved := loadSavedSession(cfgPath); saved != "" {

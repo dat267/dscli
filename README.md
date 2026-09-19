@@ -134,7 +134,7 @@ colours are drawn, and a line ending in a single `\` continues the message on
 the next line (`...> `); a lone `\` line inserts a blank line and keeps going,
 and a trailing `\\` sends the line literally.
 
-**Persistence by default.** Launching `dscli chat` without `-c` resumes the
+**Persistence is opt-in.** Launching `dscli chat` without `-c` resumes the
 *persisted default conversation* — with `--persist` the same thread every
 command uses, saved
 under `session` in the config file as a `session:message` position. On first
@@ -156,7 +156,9 @@ dscli config unset session    # equivalent to `session forget`
 
 Nothing is persisted by default: each run creates a *fresh* session, keeps it
 for its turns, and deletes it on close (`/exit`, `/quit`, Ctrl-D, or Ctrl-C),
-leaving nothing in the config or the transcripts folder. Run with `--persist`
+leaving nothing in the config or the transcripts folder. The deletion is
+reported on stderr at the end of the run (`note: ephemeral session deleted`).
+Run with `--persist`
 to opt in: the session and its conversation position are saved, the next run
 resumes that exact thread, and texts are kept as local transcripts. If a
 persisted default session no longer exists server-side (e.g. deleted in the

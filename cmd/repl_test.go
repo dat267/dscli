@@ -504,3 +504,31 @@ func TestReplExitBlankBeforeConversation(t *testing.T) {
 		})
 	}
 }
+
+// TestReplEphemeralDeletionNote: an ephemeral run reports that its session
+// was deleted, so "nothing persists" is visible rather than implied.
+func TestReplEphemeralDeletionNote(t *testing.T) {
+	srv, rec := fakeDeepSeekServer(t)
+	cmd := &ChatCmd{Token: "tok", clientBase: srv.URL}
+
+	var stderr string
+	withStdin(t, "hi\n/quit\n", func() {
+		captureStdout(t, func() {
+			stderr = captureStderr(t, func() {
+				if err := cmd.repl(context.Background()); err != nil {
+					t.Errorf("repl: %v", err)
+				}
+			})
+		})
+	})
+
+	if !strings.Contains(stderr, "ephemeral session deleted") {
+		t.Errorf("expected a deletion note; stderr = %q", stderr)
+	}
+	rec.mu.Lock()
+	deleted := append([]string(nil), rec.deleted...)
+	rec.mu.Unlock()
+	if len(deleted) == 0 {
+		t.Error("no session was deleted")
+	}
+}

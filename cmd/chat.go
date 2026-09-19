@@ -412,12 +412,7 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 	persist := c.Persist && c.cfgPath != ""
 
 	deleteOwned := func() {
-		if len(owned) == 0 {
-			return
-		}
-		if err := client.DeleteSessions(context.Background(), owned); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to delete session(s): %v\n", err)
-		}
+		deleteEphemeral(context.Background(), client, owned)
 	}
 	// Ctrl-C must clean up too: defers do not run on os.Exit.
 	sig := make(chan os.Signal, 1)
