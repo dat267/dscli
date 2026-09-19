@@ -450,21 +450,30 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 	var lastPartial string
 	// reader is the input reader: lineEditor in interactive mode (raw terminal),
 	// scannerLineReader otherwise (pipes, redirects).
-	var readLineFn func() (string, bool, error)
+	var readLineFn func() (string, bool, bool, error) // text, eof, sig, err
 	if interactive {
 		ed := newLineEditor(nil)
-		readLineFn = func() (string, bool, error) {
-			text, eof, _, err := ed.readLine()
-			return text, eof, err
+		readLineFn = func() (string, bool, bool, error) {
+			return ed.readLine()
 		}
 	} else {
 		sr := newScannerLineReader()
-		readLineFn = func() (string, bool, error) {
+		readLineFn = func() (string, bool, bool, error) {
 			return sr.readLine()
 		}
 	}
+	sigCount := 0
 	for {
-		line, eof, err := readLineFn()
+		line, eof, sig, err := readLineFn()
+		if sig {
+			// pi's contract: the first ctrl+c clears, the second exits.
+			sigCount++
+			if sigCount >= 2 {
+				break
+			}
+			continue
+		}
+		sigCount = 0
 		if eof || err != nil {
 			if err != nil {
 				fmt.Fprintln(os.Stderr, u.red("error: "+err.Error()))
@@ -583,9 +592,8 @@ func (c *ChatCmd) replLoop(ctx context.Context, client *deepseek.Client, convers
 			if interactive {
 				fmt.Fprint(os.Stderr, u.bold(u.cyan("...> ")))
 			}
-			var cont string
-			cont, eof, err = readLineFn()
-			if eof || err != nil {
+			cont, cEof, cSig, cErr := readLineFn()
+			if cEof || cSig || cErr != nil {
 				break
 			}
 			typed = append(typed, cont)
