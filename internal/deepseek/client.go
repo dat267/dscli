@@ -298,9 +298,10 @@ type HistoryMessage struct {
 }
 
 // Text returns the message's visible text: the content field when set, else
-// the fragments' content with thinking text excluded (assistant replies carry
-// the final text in the content field, but fragments are the authoritative
-// source and REQUEST/TOOL fragments hold it too).
+// the REQUEST (user) or RESPONSE (assistant) fragment's content. History
+// assistant messages also carry THINK, TOOL_SEARCH ("Found N web pages") and
+// TOOL_OPEN fragments; those are chrome, never visible text, so the visible
+// types are whitelisted rather than the others blacklisted.
 func (m HistoryMessage) Text() string {
 	if m.Content != "" {
 		return m.Content
@@ -308,10 +309,9 @@ func (m HistoryMessage) Text() string {
 	var b strings.Builder
 	for _, f := range m.Fragments {
 		switch strings.ToUpper(f.Type) {
-		case "THINK", "THINKING", "":
-			continue
+		case "REQUEST", "RESPONSE":
+			b.WriteString(f.Content)
 		}
-		b.WriteString(f.Content)
 	}
 	return b.String()
 }

@@ -406,3 +406,49 @@ func TestDeleteSessionsHARShape(t *testing.T) {
 		t.Errorf("body = %s, want %s", gotBody, want)
 	}
 }
+
+// TestChatHistorySkipsToolFragments mirrors a captured history_messages
+// response: assistant messages carry THINK, TOOL_SEARCH ("Found N web pages"),
+// TOOL_OPEN and RESPONSE fragments and no top-level content field. Only the
+// REQUEST/RESPONSE fragments are visible text; tool/thinking fragments must
+// not leak into the rendered transcript.
+func TestChatHistorySkipsToolFragments(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != historyPath || r.Method != http.MethodGet {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("x-ds-pow-response") != "" {
+			t.Error("history must not carry a PoW header")
+		}
+		if got := r.URL.Query().Get("chat_session_id"); got != "s1" {
+			t.Errorf("chat_session_id = %q", got)
+		}
+		_, _ = io.WriteString(w, `{"code":0,"msg":"","data":{"biz_code":0,"biz_msg":"","biz_data":{
+			"chat_session":{"id":"s1","title":"t"},
+			"chat_messages":[
+				{"message_id":1,"parent_id":null,"role":"USER","fragments":[{"type":"REQUEST","content":"hello"}]},
+				{"message_id":2,"parent_id":1,"role":"ASSISTANT","status":"FINISHED","fragments":[
+					{"type":"THINK","content":"reasoning"},
+					{"type":"TOOL_SEARCH","content":"Found 52 web pages"},
+					{"type":"TOOL_OPEN","content":null},
+					{"type":"RESPONSE","content":"the answer"}
+				]}
+			]}}}`)
+	}))
+	defer srv.Close()
+
+	c := NewClient(Session{Token: "tok"}, 0, srv.URL)
+	hist, err := c.ChatHistory(context.Background(), "s1")
+	if err != nil {
+		t.Fatalf("ChatHistory: %v", err)
+	}
+	if len(hist) != 2 {
+		t.Fatalf("messages = %d, want 2", len(hist))
+	}
+	if got := hist[0].Text(); got != "hello" {
+		t.Errorf("user text = %q, want %q", got, "hello")
+	}
+	if got := hist[1].Text(); got != "the answer" {
+		t.Errorf("assistant text = %q, want %q (tool/thinking fragments must not leak)", got, "the answer")
+	}
+}
