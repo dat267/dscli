@@ -140,3 +140,30 @@ func TestLineEditorEscapeParsing(t *testing.T) {
 		t.Errorf("unknown seq moved cursor: %d", e.pos)
 	}
 }
+
+func TestLineEditorCommitBlankIsNoop(t *testing.T) {
+	e := newLineEditor(nil)
+	e.runes = []rune("   ")
+	text, blank := e.commit()
+	if !blank || text != "" {
+		t.Fatalf("whitespace-only commit = (%q, %v), want blank", text, blank)
+	}
+	if len(e.hist) != 0 {
+		t.Errorf("blank line recorded in history: %q", e.hist)
+	}
+	if len(e.runes) != 0 || e.pos != 0 {
+		t.Errorf("buffer not cleared: %q pos %d", string(e.runes), e.pos)
+	}
+
+	// Non-blank lines are trimmed and stored (once).
+	e.runes = []rune("  hi  ")
+	text, blank = e.commit()
+	if blank || text != "hi" {
+		t.Fatalf("commit = (%q, %v), want (hi, false)", text, blank)
+	}
+	e.runes = []rune("hi")
+	e.commit()
+	if len(e.hist) != 1 || e.hist[0] != "hi" {
+		t.Errorf("history = %q, want [hi]", e.hist)
+	}
+}

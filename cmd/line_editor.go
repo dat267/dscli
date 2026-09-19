@@ -28,6 +28,22 @@ func newLineEditor(hist []string) *lineEditor {
 	return &lineEditor{hist: hist, histIdx: -1}
 }
 
+// commit finalizes the current buffer: it trims the text (matching the old
+// bufio.Scanner path, so a whitespace-only line is a no-op rather than a chat
+// message) and records non-blank lines in history. blank reports an empty
+// line, which the caller must not echo.
+func (e *lineEditor) commit() (text string, blank bool) {
+	text = strings.TrimSpace(string(e.runes))
+	if text == "" {
+		e.reset()
+		return "", true
+	}
+	if len(e.hist) == 0 || e.hist[len(e.hist)-1] != text {
+		e.hist = append(e.hist, text)
+	}
+	return text, false
+}
+
 func (e *lineEditor) reset() {
 	e.runes = e.runes[:0]
 	e.pos = 0
@@ -57,13 +73,13 @@ func (e *lineEditor) readLine() (text string, eof bool, sig bool, err error) {
 		b := buf[0]
 		switch b {
 		case '\r', '\n':
-			fmt.Fprint(out, "\r\n")
-			text = string(e.runes)
-			if text != "" {
-				if len(e.hist) == 0 || e.hist[len(e.hist)-1] != text {
-					e.hist = append(e.hist, text)
-				}
+			text, blank := e.commit()
+			if blank {
+				// The REPL ignores an empty line. Do not echo the newline,
+				// or every stray Enter would pile up a blank line on screen.
+				return "", false, false, nil
 			}
+			fmt.Fprint(out, "\r\n")
 			return text, false, false, nil
 		case '\x7f', '\b': // backspace
 			if e.pos > 0 {
