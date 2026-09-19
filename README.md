@@ -4,60 +4,62 @@ DeepSeek chat from your terminal. **No API key, no billing** — it uses your
 free signed-in [chat.deepseek.com](https://chat.deepseek.com) account directly,
 speaking the site's internal web API: it creates a chat session, solves
 DeepSeek's DeepSeekHashV1 proof-of-work challenge by running DeepSeek's own
-WebAssembly module (`sha3_wasm_bg.wasm`, vendored byte-for-byte from the site's
-CDN) on Node's native WebAssembly runtime, and streams the reply.
+WebAssembly module inside the [wazero](https://wazero.io) sandbox (vendored
+`sha3_wasm_bg.wasm`), and streams the reply.
 
 Unofficial project for personal use — not affiliated with DeepSeek.
-Implemented in TypeScript on Node.js (≥ 22), structured after
-[pi](https://github.com/earendil-works/pi-mono)'s CLI layout and built on
-pi's own terminal framework (`@earendil-works/pi-tui`).
 
 ```
-Usage: dscli [--config-file FILE] <command> [flags]
+Usage: dscli <command> [flags]
 
 DeepSeek chat from your terminal
 
+Flags:
+  -h, --help                  Show context-sensitive help.
+      --config-file=STRING    Config file path
+
 Commands:
-  chat             Chat with DeepSeek (omit the prompt for an interactive session)
-  ask              Ask the model once and print the answer (input from args or stdin)
-  translate        Translate a file (txt, md, lrc, srt, vtt, ass, ttml, epub) via the model
-  improve-writing  Improve the writing of a file in place (txt, md, lrc, srt, vtt, ass, ttml) via the model
-  summarize        Summarize a file (txt, md, lrc, srt, vtt, ass, ttml, epub) via the model
-  session          Inspect, forget or delete the persisted default session
-  login            Show how to capture your DeepSeek login (token + cookie)
-  version          Show version
-  config           Manage application configuration
+  chat                  Chat with DeepSeek (omit the prompt for an interactive
+                        session)
+  ask                   Ask the model once and print the answer (input from args
+                        or stdin)
+  translate             Translate a file (txt, md, lrc, srt, vtt, ass, ttml,
+                        epub) via the model
+  improve-writing       Improve the writing of a file in place (txt, md, lrc,
+                        srt, vtt, ass, ttml) via the model
+  summarize             Summarize a file (txt, md, lrc, srt, vtt, ass, ttml,
+                        epub) via the model
+  session list          List sessions with saved texts
+  session select        Select a session to resume as the default
+  session transcript    Print or delete the saved session texts (transcript) for
+                        a session
+  session delete        Delete the persisted default session server-side and
+                        forget it
+  session forget        Forget the persisted default session (the thread is kept
+                        server-side)
+  login                 Show how to capture your DeepSeek login (token + cookie)
+  version               Show version
+  config init           Generate a default configuration file
+  config path           Show configuration file path
+  config set            Set a config value
+  config unset          Unset a config value
 
-  session <command>
-    list        List sessions with saved texts
-    select      Select a session to resume as the default
-    transcript  Print or delete the saved session texts (transcript) for a session
-    delete      Delete the persisted default session server-side and forget it
-    forget      Forget the persisted default session (the thread is kept server-side)
-
-  config <command>
-    init   Generate a default configuration file
-    path   Show configuration file path
-    set    Set a config value
-    unset  Unset a config value
-
-Use "dscli <command> --help" for command flags.
+Run "dscli <command> --help" for more information on a command.
 ```
 
 ## Quick start
 
 ```bash
-# Install — straight from GitHub: no tags, no npm registry publishing
-npm install -g github:dat267/dscli
+# Install — straight from GitHub: no tags, no Go module proxy
+GOPROXY=direct GOSUMDB=off go install github.com/dat267/dscli@main
 
+# The binary lands in $(go env GOBIN) (~/go/bin by default); make sure that
+# is on your PATH, then:
 dscli login
 
 # Save it (the values live only in your config file, created with 0600 perms)
 dscli config set token "<token>"
 dscli config set cookie "<cookie>"
-
-# Chat interactively (TUI in a terminal)
-dscli chat
 
 # Ask a question (the reply streams like a chat)
 dscli chat "Explain the halting problem in one paragraph"
@@ -88,46 +90,90 @@ through untouched.
 ## Interactive session
 
 ```bash
-dscli chat                       # open the TUI
-dscli chat -m expert             # stronger model
+dscli chat                       # open a REPL
+dscli chat -m expert             # REPL on the stronger model
 dscli chat --thinking --search   # DeepThink + web search
 ```
 
-When stdin and stdout are terminals, `dscli chat` runs the interactive TUI —
-built on [pi](https://github.com/earendil-works/pi-mono)'s terminal framework
-(`@earendil-works/pi-tui`): the conversation scrolls in a markdown-rendered
-pane above a bottom-pinned multi-line editor with slash-command
-autocomplete, a status line, and the working indicator embedded in the
-separator rule — a pi-style `── ⠋ Working ───` while a reply streams, so the
-pane layout never changes for streaming.
+When stdin and stdout are terminals, `dscli chat` runs a terminal-agent TUI
+(open-code/Claude Code style): the conversation scrolls in a pane above a
+bottom-pinned, multi-line input. Replies render as **markdown** — styled
+headings, bordered code boxes with a language label, bullets, quote bars and
+rules — live while the reply streams, with a pulsing working indicator. Slash
+commands get a suggestion menu as you
+type; replies, tool notes and file-write previews render inside the pane
+instead of stdout:
 
-Slash commands: `/exit` `/quit` `/new` `/model <default|expert>` `/thinking
-[on|off]` `/search [on|off]` `/resume [instruction]` `/session [id]`
-`/sessions` `/clear` `/help`. Type `/` to get a completion menu.
+```
+DeepSeek · model default · thinking off · search off · ephemeral
+
+What is 2+2?
+4
+
+/model expert              # switch model (starts a fresh conversation)
+/thinking on               # or bare /thinking to flip it
+/search off
+/exit
+conversation: 0123456789:42
+```
+
+Keys: **Enter** submits, **Ctrl+J / Alt+Enter** inserts a newline, **Up/Down**
+move the cursor one *visual* row at a time through wrapped input (at the first
+and last rows they fall back to history recall), **Ctrl+←/→** (or **Alt+←/→**)
+move by word, **Alt+Backspace** deletes the word before the cursor, **Ctrl+A /**
+**Ctrl+E** jump to the start/end of the line, and **Tab** completes a command
+(cycling through the candidates when several match; Enter also completes).
+**Esc** first dismisses the completion menu without losing what you typed, then
+clears the input, and **Ctrl+C** interrupts a reply while it streams — the chat
+stays open — or quits when idle. The layout is a scrollable chat pane on top, a
+3-line input at the bottom, and the status line below it.
+Text wraps inside the box by *display* width (so line breaks land correctly for
+CJK/wide characters too), and a `…` in the rightmost cell marks content
+scrolled out of the box. PgUp/PgDn scroll a page, the mouse wheel scrolls a few
+lines, **Ctrl+L** clears the pane, and Home / End jump to the top/bottom. When
+a persisted conversation is resumed the past messages are loaded from the
+server into the pane first. User messages render in a foreground colour to
+stand apart from the assistant's replies. `/new` starts a fresh conversation,
+`/sessions` lists the sessions with saved texts (the persisted default
+marked), `/session <id>` switches to an existing one — the live chat resumes
+it from its root and it becomes the default for next launch — and bare
+`/session` shows the current conversation. `/clear` forgets the persisted
+default session and starts a fresh one
+(`/clear --delete` also removes the old thread server-side).
+**`/file <path>`** loads a file's (or directory's) contents (relative to
+`--workdir`, defaulting to `.`) into a buffer that is prepended to the next
+submitted message inside a `<file>`/`<dir>` block — repeat it to stack several
+files, and a system note in the chat shows each load and the final
+attachments. **`/copy`** copies the entire chat pane's text (colours stripped)
+to the system clipboard via xclip, wl-copy, pbcopy, or clip.exe.
+**`/resume`** (see the Censorship section below) continues a filtered reply.
 
 **Censorship.** Prompts are sent exactly as written — no hidden instructions.
-If DeepSeek's content filter rejects a reply, the CLI prints a short note
+If DeepSeek's content filter rejects a reply, the CLI prints a short dim note
 ("reply was filtered by DeepSeek") instead of silently returning an empty
 answer. When the filter cuts a reply off mid-stream, the partial text that
-already streamed is kept, and **`/resume [hint]`** sends it back as context
-with a "continue from where it stopped" instruction — an honest recovery for
-wrongly flagged replies: the text is sent as an ordinary prompt, and the
-filter still applies to whatever the model generates next.
+already streamed is kept, and **`/resume [hint]`** (TUI and line REPL) sends it
+back as context with a "continue from where it stopped" instruction — an
+honest recovery for wrongly flagged replies: the text is sent as an ordinary
+prompt, and the filter still applies to whatever the model generates next.
+Translation keeps its own separate style (see below).
 
 When stdin or stdout is **not** a terminal (pipes, scripts, `--json-out`), the
-line-based REPL is used instead: replies stream to stdout, no prompts or
+line-based loop is used instead: replies stream to stdout, no prompts or
 colours are drawn, and a line ending in a single `\` continues the message on
-the next line; a lone `\` line inserts a blank line and keeps going, and a
-trailing `\\` sends the line literally.
+the next line (`...> `); a lone `\` line inserts a blank line and keeps going,
+and a trailing `\\` sends the line literally.
 
-**Nothing is persisted by default.** Each run creates a *fresh* session, keeps
-it for its turns, and deletes it on close (`/exit`, `/quit`, Ctrl-D, or
-Ctrl-C), leaving nothing in the config or the transcripts folder. Run with
-`--persist` to opt in: the session and its conversation position are saved
-under `session` in the config file, the next run resumes that exact thread,
-and texts are kept as local transcripts. If a persisted default session no
-longer exists server-side (e.g. deleted in the web UI), the CLI creates a
-fresh one, saves it, and retries once automatically. Manage the default with:
+**Persistence by default.** Launching `dscli chat` without `-c` resumes the
+*persisted default conversation* — with `--persist` the same thread every
+command uses, saved
+under `session` in the config file as a `session:message` position. On first
+use a session is created and saved; every later run resumes from the last
+message and re-saves its position, so the conversation carries across
+invocations. `/new` and `/model` start a fresh session that replaces the saved
+default (the old thread stays server-side, just no longer the default). The
+conversation id shown is the live thread's position, and the config's
+`session` value is the default to resume next time. Manage it with:
 
 ```bash
 dscli session                 # show the persisted conversation
@@ -138,11 +184,24 @@ dscli session delete          # delete it server-side and forget it
 dscli config unset session    # equivalent to `session forget`
 ```
 
+Nothing is persisted by default: each run creates a *fresh* session, keeps it
+for its turns, and deletes it on close (`/exit`, `/quit`, Ctrl-D, or Ctrl-C),
+leaving nothing in the config or the transcripts folder. Run with `--persist`
+to opt in: the session and its conversation position are saved, the next run
+resumes that exact thread, and texts are kept as local transcripts. If a
+persisted default session no longer exists server-side (e.g. deleted in the
+web UI), the CLI creates a fresh one, saves it, and retries once
+automatically.
+
 **Session texts.** Every turn's typed prompt and the streamed reply are
 appended to a JSONL transcript — one line per message, `{"time": "...",
-"role": "user|assistant", "text": "..."}` — in the `transcripts/` folder next
-to the config file (`~/.config/dscli/transcripts/` by default), named
-`<session-id>.jsonl`. Print it with:
+"role": "user|assistant", "text": "..."}` — in the `transcripts/` folder
+inside the app's persistent data directory (next to the config file,
+`~/.config/dscli/transcripts/` by default), named `<session-id>.jsonl`. The
+whole thread's texts accumulate in one file as the conversation advances,
+whether from the TUI, the line REPL, or a one-shot `chat`/`ask` (in the TUI,
+`/file` attachments are the only things not copied — the typed prompt is).
+Print a transcript with:
 
 ```bash
 dscli session transcript            # the persisted default session
@@ -151,7 +210,11 @@ dscli session transcript --delete   # delete the default session's transcript
 ```
 
 Runs without `--persist` leave no transcript, and `--no-transcript`
-(or `config set no-transcript true`) disables saving even for persisted runs.
+(or `config set no-transcript true`) disables saving even for persisted runs
+when you do not want the texts kept locally. `--delete` removes the JSONL file (and the `transcripts/`
+folder when it becomes empty) without touching the server-side thread —
+`session delete`, on the other hand, removes the thread but leaves any saved
+texts alone.
 
 ## File naming & grouping
 
@@ -182,20 +245,29 @@ chunk prompt, the style is appended after the format rules.
 
 **Resolution order** for a `from → to` pair:
 
-1. `--instructions <file>` (explicit, any pair).
+1. `--instructions <file>` (explicit, any pair, both `dscli translate` and
+   `dscli chat`).
 2. A sidecar file `translate/<from>-<to>.md` (language labels lowercased,
    e.g. `translate/ja-en.md`), searched in `./translate/` then
    `~/.config/dscli/translate/`; `translate/default.md` is the fallback.
-   `improve-writing/default.md` and `summarize/default.md` work the same way
-   for those commands.
-3. A built-in general style — subject inference, active voice, register,
-   false friends, structure preservation — applies to all pairs with no
-   custom file.
+3. A built-in general style — the Japanese→English principles phrased
+   universally (subject inference, gender neutrality, active voice, register,
+   false friends, connectors, structure preservation) — applies to all pairs
+   with no custom file.
 
-A project glossary can be appended to every chunk prompt with
-`--glossary <file>` (translate and improve-writing).
+Drop your own `translate/<from>-<to>.md` (e.g. `translate/ja-en.md`, or
+`translate/zh-en.md`) into `./translate/` (or point `--instructions` at any
+file) and it applies to that pair everywhere:
+
+```bash
+dscli translate book.lrc --from Japanese --to English   # picks up translate/ja-en.md if present
+dscli translate --instructions my-style.md chapter.md  # explicit file for any pair
+```
 
 ## Models, DeepThink & web search
+
+Model, DeepThink (thinking) and web search are per-thread or per-request
+toggles:
 
 ```bash
 dscli chat -m expert "explain Gödel's incompleteness"   # strong model
@@ -204,18 +276,21 @@ dscli chat -s "latest Mars rover news"                  # web search
 dscli chat -t -s -m expert "both, on the strong model"
 ```
 
-Inside the TUI the same switches are slash commands: a bare `/thinking` or
-`/search` flips the current state, or give an explicit value (`/thinking on`).
-The status line redraws after every change and always shows the current mode:
+Inside the REPL the same switches are slash commands (see `/help`): a bare
+`/thinking` or `/search` flips the current state, or give an explicit value
+(`/thinking on`). The status line redraws after every change.
 
 ```
-DeepSeek · model default · thinking on · search off · persisted · turn 3 · 910c6ac2…
+/thinking on
+/search off
+/model expert          # switches model; starts a fresh conversation
 ```
 
 A thread's model is fixed when it is created: `--model`/`/model` always start
 a new conversation, and `--model` cannot be combined with `--conversation`.
 DeepThink and search can be toggled freely at any point of a thread — and
-**both default to off**.
+**both default to off** (the status line in the REPL shows the current state:
+`thinking off · search off`).
 
 **Search citations:** with `-s` the reply carries `[citation:N]` markers; the
 CLI extracts the search sources from the stream (TOOL_SEARCH fragments /
@@ -230,14 +305,84 @@ dscli chat --json-out "Summarize this repo" | jq -s 'map(.delta) | join("")'
 
 `--json-out` emits NDJSON: one `{"delta":"..."}` line per chunk, then a final
 `{"done":true,"conversation_id":"..."}` line. It is for one-shot scripting —
-the interactive modes always print plain text. Text output is written to
-stdout; prompts, warnings and the conversation id go to stderr.
+the interactive REPL always prints plain text. Text output is written to
+stdout; prompts, warnings and the conversation id go to stderr, so piping
+plain `dscli chat` also gives you clean text.
 
 `conversation_id` encodes `<chat_session_id>:<parent_message_id>` and lets you
 resume any thread. A thread's model is fixed when it is created, so `--model`
 cannot be combined with `--conversation`.
 
-## Translate, improve-writing & summarize
+## How it works
+
+1. `POST /api/v0/chat_session/create` — starts a session (new threads only).
+2. `POST /api/v0/chat/create_pow_challenge` with `{"target_path":"/api/v0/chat/completion"}`.
+3. Solves the DeepSeekHashV1 challenge by driving the vendored
+   `sha3_wasm_bg.wasm` (`wasm_solve(retptr, challenge, clen, prefix, plen, difficulty)`)
+   with the shadow-stack convention the website's JS wrapper uses, and
+   base64-encodes `{algorithm, challenge, salt, answer, signature, target_path}`
+   into the `x-ds-pow-response` header.
+4. `POST /api/v0/chat/completion` with the site headers, streaming the SSE
+   json-patch frames: the snapshot frame (`fragments[].type == "response"`),
+   append/SET/BATCH patches on `response/fragments/-1/content`, and bare
+   pathless `{"v":...}` chunks (which can carry the reply's very first
+   characters) — all reconstructed in arrival order without trimming, so no
+   leading text is lost. Fragments are tracked by type: content belonging to
+   THINK/SEARCH fragments is never rendered as answer text, so `--thinking`
+   mode cannot leak reasoning into the reply (or drop the answer's opening
+   token after it). `message_id` (from `v.message_id` / `v.message.id`
+   or a patch path) becomes the next turn's `parent_message_id`.
+
+Credentials are sent as `authorization: Bearer <token>` plus the `ds_session_id`
+cookie, with the site's `x-app-version` / `x-client-version` /
+`x-client-platform` / `x-client-bundle-id` headers and origin/referer.
+
+The PoW challenge is short-lived, so a failed completion (transport hiccup,
+HTTP 401/403/429) automatically re-solves a fresh challenge once.
+
+## Config
+
+Config is a JSON file, managed exactly like the `min` CLI toolkit:
+
+```bash
+dscli config path        # e.g. ~/.config/dscli/dscli.json
+dscli config init
+dscli config set token <token>
+dscli config unset token
+dscli --config-file /path/to/dscli.json config set token <token>
+```
+
+The `session` key holds the persisted default conversation position
+(`<session_id>:<message_id>`, set automatically on every turn; `dscli session
+forget` clears it and the next run starts a fresh thread).
+
+A `dscli.json` in the current directory takes precedence over the per-user
+config file (a warning is printed when that happens implicitly), and
+`DSCLI_CONFIG_FILE` overrides both.
+
+## Development
+
+```bash
+# Build with version
+go build -ldflags="-X main.version=$(git describe --tags --always)" -o dscli .
+
+# The PoW solver tests run DeepSeek's actual wasm (wazero) against a known
+# golden challenge, so no network or login is needed:
+go test ./...
+```
+
+## Notes
+
+- **PoW internals.** DeepSeekHashV1 turns out to be a Keccak variant: SHA3-style
+  `0x06` domain padding, Keccak-f[1600] with rounds 1..23, over
+  `salt_expireAt_<nonce>`; the challenge is the expected digest, `difficulty`
+  bounds the nonce search. This repo does not reimplement it (the vendored wasm
+  is the authority) — the variant knowledge is only used to generate offline
+  test vectors.
+- Structures follow [github.com/dat267/min](https://github.com/dat267/min)
+  (kong CLI, JSON config with nested keys, config-flag merging, version
+  injection via ldflags).
+## Translate
 
 `dscli translate` runs a format-aware, chunked translation of a file and
 writes the result:
@@ -262,90 +407,78 @@ dscli translate -f lyrics.lrc -o lyrics.lrc    # overwrite the source in place
   off the chunk size shrinks and that chunk is retried, so an incomplete
   result is never silently written. `--chunk-bytes N` is an upper bound on
   chunk size, not a fixed size.
-- `--thinking`/`-t` enables DeepThink reasoning per chunk. The reasoning model
-  allows longer replies, so chunks are sized bigger and fewer are needed.
-- **Structural verification.** For subtitle/lyric formats every protected
-  line (timestamps, cue indices, headers, TTML tags) is compared
-  byte-for-byte after each chunk; a mismatch triggers one strict retry and
-  the run fails loudly rather than writing a corrupted file.
-- Multiple files: `-p`/`--parallel` translates files concurrently (each in
-  its own session; terminology may drift between files — use a glossary).
-  Sequential mode reuses one session per run and stops at the first error.
-- `dscli improve-writing` rewrites the file **in place** (`-i` is required in
-  spirit: there is no separate output) with improved prose, preserving
-  structure; epub is rejected (extraction is one-way).
-- `dscli summarize` prints a summary to stdout (or `-o file`); a multi-chunk
-  document gets its per-chunk summaries combined in a final pass, and a file
-  within the chunk cap is summarized in a single reply.
+- `--thinking`/`-t` enables DeepThink reasoning per chunk. The reasoning
+  model allows far longer replies than Instant, so chunks are sized bigger
+  (roughly 3×) and a file needs fewer generations — the real output cap is
+  still learned from the first truncation either way.
+- **Structural awareness for every subtitle/lyric format:** after every
+  chunk the CLI verifies that the structure survived byte-for-byte — LRC
+  `[mm:ss.xx]` timecodes, SRT `HH:MM:SS,mmm --> ...` timing lines, WebVTT
+  timing/`WEBVTT`/NOTE lines, ASS/SSA script/style headers plus every
+  `Dialogue:` line's prefix fields (layer, start, end, style, name,
+  margins, effect — only the text field may change), and TTML's complete
+  XML tag/attribute sequence. A broken chunk is retried once with a strict
+  reminder, then fails loudly instead of producing a corrupt file.
+- Markdown keeps code blocks/URLs/list markers; `.epub` is extracted to text
+  first and defaults to a `.translated.txt` output.
+- `file_meta` reports duration for lrc/srt/vtt/ass/ssa/ttml files.
+- The output path defaults to `<input>.translated.<ext>` and is never
+  overwritten without `-f`. Each translation runs in a fresh session deleted
+  when the run ends; `--persist` resumes and saves the default session
+  instead.
+- If DeepSeek's content filter cuts a chunk's reply off mid-stream, the
+  partial translation produced before the filter is kept instead of the run
+  retrying (a smaller chunk cannot un-censor content); a reply with no
+  content at all fails loudly.
 
-## How it works
+## Improve writing
 
-1. `POST /api/v0/chat_session/create` — starts a session (new threads only).
-2. `POST /api/v0/chat/create_pow_challenge` with `{"target_path":"/api/v0/chat/completion"}`.
-3. Solves the DeepSeekHashV1 challenge by driving the vendored
-   `sha3_wasm_bg.wasm` (`wasm_solve(retptr, challenge, clen, prefix, plen, difficulty)`)
-   with the wasm-bindgen shadow-stack convention the website's JS wrapper
-   uses, and base64-encodes `{algorithm, challenge, salt, answer, signature,
-   target_path}` into the `x-ds-pow-response` header.
-4. `POST /api/v0/chat/completion` with the site headers, streaming the SSE
-   json-patch frames: the snapshot frame (`fragments[].type == "response"`),
-   append/SET/BATCH patches on `response/fragments/-1/content`, and bare
-   pathless `{"v":...}` chunks (which can carry the reply's very first
-   characters) — all reconstructed in arrival order without trimming, so no
-   leading text is lost. Fragments are tracked by type: content belonging to
-   THINK/SEARCH fragments is never rendered as answer text, so `--thinking`
-   mode cannot leak reasoning into the reply (or drop the answer's opening
-   token after it). `message_id` becomes the next turn's `parent_message_id`.
-
-Credentials are sent as `authorization: Bearer <token>` plus the `ds_session_id`
-cookie, with the site's `x-app-version` / `x-client-version` /
-`x-client-platform` / `x-client-bundle-id` headers and origin/referer.
-
-The PoW challenge is short-lived, so a failed completion (transport hiccup,
-HTTP 401/403/429) automatically re-solves a fresh challenge once.
-
-## Config
+`dscli improve-writing` polishes an already written file **in place** — it runs
+`translate`'s same engine (adaptive chunking, structural-line protection, format
+awareness) but with a writing-improvement prompt that fixes grammar, flow and
+clarity without changing meaning, tone or language. It is meant for files you
+have already translated (or drafted) and want to read better.
 
 ```bash
-dscli config path        # e.g. ~/.config/dscli/dscli.json
-dscli config init
-dscli config set token <token>
-dscli config unset token
-dscli --config-file /path/to/dscli.json config set token <token>
+dscli improve-writing -i notes.translated.md   # → notes.translated.md (rewritten)
+dscli improve-writing -i song.lrc               # LRC timestamps preserved
+dscli improve-writing -i movie.srt              # SRT timing lines preserved
+dscli improve-writing -i sub.ass               # ASS dialogue fields preserved
 ```
 
-The `session` key holds the persisted default conversation position
-(`<session_id>:<message_id>`, set automatically on every persisted turn;
-`dscli session forget` clears it and the next run starts a fresh thread).
+- **`--in-place`/`-i` is required.** improve-writing rewrites the original file
+  (there is no separate output path); the previous content is replaced, so keep
+a backup if you want one. EPUB is not supported in place — `Load` returns
+extracted text, which cannot be written back as a binary epub; improve the
+extracted `.txt` instead.
+- The same flags as `translate` apply: `--chunk-bytes`, `--model`/`-m`,
+  `--thinking`/`-t`, `--parallel`/`-p`, `--persist`, `--timeout`, and
+  `--instructions` / `--glossary` for per-run guidance. Improvement instructions
+  are read from `improve-writing/default.md` (`./improve-writing/`, then
+  `~/.config/dscli/improve-writing/`) or the built-in general style.
 
-A `dscli.json` in the current directory takes precedence over the per-user
-config file (a warning is printed when that happens implicitly), and
-`DSCLI_CONFIG_FILE` overrides both. The config is written atomically with
-0600 permissions.
+## Summarize
 
-## Development
+`dscli summarize` condenses a file into a summary, printed to stdout (or saved
+with `-o`). It runs on `translate`'s engine — adaptive chunking, style files,
+EPUB extraction — but each chunk is *summarized* instead of translated, and when
+the file needed more than one chunk the per-chunk summaries are combined into
+one final summary in a last pass.
 
 ```bash
-npm install
-npm run build        # tsc + copy the vendored wasm into dist/
-npm test             # node --test via tsx: 100+ tests, no network needed
-
-npm link             # run the local build as `dscli`
+dscli summarize book.epub                 # → summary on stdout
+dscli summarize chapter-012.translated.en.md
+dscli summarize notes.md -o notes.summary.md
+dscli summarize movie.srt                  # dialogue summarized, timings read not preserved
 ```
 
-The PoW solver tests run DeepSeek's actual wasm against a known golden
-challenge (answer 999, exact header), so no network or login is needed.
-
-## Notes
-
-- **PoW internals.** DeepSeekHashV1 turns out to be a Keccak variant: SHA3-style
-  `0x06` domain padding, Keccak-f[1600] with rounds 1..23, over
-  `salt_expireAt_<nonce>`; the challenge is the expected digest, `difficulty`
-  bounds the nonce search. This repo does not reimplement it (the vendored wasm
-  is the authority) — the variant knowledge is only used to generate offline
-  test vectors.
-- Project structure follows [pi](https://github.com/earendil-works/pi-mono)
-  (`@earendil-works/pi-coding-agent`): `src/cli` argument parsing and command
-  dispatch, `src/config.ts` as the single source for app identity and paths,
-  `src/core/<domain>` for the engine modules, and `src/modes/interactive` for
-  the terminal UI.
+- The summary goes to stdout by default; `-o` writes it to a file (never
+  overwritten without `-f`), and `-p` summarizes several files concurrently
+  (summaries print as they finish, so they may interleave).
+- Structural verification is intentionally **skipped**: a summary never
+  reproduces timestamps or markup, it only reads them. Subtitle/lyric formats
+  work — the model reads the cues and summarizes the dialogue.
+- The same flags as `translate` apply: `--chunk-bytes`, `--model`/`-m`,
+  `--thinking`/`-t`, `--persist`, `--timeout`, and `--instructions`.
+  Summarization instructions are read from `summarize/default.md`
+  (`./summarize/`, then `~/.config/dscli/summarize/`) or the built-in style.
