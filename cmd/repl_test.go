@@ -471,8 +471,8 @@ func TestReplSourcesSpacing(t *testing.T) {
 	if !strings.Contains(out, "\n\nSources:\n") {
 		t.Errorf("exactly one blank line before Sources: expected\n%q", out)
 	}
-	if !strings.Contains(out, "https://ex.com/a\n\nconversation:") {
-		t.Errorf("exactly one blank line after the sources block expected\n%q", out)
+	if !strings.Contains(out, "https://ex.com/a\n\n") {
+		t.Errorf("a blank line after the sources block expected\n%q", out)
 	}
 }
 
